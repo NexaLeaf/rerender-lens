@@ -92,10 +92,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/palanisamy-muthusamy/rerender-lens.git"
+    "url": "git+https://github.com/NexaLeaf/rerender-lens.git"
   },
-  "homepage": "https://github.com/palanisamy-muthusamy/rerender-lens#readme",
+  "homepage": "https://github.com/NexaLeaf/rerender-lens#readme",
   "bugs": {
-    "url": "https://github.com/palanisamy-muthusamy/rerender-lens/issues"
+    "url": "https://github.com/NexaLeaf/rerender-lens/issues"
   }
 }
