@@ -5,11 +5,13 @@ export type {
   HookChange,
   Notifier,
   Options,
+  ParentInfo,
   RenderReport,
   RenderTrigger,
 } from './types';
 export { MARKER } from './types';
-export { init, configure, disable, isEnabled, track, resolveType, getDisplayName } from './tracker';
+export { init, configure, disable, isEnabled, track, getDisplayName, shouldTrack } from './tracker';
+export { ensureDevtoolsHook } from './fiber';
 export { useWhyRerender } from './hook';
 export { deepEqual, diffRecords, classify } from './diff';
 export { buildReport, summarize, printReport } from './report';

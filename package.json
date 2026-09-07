@@ -1,7 +1,7 @@
 {
   "name": "rerender-lens",
   "version": "0.1.0",
-  "description": "Find avoidable React re-renders. Structured reports, test assertions, and a hook. A modern alternative to why-did-you-render.",
+  "description": "Find avoidable React re-renders and what caused them. Reads the fiber tree like React DevTools, so nothing is patched: works with Fast Refresh, memo, forwardRef and classes. Structured reports, test assertions, and a DevTools bridge.",
   "keywords": [
     "react",
     "rerender",
@@ -30,26 +30,6 @@
         "default": "./dist/index.cjs"
       }
     },
-    "./jsx-runtime": {
-      "import": {
-        "types": "./dist/jsx-runtime.d.ts",
-        "default": "./dist/jsx-runtime.js"
-      },
-      "require": {
-        "types": "./dist/jsx-runtime.d.cts",
-        "default": "./dist/jsx-runtime.cjs"
-      }
-    },
-    "./jsx-dev-runtime": {
-      "import": {
-        "types": "./dist/jsx-dev-runtime.d.ts",
-        "default": "./dist/jsx-dev-runtime.js"
-      },
-      "require": {
-        "types": "./dist/jsx-dev-runtime.d.cts",
-        "default": "./dist/jsx-dev-runtime.cjs"
-      }
-    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -65,7 +45,8 @@
     "test:watch": "vitest",
     "lint:pkg": "publint && attw --pack . --profile node16",
     "check": "npm run typecheck && npm test && npm run build && npm run lint:pkg",
-    "prepublishOnly": "npm run check"
+    "prepublishOnly": "npm run check",
+    "dev:example": "npm run build && npm --prefix examples/vite-react run dev"
   },
   "peerDependencies": {
     "react": ">=16.8.0"

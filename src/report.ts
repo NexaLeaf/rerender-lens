@@ -1,16 +1,21 @@
-import type { Change, HookChange, Options, RenderReport, RenderTrigger } from './types';
+import type { Change, HookChange, Options, ParentInfo, RenderReport, RenderTrigger } from './types';
 
 const now = (): number =>
   typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
 
 export interface BuildInput {
   component: string;
+  instanceId?: number;
   renderCount: number;
   prevProps: Record<string, unknown>;
   nextProps: Record<string, unknown>;
   propChanges: Change[];
   stateChanges?: Change[];
   hookChanges?: HookChange[];
+  parent?: ParentInfo | null;
+  owner?: string | null;
+  path?: string[];
+  selfDuration?: number;
 }
 
 const isGenuine = (c: Change): boolean => c.kind === 'different' || c.kind === 'added' || c.kind === 'removed';
@@ -65,9 +70,10 @@ export function buildReport(input: BuildInput): RenderReport {
   const reasons: string[] = [];
 
   if (avoidable && input.propChanges.length === 0 && stateChanges.length === 0 && hookChanges.length === 0) {
-    reasons.push(
-      `re-rendered with identical props because its parent re-rendered. Wrap "${input.component}" in React.memo (or extend PureComponent).`,
-    );
+    const who = input.parent ? `<${input.parent.name}> re-rendered (${describeTrigger(input.parent.trigger)})` : 'its parent re-rendered';
+    reasons.push(`re-rendered with identical props because ${who}. Wrap "${input.component}" in React.memo (or extend PureComponent).`);
+  } else if (avoidable && input.parent) {
+    reasons.push(`caused by <${input.parent.name}> re-rendering (${describeTrigger(input.parent.trigger)}).`);
   }
   for (const c of input.propChanges) {
     const fix = fixFor(c);
@@ -84,8 +90,9 @@ export function buildReport(input: BuildInput): RenderReport {
     else reasons.push(`${c.hook} #${c.index} returned a new reference that is deep-equal to the previous value: memoize the context/store value where it is produced.`);
   }
 
-  return {
+  const report: RenderReport = {
     component: input.component,
+    instanceId: input.instanceId ?? 0,
     renderCount: input.renderCount,
     trigger,
     avoidable,
@@ -93,9 +100,29 @@ export function buildReport(input: BuildInput): RenderReport {
     propChanges: input.propChanges,
     stateChanges,
     hookChanges,
+    parent: input.parent ?? null,
+    owner: input.owner ?? null,
+    path: input.path ?? [],
     reasons,
     time: now(),
   };
+  if (input.selfDuration !== undefined) report.selfDuration = input.selfDuration;
+  return report;
+}
+
+function describeTrigger(t: RenderTrigger): string {
+  switch (t) {
+    case 'props':
+      return 'its props changed';
+    case 'state':
+      return 'its state changed';
+    case 'hooks':
+      return 'a context or store it reads changed';
+    case 'mixed':
+      return 'its props and state changed';
+    default:
+      return 'its own parent re-rendered';
+  }
 }
 
 const KIND_LABEL: Record<Change['kind'], string> = {
@@ -124,6 +151,7 @@ export function printReport(report: RenderReport, options: Options): void {
   const verdict = report.avoidable ? 'avoidable re-render' : `re-render (${report.trigger})`;
   open.call(c, `[rerender-lens] <${report.component}> ${verdict}: ${summarize(report)}`);
   for (const r of report.reasons) c.log(`- ${r}`);
+  if (report.path.length) c.log(`at ${[...report.path, report.component].join(' > ')}`);
   for (const ch of [...report.propChanges, ...report.stateChanges, ...report.hookChanges]) {
     c.log(`${ch.path} (${KIND_LABEL[ch.kind]})`, { prev: ch.prev, next: ch.next });
   }

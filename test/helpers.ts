@@ -42,10 +42,8 @@ export function silentConsole() {
 export function setup(options: Options = {}) {
   const collector = createCollector();
   const con = silentConsole();
-  init(React, { notifier: collector.notifier, console: con.console, ...options });
+  init({ notifier: collector.notifier, console: con.console, ...options });
   return { collector, calls: con.calls, teardown: disable };
 }
 
-// Resolve at call time so the patched createElement is used after init().
-export const h: typeof React.createElement = ((...args: Parameters<typeof React.createElement>) =>
-  (React.createElement as (...a: unknown[]) => React.ReactElement)(...args)) as typeof React.createElement;
+export const h = React.createElement;

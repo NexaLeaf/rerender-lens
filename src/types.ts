@@ -1,5 +1,3 @@
-import type * as ReactNS from 'react';
-
 /** Why a single prop/state/hook value differs between two renders. */
 export type ChangeKind =
   /** New reference, but deep-equal to the previous value. Avoidable. */
@@ -37,16 +35,25 @@ export type RenderTrigger =
   | 'mixed';
 
 export interface HookChange extends Change {
-  /** `useState`, `useReducer`, `useContext`, ... */
+  /** `useState`, `useReducer`, `useContext`, `useSyncExternalStore`, or `state` when the exact hook is unknown. */
   hook: string;
   /** Position of the hook in call order (0-based). */
   index: number;
 }
 
+export interface ParentInfo {
+  /** Display name of the nearest ancestor component that also rendered in this commit. */
+  name: string;
+  /** Why that ancestor rendered. */
+  trigger: RenderTrigger;
+}
+
 export interface RenderReport {
   /** Display name of the tracked component. */
   component: string;
-  /** Monotonic per-component render count (1 = first update, mount is never reported). */
+  /** Stable id of this component instance (fiber) across its lifetime. */
+  instanceId: number;
+  /** Monotonic per-instance update count (1 = first update; mount is never reported). */
   renderCount: number;
   trigger: RenderTrigger;
   /** True when the re-render produced no genuine change in props, state, or hooks. */
@@ -55,8 +62,16 @@ export interface RenderReport {
   propChanges: Change[];
   /** Class components only. */
   stateChanges: Change[];
-  /** Function components only, when `trackHooks` is on. */
+  /** Function components: state hooks and contexts that changed. */
   hookChanges: HookChange[];
+  /** Nearest ancestor that rendered in the same commit, or null when the update started here. */
+  parent: ParentInfo | null;
+  /** Component that created this element (dev builds only). */
+  owner: string | null;
+  /** Component ancestry from the root down to this component, display names only. */
+  path: string[];
+  /** Render time of this component in ms, when React exposes it (dev/profiling builds). */
+  selfDuration?: number;
   /** Human-readable explanations and suggested fixes. */
   reasons: string[];
   /** `performance.now()` (or `Date.now()`) when the report was produced. */
@@ -76,7 +91,7 @@ export interface Options {
   include?: ComponentMatcher[];
   /** Components never to track, even when marked. */
   exclude?: ComponentMatcher[];
-  /** Capture `useState`/`useReducer`/`useContext` values and diff them. Default true. */
+  /** Diff hook state and contexts of function components. Default true. */
   trackHooks?: boolean;
   /** Report re-renders caused by genuine changes too, not only avoidable ones. Default false. */
   logAll?: boolean;
@@ -88,14 +103,11 @@ export interface Options {
   collapse?: boolean;
   /** Console-like sink used for printing. Default `console`. */
   console?: Pick<Console, 'log' | 'group' | 'groupCollapsed' | 'groupEnd' | 'warn'>;
+  /** Skip commits caused by Fast Refresh / hot module replacement. Default true. */
+  ignoreHotReload?: boolean;
+  /** Stop printing a component after this many reports (0 = unlimited). The notifier still receives them. Default 0. */
+  maxReportsPerComponent?: number;
 }
-
-/**
- * The React object to patch. Structural so that both `import React from 'react'`
- * and `import * as React from 'react'` type-check.
- */
-export type ReactLike = Pick<typeof ReactNS, 'createElement' | 'memo' | 'forwardRef' | 'useRef'> &
-  Partial<Pick<typeof ReactNS, 'useState' | 'useReducer' | 'useContext' | 'useSyncExternalStore'>>;
 
 /** Marker static: `MyComponent.rerenderLens = true` opts a component in. */
 export const MARKER = 'rerenderLens' as const;
