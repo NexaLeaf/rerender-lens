@@ -18,6 +18,7 @@ React re-render debugger. See README.md for the public API.
 - `src/tracker.ts` — `init`/`configure`/`disable`, `shouldTrack`, `getDisplayName`, `track`.
 - `src/hook.ts` — `useWhyRerender`. `src/notifiers.ts` — collector. `src/devtools.ts` — postMessage bridge.
 - `examples/vite-react` — dogfood app (links the library via `file:../..`, so `npm run build` first).
+- `extension/` — Chrome MV3 DevTools panel, plain JS, no build. `panel.js` exposes `RerenderLensPanel.createPanel(root, transport)`; `panel.html?demo` runs it with sample data; `extension/test/panel.test.ts` drives it in jsdom.
 
 ## Design decisions
 
