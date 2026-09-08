@@ -124,6 +124,8 @@ export function ensureDevtoolsHook(): DevtoolsHook {
 const capturedRenderers = new Map<number, RendererInfo>();
 const dispatcherRefs = new Map<number, DispatcherRef>();
 const INJECT_WRAPPED = Symbol.for('rerender-lens.injectWrapped');
+/** Set on the hook while a copy of the library is attached, so a second copy (another bundle) does not report every commit twice. */
+const ATTACHED = Symbol.for('rerender-lens.attached');
 
 function pickRenderer(r: unknown): RendererInfo {
   const info = (r ?? {}) as RendererInfo;
@@ -162,8 +164,10 @@ export function getDispatcherRef(): DispatcherRef | null {
 
 /** Start observing commits. Returns a function that stops observing. */
 export function attach(): () => void {
-  const hook = ensureDevtoolsHook();
+  const hook = ensureDevtoolsHook() as DevtoolsHook & { [ATTACHED]?: boolean };
   wrapInject(hook);
+  if (hook[ATTACHED]) return () => {};
+  hook[ATTACHED] = true;
   const previous = hook.onCommitFiberRoot;
   const patched: DevtoolsHook['onCommitFiberRoot'] = function (this: unknown, id, root, priority, didError) {
     const started = nowMs();
@@ -188,6 +192,7 @@ export function attach(): () => void {
   };
   hook.onScheduleFiberRoot = patchedSchedule;
   return () => {
+    hook[ATTACHED] = false;
     if (hook.onCommitFiberRoot === patched) hook.onCommitFiberRoot = previous;
     if (hook.onScheduleFiberRoot === patchedSchedule) hook.onScheduleFiberRoot = previousSchedule;
   };

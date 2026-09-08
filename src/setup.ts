@@ -9,18 +9,22 @@
 import { init } from './tracker';
 import { createDevtoolsNotifier } from './devtools';
 
-declare const process: { env?: { NODE_ENV?: string } } | undefined;
+declare const process: { env?: { NODE_ENV?: string; RERENDER_LENS_RELAY?: string; NEXT_PUBLIC_RERENDER_LENS_RELAY?: string } } | undefined;
 
-const isProduction = (): boolean => {
+const env = (key: 'NODE_ENV' | 'RERENDER_LENS_RELAY' | 'NEXT_PUBLIC_RERENDER_LENS_RELAY'): string | undefined => {
   try {
-    return typeof process !== 'undefined' && !!process && !!process.env && process.env.NODE_ENV === 'production';
+    return typeof process !== 'undefined' && process && process.env ? process.env[key] : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 };
 
-if (!isProduction() && typeof window !== 'undefined' && !window.__RERENDER_LENS_DEVTOOLS__) {
-  init({ trackAllMemoized: true, notifier: createDevtoolsNotifier() });
+if (env('NODE_ENV') !== 'production' && typeof window !== 'undefined' && !window.__RERENDER_LENS_DEVTOOLS__) {
+  // `npx rerender-lens panel` prints the relay URL; put it in RERENDER_LENS_RELAY (or the NEXT_PUBLIC_
+  // variant for Next.js) to reach the panel from any app. `createDevtoolsNotifier` also honours
+  // `window.__RERENDER_LENS_RELAY__` set before the app loads.
+  const relay = env('RERENDER_LENS_RELAY') || env('NEXT_PUBLIC_RERENDER_LENS_RELAY');
+  init({ trackAllMemoized: true, notifier: createDevtoolsNotifier(relay ? { relay } : {}) });
 }
 
 export {};

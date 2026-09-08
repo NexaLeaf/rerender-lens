@@ -119,6 +119,25 @@ entry: ['rerender-lens/setup', './src/index.tsx'],
 `process.env.NODE_ENV === 'production'` or the page already runs the library. Use `configure()`
 afterwards to change options, or the extension's Settings.
 
+**The panel for any app, no extension, no Vite** (Next.js, Webpack, a remote dev box, a phone):
+
+```sh
+npx rerender-lens panel          # http://127.0.0.1:4141/ serves the panel and relays messages
+```
+
+Point the app at it and open the printed URL in any browser:
+
+```ts
+init({ trackAllMemoized: true, notifier: createDevtoolsNotifier({ relay: 'http://127.0.0.1:4141' }) });
+// or, with rerender-lens/setup: RERENDER_LENS_RELAY=http://127.0.0.1:4141 (NEXT_PUBLIC_RERENDER_LENS_RELAY for Next.js)
+// or, before the app loads: window.__RERENDER_LENS_RELAY__ = 'http://127.0.0.1:4141'
+```
+
+The app streams commands in over server-sent events and posts hello, reports and replies back; the
+panel connects the same way (`panel.html?relay=…`), so Settings, highlight and replay all work.
+Several apps or panels can share one relay; the panel re-attaches when an app reloads.
+`--port` and `--host` change where it listens (`--host 0.0.0.0` for another machine).
+
 ## Setup
 
 ```ts
@@ -230,6 +249,50 @@ test('typing in the search box does not re-render the grid rows', async () => {
 In Vitest or Jest, call `ensureDevtoolsHook()` (or `init`) from a `setupFiles` entry so the hook
 exists before `react-dom` is imported by your tests.
 
+### Vitest, whole suite
+
+Two config lines collect every avoidable re-render across the run and print the ranked fixes at
+the end; a budget file turns it into a gate:
+
+```ts
+// vitest.config.ts
+test: {
+  setupFiles: ['rerender-lens/vitest/setup'],
+  reporters: ['default', ['rerender-lens/vitest', { budget: 'rerender-budget.json', exportTo: 'rerender-lens.json' }]],
+}
+```
+
+The setup entry starts the library (all memoized components, silent) in every test file and hands
+the file's reports to the reporter; the reporter prints `rerender-lens: N reports, M avoidable`
+with the fixes, fails the run on budget violations, and can write a panel-compatible export
+(`Sessions > Import` in the extension). For other options, or per-test assertions, write your own
+setup file:
+
+```ts
+import { afterAll } from 'vitest';
+import { setupRerenderLens } from 'rerender-lens/vitest';
+export const lens = setupRerenderLens({ include: [/^Grid/], failFast: true }, { afterAll });
+// lens.collector.assertNoAvoidable() inside a test
+```
+
+### Playwright, real browser
+
+```ts
+import { installRerenderLens, pullReports, expectWithinBudget } from 'rerender-lens/playwright';
+
+test('search does not re-render the grid', async ({ page }) => {
+  await installRerenderLens(page, { include: ['ProductRow'] }); // before goto: runs before React
+  await page.goto('/products');
+  await page.getByRole('searchbox').fill('abc');
+  expectWithinBudget(await pullReports(page), { '*': 0 });     // throws with the ranked fixes
+});
+```
+
+`installRerenderLens` injects the same bundle the extension uses at document start, so it works on
+any build the browser can load (production builds are flagged; names may be minified). Pass
+`relay: 'http://127.0.0.1:4141'` to watch the run in the panel, `clearReports(page)` between
+scenarios.
+
 ### Budgets and comparisons in CI
 
 ```ts
@@ -248,6 +311,7 @@ npx rerender-lens summary export.json --out before.json
 npx rerender-lens compare before.json after.json    # per-component deltas; exit 1 on regressions
 npx rerender-lens budget export.json --init > rerender-budget.json
 npx rerender-lens budget export.json rerender-budget.json   # exit 1 when a component exceeds its budget
+npx rerender-lens panel [--port 4141] [--host 127.0.0.1]     # the panel + relay for any app (see above)
 ```
 
 ## Track a single component from the inside
@@ -304,13 +368,16 @@ track(component, name?): component
 ensureDevtoolsHook(): hook              // create the global hook early (test setup files)
 // 'rerender-lens/vite': rerenderLens(options), renderSetupModule(options)
 // 'rerender-lens/setup': side-effect entry (init with defaults outside production)
+// 'rerender-lens/relay': createRelayServer({ port?, host? }) — what `rerender-lens panel` runs
+// 'rerender-lens/playwright': installRerenderLens(page, options?), pullReports(page), clearReports(page), expectWithinBudget(reports, budget)
+// 'rerender-lens/vitest': setupRerenderLens(options?, { afterAll }), default reporter ({ budget?, exportTo?, limit? }); 'rerender-lens/vitest/setup'
 useWhyRerender(name, values, options?)
 createCollector(): { reports, avoidable, notifier, clear, assertNoAvoidable, fixes, summary, assertWithinBudget }
 rankFixes(reports), formatFixes(reports)          // ranked fixes
 summarizeReports(reports), compareSummaries(a, b), formatComparison(c), parseExport(json)
 checkBudget(reports, budget), toBudget(reports), assertWithinBudget(reports, budget)
 combineNotifiers(...notifiers): Notifier
-createDevtoolsNotifier({ bufferSize?, target?, maxDepth?, flashAvoidable?, channel? }): Notifier
+createDevtoolsNotifier({ bufferSize?, target?, maxDepth?, flashAvoidable?, channel?, relay? }): Notifier
 getRenderers(), isProductionReact()       // what react-dom registered on the DevTools hook
 serializeOptions(o), deserializeOptions(o) // Options <-> JSON-safe form used by the bridge
 VERSION

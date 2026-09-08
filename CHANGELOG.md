@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- **`npx rerender-lens panel`.** A dependency-free relay (`rerender-lens/relay`) that serves the
+  panel and forwards messages between apps and panels over server-sent events and POST, so the
+  panel works for any app on any origin without the extension or Vite: Next.js, Webpack, a remote
+  dev box, a phone. `createDevtoolsNotifier({ relay })`, `window.__RERENDER_LENS_RELAY__`, or
+  `RERENDER_LENS_RELAY` / `NEXT_PUBLIC_RERENDER_LENS_RELAY` with `rerender-lens/setup`. Commands
+  (Settings, highlight, replay, clear) go back to the app; the panel re-attaches when an app
+  reloads.
+- **`rerender-lens/vitest`.** `setupFiles: ['rerender-lens/vitest/setup']` collects every test
+  file's reports; the reporter prints the run's ranked fixes, enforces a budget file, and can
+  write a panel-compatible export. `setupRerenderLens(options, { afterAll })` for custom options
+  and `failFast`.
+- **`rerender-lens/playwright`.** `installRerenderLens(page, options)` injects the library at
+  document start (the bundle now ships as `dist/rerender-lens.iife.js`); `pullReports`,
+  `clearReports`, `expectWithinBudget`.
+- A second copy of the library (another bundle on the same page) no longer wraps the hook
+  again, which doubled every report.
+
 ## 0.3.0
 
 Highlights: the panel without the extension (Vite plugin `panel: true`), the `rerender-lens/vite`

@@ -74,6 +74,8 @@ describe('vite plugin', () => {
       plugins: [rerenderLens({ trackAllComponents: true, silent: true }) as never],
       server: { middlewareMode: true, hmr: false },
       optimizeDeps: { noDiscovery: true, include: [] },
+      // Hermetic: the example links the package (whose exports point at dist/), and tests run before the build.
+      resolve: { alias: { 'rerender-lens': resolve(example, '..', '..', 'src', 'index.ts') } },
     });
     const html = await server.transformIndexHtml('/plain.html', '<!doctype html><html><head><title>t</title></head><body><script type="module" src="/src/plain.tsx"></script></body></html>');
     const first = html.indexOf(VIRTUAL_URL);

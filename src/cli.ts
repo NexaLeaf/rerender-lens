@@ -7,11 +7,13 @@
  *   rerender-lens compare <before.json> <after.json>   before/after table; exit 1 on regressions
  *   rerender-lens budget <export.json> <budget.json>   check avoidable re-renders per component; exit 1 on violations
  *   rerender-lens budget <export.json> --init          print a budget matching the export
+ *   rerender-lens panel [--port 4141] [--host 127.0.0.1]  serve the panel and relay reports from any app
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { formatFixes } from './fixes';
 import { compareSummaries, formatComparison, parseExport, summarizeReports, type SessionSummary } from './sessions';
 import { checkBudget, toBudget, type Budget } from './budget';
+import { createRelayServer } from './relay';
 
 const read = (file: string): unknown => JSON.parse(readFileSync(file, 'utf8'));
 
@@ -22,8 +24,27 @@ function summaryOf(file: string): SessionSummary {
   return summarizeReports(parsed.reports, { name: file.replace(/^.*[\\/]/, '').replace(/\.json$/, '') });
 }
 
-export function main(argv: string[]): number {
+/** `rerender-lens panel`: start the relay and keep running until it closes. */
+async function panelCommand(args: string[]): Promise<number> {
+  const flag = (name: string): string | null => {
+    const i = args.indexOf(name);
+    return i >= 0 ? (args[i + 1] ?? '') : null;
+  };
+  const relay = await createRelayServer({ port: Number(flag('--port') || 4141), host: flag('--host') || '127.0.0.1' });
+  console.log(`rerender-lens panel: ${relay.url}/`);
+  console.log(`in the app: createDevtoolsNotifier({ relay: '${relay.url}' })  or  window.__RERENDER_LENS_RELAY__ = '${relay.url}'`);
+  console.log('Ctrl+C to stop.');
+  return new Promise((resolve) => {
+    const stop = (): void => void relay.close().then(() => resolve(0));
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+    relay.server.once('close', () => resolve(0));
+  });
+}
+
+export function main(argv: string[]): number | Promise<number> {
   const [cmd, ...args] = argv;
+  if (cmd === 'panel') return panelCommand(args).catch((e: Error) => (console.error(e.message), 1));
   const flag = (name: string): string | null => {
     const i = args.indexOf(name);
     return i >= 0 ? (args[i + 1] ?? '') : null;
@@ -80,7 +101,7 @@ export function main(argv: string[]): number {
         return 1;
       }
       default:
-        console.error('usage: rerender-lens <fixes|summary|compare|budget> ...');
+        console.error('usage: rerender-lens <panel|fixes|summary|compare|budget> ...');
         return cmd ? 1 : 0;
     }
   } catch (e) {
@@ -90,4 +111,4 @@ export function main(argv: string[]): number {
 }
 
 const isMain = typeof process !== 'undefined' && Array.isArray(process.argv) && /rerender-lens(\.c?js)?$|cli\.c?js$/.test(process.argv[1] || '');
-if (isMain) process.exit(main(process.argv.slice(2)));
+if (isMain) void Promise.resolve(main(process.argv.slice(2))).then((code) => process.exit(code));

@@ -17,7 +17,9 @@
   "type": "module",
   "sideEffects": [
     "./dist/setup.js",
-    "./dist/setup.cjs"
+    "./dist/setup.cjs",
+    "./dist/vitest-setup.js",
+    "./dist/vitest-setup.cjs"
   ],
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -43,6 +45,46 @@
         "default": "./dist/vite.cjs"
       }
     },
+    "./relay": {
+      "import": {
+        "types": "./dist/relay.d.ts",
+        "default": "./dist/relay.js"
+      },
+      "require": {
+        "types": "./dist/relay.d.cts",
+        "default": "./dist/relay.cjs"
+      }
+    },
+    "./playwright": {
+      "import": {
+        "types": "./dist/playwright.d.ts",
+        "default": "./dist/playwright.js"
+      },
+      "require": {
+        "types": "./dist/playwright.d.cts",
+        "default": "./dist/playwright.cjs"
+      }
+    },
+    "./vitest": {
+      "import": {
+        "types": "./dist/vitest.d.ts",
+        "default": "./dist/vitest.js"
+      },
+      "require": {
+        "types": "./dist/vitest.d.cts",
+        "default": "./dist/vitest.cjs"
+      }
+    },
+    "./vitest/setup": {
+      "import": {
+        "types": "./dist/vitest-setup.d.ts",
+        "default": "./dist/vitest-setup.js"
+      },
+      "require": {
+        "types": "./dist/vitest-setup.d.cts",
+        "default": "./dist/vitest-setup.cjs"
+      }
+    },
     "./setup": {
       "import": {
         "types": "./dist/setup.d.ts",
@@ -66,7 +108,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node scripts/copy-panel.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -82,7 +124,8 @@
     "dev:example": "npm run build && npm --prefix examples/vite-react run dev"
   },
   "peerDependencies": {
-    "react": ">=16.8.0"
+    "react": ">=16.8.0",
+    "vitest": ">=1.0.0"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
@@ -115,5 +158,10 @@
   "homepage": "https://github.com/NexaLeaf/rerender-lens#readme",
   "bugs": {
     "url": "https://github.com/NexaLeaf/rerender-lens/issues"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
   }
 }

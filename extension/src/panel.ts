@@ -3699,6 +3699,124 @@ function createBroadcastTransport(name: string): Transport {
   return transport;
 }
 
+// ---------- boot: relay server (npx rerender-lens panel; any app, any origin) ----------
+interface EventSourceLike {
+  onmessage: ((e: { data: string }) => void) | null;
+  onerror: ((e: unknown) => void) | null;
+  close(): void;
+}
+type EventSourceCtor = new (url: string) => EventSourceLike;
+
+/** Transport over the relay: reports arrive on an SSE stream, commands go out as POSTs and are answered on the stream. */
+function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = EventSource as unknown as EventSourceCtor): Transport {
+  const base = relayUrl.replace(/\/$/, '');
+  let listener: ((m: Message) => void) | null = null;
+  let stream: EventSourceLike | null = null;
+  let appsOnline: number | null = null;
+  const pending = new Map<string, { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
+  const emit = (m: Message): void => {
+    if (listener) listener(m);
+  };
+  const post = (message: unknown): Promise<void> => fetch(`${base}/message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(message) }).then(() => undefined);
+  const bridge = <T = unknown,>(cmd: string, arg?: unknown): Promise<T | null> =>
+    new Promise((resolve, reject) => {
+      const id = Math.random().toString(36).slice(2);
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        resolve(null);
+      }, 2000);
+      pending.set(id, { resolve: (v) => (v instanceof Error ? reject(v) : resolve(v as T)), timer });
+      post({ __rerenderLensCmd: true, id, cmd, arg }).catch(() => {
+        clearTimeout(timer);
+        pending.delete(id);
+        resolve(null);
+      });
+    });
+  const handleData = (data: string): void => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      return;
+    }
+    for (const m of Array.isArray(parsed) ? parsed : [parsed]) {
+      if (!isRecord(m)) continue;
+      if (m.__rerenderLensReply === true && typeof m.id === 'string') {
+        const p = pending.get(m.id);
+        if (!p) continue;
+        pending.delete(m.id);
+        clearTimeout(p.timer);
+        p.resolve(typeof m.error === 'string' ? new Error(m.error) : m.result);
+      } else if (m.__rerenderLens === true && m.type === 'relay') {
+        const apps = isRecord(m.payload) && typeof m.payload.apps === 'number' ? m.payload.apps : 0;
+        const wasOnline = appsOnline;
+        appsOnline = apps;
+        if (apps > 0 && wasOnline !== null && wasOnline === 0) void attach();
+        else if (apps === 0) emit({ type: 'disconnected' });
+      } else if (m.__rerenderLens === true && typeof m.type === 'string') emit({ type: m.type, version: typeof m.version === 'number' ? m.version : undefined, payload: m.payload });
+    }
+  };
+  async function attach(): Promise<void> {
+    const info = await bridge<HelloPayload>('info');
+    if (!info) {
+      emit({ type: 'disconnected' });
+      return;
+    }
+    emit({ type: 'connected' });
+    emit({ type: 'hello', version: info.protocol || 1, payload: info });
+    const res = await bridge<{ reports: unknown[] }>('pull', 0);
+    if (res) for (const p of res.reports) emit({ type: 'report', payload: p });
+  }
+  const mem = (key: string): string => `rerender-lens:relay:${base}:${key}`;
+  const transport: Transport = {
+    origin: base,
+    tabLabel: `relay ${base.replace(/^https?:\/\//, '')}`,
+    panelUrl: location.origin + location.pathname,
+    subscribe(fn) {
+      listener = fn;
+      const open = (): void => {
+        stream = new ES(`${base}/events?role=panel`);
+        stream.onmessage = (e) => handleData(e.data);
+        stream.onerror = () => {
+          emit({ type: 'disconnected' });
+        };
+      };
+      open();
+      void attach();
+    },
+    replay: () => void bridge('replay'),
+    clear: () => void bridge('clear'),
+    configure: (options) => bridge<SerializableOptions>('configure', options).then((r) => r ?? undefined),
+    highlight: (id) => bridge('highlight', id).catch(() => {}),
+    flashAvoidable: (on) => bridge('flash', !!on).catch(() => {}),
+    storage: {
+      get: (key) => {
+        try {
+          const raw = localStorage.getItem(mem(key));
+          return raw ? JSON.parse(raw) : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+      set: (key, value) => {
+        try {
+          localStorage.setItem(mem(key), JSON.stringify(value));
+        } catch {
+          /* quota or private mode */
+        }
+      },
+    },
+    readSource: (url) => fetch(url).then((res) => (res.ok ? res.text() : null)).catch(() => null),
+    copy: (text) => navigator.clipboard.writeText(text).catch(() => {}),
+  };
+  return transport;
+}
+
+function bootRelay(relayUrl: string): Panel {
+  const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
+  return createPanel(document.getElementById('root')!, createRelayClientTransport(relayUrl), { theme: prefersDark ? 'dark' : 'light' });
+}
+
 function bootBroadcast(name: string): Panel {
   const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
   return createPanel(document.getElementById('root')!, createBroadcastTransport(name), { theme: prefersDark ? 'dark' : 'light' });
@@ -3774,8 +3892,10 @@ const api = {
   floodReports,
   bootStandalone,
   bootBroadcast,
+  bootRelay,
   createRelayTransport,
   createBroadcastTransport,
+  createRelayClientTransport,
   encodeShare,
   decodeShare,
   sourceContext,
@@ -3788,6 +3908,7 @@ const hasDevtools = hasChrome && !!chrome.devtools && !!chrome.devtools.inspecte
 const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
 const pathname = typeof location !== 'undefined' ? String(location.pathname) : '';
 if (params.has('report')) void bootShared(params.get('report') || '');
+else if (params.has('relay') && typeof EventSource === 'function') bootRelay(params.get('relay') || location.origin);
 else if (params.has('channel') && typeof BroadcastChannel === 'function') bootBroadcast(params.get('channel') || 'rerender-lens');
 else if (hasDevtools && /panel\.html/.test(pathname) && !params.has('tabId')) bootExtension();
 else if (hasChrome && (/sidepanel\.html/.test(pathname) || params.has('tabId'))) bootStandalone({ tabId: params.has('tabId') ? Number(params.get('tabId')) : null });

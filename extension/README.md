@@ -50,6 +50,10 @@ Outside DevTools the panel talks to the page through the background relay and
 has access to: local hosts, or a site you enabled. Below 720px wide the layout stacks the tree
 above the details and shows icon-only buttons.
 
+Without the extension at all, `npx rerender-lens panel` serves this same panel from a local relay
+and any app pointed at it (`createDevtoolsNotifier({ relay })`) shows up there; see the package
+README.
+
 ## Two ways to connect a page
 
 **1. The page runs the library** (any host the extension is enabled on):

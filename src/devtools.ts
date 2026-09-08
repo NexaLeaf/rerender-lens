@@ -63,6 +63,8 @@ declare global {
   interface Window {
     /** Set by the extension's inject script: version of the injected library. */
     __RERENDER_LENS_INJECTED__?: string;
+    /** Relay URL (`npx rerender-lens panel`) picked up by `createDevtoolsNotifier` when no `relay` option is given. */
+    __RERENDER_LENS_RELAY__?: string;
   }
 }
 
@@ -99,7 +101,22 @@ export interface DevtoolsNotifierOptions {
    * Off by default.
    */
   channel?: boolean | string;
+  /**
+   * Forward everything to a relay started with `npx rerender-lens panel` (its URL), so the panel works for
+   * any app on any origin. Also read from `window.__RERENDER_LENS_RELAY__` when set before the app loads.
+   */
+  relay?: string;
+  /** `EventSource` implementation for the relay (tests, Node). Default: the global one. */
+  eventSource?: EventSourceCtor;
 }
+
+/** The subset of `EventSource` the relay client needs. */
+export interface EventSourceLike {
+  onmessage: ((event: { data: string }) => void) | null;
+  onerror: ((event: unknown) => void) | null;
+  close(): void;
+}
+export type EventSourceCtor = new (url: string) => EventSourceLike;
 
 export interface InspectResult {
   component: string;
@@ -326,76 +343,128 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
   };
   if (typeof window !== 'undefined') window.__RERENDER_LENS_DEVTOOLS__ = bridge;
 
+  /** Answer a panel command (BroadcastChannel or relay). */
+  const runCommand = (data: ChannelCommand): ChannelReply => {
+    const reply: ChannelReply = { __rerenderLensReply: true, id: data.id };
+    try {
+      switch (data.cmd) {
+        case 'info':
+          reply.result = info();
+          break;
+        case 'pull':
+          reply.result = bridge.pull(typeof data.arg === 'number' ? data.arg : 0);
+          break;
+        case 'replay':
+          bridge.replay();
+          reply.result = true;
+          break;
+        case 'clear':
+          bridge.clear();
+          reply.result = true;
+          break;
+        case 'configure':
+          reply.result = bridge.configure((data.arg ?? {}) as SerializableOptions);
+          break;
+        case 'highlight':
+          reply.result = bridge.highlight(typeof data.arg === 'number' ? data.arg : null);
+          break;
+        case 'flash':
+          bridge.flashAvoidable(!!data.arg);
+          reply.result = true;
+          break;
+        default:
+          reply.error = `unknown command ${String((data as { cmd?: unknown }).cmd)}`;
+      }
+    } catch (e) {
+      reply.error = String((e as Error).message || e);
+    }
+    return reply;
+  };
+  const isCommand = (data: unknown): data is ChannelCommand => !!data && typeof data === 'object' && (data as ChannelCommand).__rerenderLensCmd === true && typeof (data as ChannelCommand).id === 'string';
+  const envelope = (type: DevtoolsMessage['type'], payload?: unknown): DevtoolsMessage => ({ [DEVTOOLS_MARKER]: true, version: PROTOCOL_VERSION, type, payload });
+
+  /** Extra places messages go (besides `window`): the BroadcastChannel and the relay. */
+  const sinks: ((message: DevtoolsMessage | ChannelReply) => void)[] = [];
+
   // Optional cross-tab channel: same messages as `window`, plus a command/reply pair for panels.
-  let channel: BroadcastChannel | null = null;
   if (options.channel && typeof BroadcastChannel === 'function') {
     const name = typeof options.channel === 'string' ? options.channel : DEFAULT_CHANNEL;
     try {
-      channel = new BroadcastChannel(name);
+      const channel = new BroadcastChannel(name);
       channel.onmessage = (event: MessageEvent) => {
-        const data = event.data as ChannelCommand | null;
-        if (!data || data.__rerenderLensCmd !== true || typeof data.id !== 'string') return;
-        const reply: ChannelReply = { __rerenderLensReply: true, id: data.id };
-        try {
-          switch (data.cmd) {
-            case 'info':
-              reply.result = info();
-              break;
-            case 'pull':
-              reply.result = bridge.pull(typeof data.arg === 'number' ? data.arg : 0);
-              break;
-            case 'replay':
-              bridge.replay();
-              reply.result = true;
-              break;
-            case 'clear':
-              bridge.clear();
-              reply.result = true;
-              break;
-            case 'configure':
-              reply.result = bridge.configure((data.arg ?? {}) as SerializableOptions);
-              break;
-            case 'highlight':
-              reply.result = bridge.highlight(typeof data.arg === 'number' ? data.arg : null);
-              break;
-            case 'flash':
-              bridge.flashAvoidable(!!data.arg);
-              reply.result = true;
-              break;
-            default:
-              reply.error = `unknown command ${String((data as { cmd?: unknown }).cmd)}`;
-          }
-        } catch (e) {
-          reply.error = String((e as Error).message || e);
-        }
-        channel?.postMessage(reply);
+        if (isCommand(event.data)) channel.postMessage(runCommand(event.data));
       };
+      sinks.push((message) => {
+        try {
+          channel.postMessage(message);
+        } catch {
+          /* payload not cloneable; the window path already carried it */
+        }
+      });
     } catch {
-      channel = null;
+      /* no channel */
     }
   }
+
+  // Optional relay (`npx rerender-lens panel`): SSE for commands in, batched POSTs for everything out.
+  const relayUrl = options.relay ?? (typeof window !== 'undefined' ? window.__RERENDER_LENS_RELAY__ : undefined);
+  const ES = options.eventSource ?? (typeof EventSource === 'function' ? (EventSource as unknown as EventSourceCtor) : null);
+  if (relayUrl && ES && typeof fetch === 'function') {
+    const base = relayUrl.replace(/\/$/, '');
+    let queue: unknown[] = [];
+    let scheduled = false;
+    const flush = (): void => {
+      scheduled = false;
+      const batch = queue;
+      queue = [];
+      fetch(`${base}/message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(batch), keepalive: true }).catch(() => {});
+    };
+    const relaySend = (message: unknown): void => {
+      queue.push(message);
+      if (!scheduled) {
+        scheduled = true;
+        setTimeout(flush, 0);
+      }
+    };
+    try {
+      const stream = new ES(`${base}/events?role=app`);
+      stream.onmessage = (event) => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        for (const m of Array.isArray(parsed) ? parsed : [parsed]) if (isCommand(m)) relaySend(runCommand(m));
+      };
+      stream.onerror = () => {};
+      sinks.push(relaySend);
+    } catch {
+      /* no relay */
+    }
+  }
+
   const postAll = (type: DevtoolsMessage['type'], payload?: unknown): void => {
     post(type, payload);
-    if (channel) {
-      try {
-        channel.postMessage({ [DEVTOOLS_MARKER]: true, version: PROTOCOL_VERSION, type, payload } as DevtoolsMessage);
-      } catch {
-        /* payload not cloneable; the window path already carried it */
-      }
+    if (sinks.length) {
+      const message = envelope(type, payload);
+      for (const sink of sinks) sink(message);
     }
   };
-  if (channel) {
-    // Route replay/clear through the channel too, so a channel panel sees them.
+  if (sinks.length) {
+    // Route replay/clear through the sinks too, so channel and relay panels see them.
     const replay = bridge.replay;
     const clear = bridge.clear;
     bridge.replay = () => {
-      channel?.postMessage({ [DEVTOOLS_MARKER]: true, version: PROTOCOL_VERSION, type: 'hello', payload: info() } as DevtoolsMessage);
-      for (const e of buffer) channel?.postMessage({ [DEVTOOLS_MARKER]: true, version: PROTOCOL_VERSION, type: 'report', payload: e.payload } as DevtoolsMessage);
+      for (const sink of sinks) {
+        sink(envelope('hello', info()));
+        for (const e of buffer) sink(envelope('report', e.payload));
+      }
       replay();
     };
     bridge.clear = () => {
       clear();
-      channel?.postMessage({ [DEVTOOLS_MARKER]: true, version: PROTOCOL_VERSION, type: 'clear' } as DevtoolsMessage);
+      for (const sink of sinks) sink(envelope('clear'));
     };
   }
   postAll('hello', info());

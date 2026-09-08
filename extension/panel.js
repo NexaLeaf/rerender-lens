@@ -3118,6 +3118,114 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     };
     return transport;
   }
+  function createRelayClientTransport(relayUrl, ES = EventSource) {
+    const base = relayUrl.replace(/\/$/, "");
+    let listener = null;
+    let stream = null;
+    let appsOnline = null;
+    const pending = /* @__PURE__ */ new Map();
+    const emit = (m) => {
+      if (listener) listener(m);
+    };
+    const post = (message) => fetch(`${base}/message`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(message) }).then(() => void 0);
+    const bridge = (cmd, arg) => new Promise((resolve, reject) => {
+      const id = Math.random().toString(36).slice(2);
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        resolve(null);
+      }, 2e3);
+      pending.set(id, { resolve: (v) => v instanceof Error ? reject(v) : resolve(v), timer });
+      post({ __rerenderLensCmd: true, id, cmd, arg }).catch(() => {
+        clearTimeout(timer);
+        pending.delete(id);
+        resolve(null);
+      });
+    });
+    const handleData = (data) => {
+      let parsed;
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        return;
+      }
+      for (const m of Array.isArray(parsed) ? parsed : [parsed]) {
+        if (!isRecord(m)) continue;
+        if (m.__rerenderLensReply === true && typeof m.id === "string") {
+          const p = pending.get(m.id);
+          if (!p) continue;
+          pending.delete(m.id);
+          clearTimeout(p.timer);
+          p.resolve(typeof m.error === "string" ? new Error(m.error) : m.result);
+        } else if (m.__rerenderLens === true && m.type === "relay") {
+          const apps = isRecord(m.payload) && typeof m.payload.apps === "number" ? m.payload.apps : 0;
+          const wasOnline = appsOnline;
+          appsOnline = apps;
+          if (apps > 0 && wasOnline !== null && wasOnline === 0) void attach();
+          else if (apps === 0) emit({ type: "disconnected" });
+        } else if (m.__rerenderLens === true && typeof m.type === "string") emit({ type: m.type, version: typeof m.version === "number" ? m.version : void 0, payload: m.payload });
+      }
+    };
+    async function attach() {
+      const info = await bridge("info");
+      if (!info) {
+        emit({ type: "disconnected" });
+        return;
+      }
+      emit({ type: "connected" });
+      emit({ type: "hello", version: info.protocol || 1, payload: info });
+      const res = await bridge("pull", 0);
+      if (res) for (const p of res.reports) emit({ type: "report", payload: p });
+    }
+    const mem = (key) => `rerender-lens:relay:${base}:${key}`;
+    const transport = {
+      origin: base,
+      tabLabel: `relay ${base.replace(/^https?:\/\//, "")}`,
+      panelUrl: location.origin + location.pathname,
+      subscribe(fn) {
+        listener = fn;
+        const open = () => {
+          stream = new ES(`${base}/events?role=panel`);
+          stream.onmessage = (e) => handleData(e.data);
+          stream.onerror = () => {
+            emit({ type: "disconnected" });
+          };
+        };
+        open();
+        void attach();
+      },
+      replay: () => void bridge("replay"),
+      clear: () => void bridge("clear"),
+      configure: (options) => bridge("configure", options).then((r) => r ?? void 0),
+      highlight: (id) => bridge("highlight", id).catch(() => {
+      }),
+      flashAvoidable: (on) => bridge("flash", !!on).catch(() => {
+      }),
+      storage: {
+        get: (key) => {
+          try {
+            const raw = localStorage.getItem(mem(key));
+            return raw ? JSON.parse(raw) : void 0;
+          } catch {
+            return void 0;
+          }
+        },
+        set: (key, value) => {
+          try {
+            localStorage.setItem(mem(key), JSON.stringify(value));
+          } catch {
+          }
+        }
+      },
+      readSource: (url) => fetch(url).then((res) => res.ok ? res.text() : null).catch(() => null),
+      copy: (text) => navigator.clipboard.writeText(text).catch(() => {
+      })
+    };
+    return transport;
+  }
+  function bootRelay(relayUrl) {
+    const prefersDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
+    return createPanel(document.getElementById("root"), createRelayClientTransport(relayUrl), { theme: prefersDark ? "dark" : "light" });
+  }
   function bootBroadcast(name) {
     const prefersDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
     return createPanel(document.getElementById("root"), createBroadcastTransport(name), { theme: prefersDark ? "dark" : "light" });
@@ -3194,8 +3302,10 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     floodReports,
     bootStandalone,
     bootBroadcast,
+    bootRelay,
     createRelayTransport,
     createBroadcastTransport,
+    createRelayClientTransport,
     encodeShare,
     decodeShare,
     sourceContext,
@@ -3207,6 +3317,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
   var params = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
   var pathname = typeof location !== "undefined" ? String(location.pathname) : "";
   if (params.has("report")) void bootShared(params.get("report") || "");
+  else if (params.has("relay") && typeof EventSource === "function") bootRelay(params.get("relay") || location.origin);
   else if (params.has("channel") && typeof BroadcastChannel === "function") bootBroadcast(params.get("channel") || "rerender-lens");
   else if (hasDevtools && /panel\.html/.test(pathname) && !params.has("tabId")) bootExtension();
   else if (hasChrome && (/sidepanel\.html/.test(pathname) || params.has("tabId"))) bootStandalone({ tabId: params.has("tabId") ? Number(params.get("tabId")) : null });
