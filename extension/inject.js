@@ -13,8 +13,18 @@
     if (bridge && bridge.configure) bridge.configure(data.options);
     else pending = data.options;
   });
-  L.ensureDevtoolsHook();
-  L.init({ trackAllMemoized: true, silent: true, notifier: L.createDevtoolsNotifier() });
-  window.__RERENDER_LENS_INJECTED__ = L.VERSION;
-  if (pending && window.__RERENDER_LENS_DEVTOOLS__) window.__RERENDER_LENS_DEVTOOLS__.configure(pending);
+
+  function start() {
+    if (window.__RERENDER_LENS_DEVTOOLS__) return; // the page's own init() won the race
+    L.ensureDevtoolsHook(); // wraps an existing hook (React DevTools, Fast Refresh) or creates one
+    window.__RERENDER_LENS_INJECTED__ = L.VERSION;
+    L.init({ trackAllMemoized: true, silent: true, notifier: L.createDevtoolsNotifier({ source: 'extension' }) });
+    if (pending && window.__RERENDER_LENS_DEVTOOLS__) window.__RERENDER_LENS_DEVTOOLS__.configure(pending);
+  }
+
+  // With "defer to React DevTools" on, give the other extension's document_start script a chance
+  // to install the global hook first; we then wrap it instead of blocking it. Page module scripts
+  // are deferred past this point, so react-dom still finds the hook.
+  if (window.__RERENDER_LENS_DEFER_HOOK__ && !window.__REACT_DEVTOOLS_GLOBAL_HOOK__) setTimeout(start, 0);
+  else start();
 })();

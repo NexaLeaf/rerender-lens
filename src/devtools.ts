@@ -30,6 +30,17 @@ export interface HelloPayload {
   production: boolean;
   enabled: boolean;
   options: SerializableOptions;
+  /** Who created this bridge: the page's own `init` call, or the extension's injected copy. */
+  source: 'page' | 'extension';
+  /** True when the extension injected a copy of the library into this page (whether or not it is the active one). */
+  injected: boolean;
+}
+
+declare global {
+  interface Window {
+    /** Set by the extension's inject script: version of the injected library. */
+    __RERENDER_LENS_INJECTED__?: string;
+  }
 }
 
 /** `Options` with matchers as strings (`"Name"` or `"/regex/flags"`) and no functions. */
@@ -55,6 +66,8 @@ export interface DevtoolsNotifierOptions {
   maxDepth?: number;
   /** Flash the DOM of components that re-rendered avoidably. Default false; toggle later with `flashAvoidable`. */
   flashAvoidable?: boolean;
+  /** Reported in `info()`. The extension's inject script passes `'extension'`. Default `'page'`. */
+  source?: 'page' | 'extension';
 }
 
 export interface InspectResult {
@@ -196,6 +209,7 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     target.postMessage(msg, '*');
   };
 
+  const source = options.source ?? 'page';
   const info = (): HelloPayload => ({
     count: buffer.length,
     library: VERSION,
@@ -204,6 +218,8 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     production: isProductionReact(),
     enabled: isEnabled(),
     options: serializeOptions(getState().options),
+    source,
+    injected: typeof window !== 'undefined' && typeof window.__RERENDER_LENS_INJECTED__ === 'string',
   });
 
   const bridge: DevtoolsBridge = {

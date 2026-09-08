@@ -75,8 +75,13 @@ with sample data.
   never through the app.
 
 If React DevTools is also installed, both hooks coexist: whichever installs the global hook first
-owns it, the other wraps it. If React DevTools' Components tab ever comes up empty with injection
-on, turn injection off for that origin and add the `init` call to the app instead.
+owns it, the other wraps it. If React DevTools' Components tab comes up empty with injection on,
+tick *Let React DevTools create the hook* for that origin (popup or Settings): the injector then
+waits one task before touching the hook, so React DevTools' script can install it first. Page
+scripts are still not running at that point, so react-dom finds the hook either way.
+
+When a page runs its own copy of the library and injection is on, the injected copy steps aside
+and the panel says so; turn injection off for that origin.
 
 ## Files
 
@@ -84,12 +89,12 @@ on, turn injection off for that origin and add the `init` call to the app instea
 | --- | --- |
 | `manifest.json` | MV3; `scripts/build-extension.mjs` derives the Firefox manifest from it |
 | `background.js` | routing, badge, per-origin script registration (`shared.js` helpers) |
-| `content.js`, `inject.js` | relay; in-page bootstrap for injection |
+| `content.js`, `inject.js`, `inject-deferred.js` | relay; in-page bootstrap for injection; flag file for the deferred mode |
 | `devtools.js`, `panel.html/js/css` | the panel; `panel.js` also exports `RerenderLensPanel.analysis` (pure ranking code) |
 | `sidebar.html/js` | Elements-panel sidebar |
 | `popup.html/js` | toolbar popup to enable a site |
 | `store/` | listing text, privacy policy, publishing notes |
-| `test/panel.test.ts` | jsdom tests (`npm test`); `e2e/` has the Playwright suite (`npm run e2e`) |
+| `test/*.test.ts` | jsdom tests for the panel, background, popup and sidebar (`npm test`, fake `chrome` in `test/fake-chrome.ts`); `e2e/` has the Playwright suite (`npm run e2e`) |
 
 ## Tests
 

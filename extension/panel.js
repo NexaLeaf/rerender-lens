@@ -78,6 +78,8 @@
       time: typeof p.time === 'number' ? p.time : 0,
     };
     if (typeof p.selfDuration === 'number') r.selfDuration = p.selfDuration;
+    if (typeof p.treeDuration === 'number') r.treeDuration = p.treeDuration;
+    if (typeof p.memoized === 'boolean') r.memoized = p.memoized;
     if (p.source && typeof p.source === 'object' && typeof p.source.fileName === 'string') r.source = p.source;
     if (typeof p.receivedAt === 'number') r.receivedAt = p.receivedAt;
     return r;
@@ -174,14 +176,19 @@
     const ownerName = r.owner || (r.parent && r.parent.name) || null;
     const changes = changesOf(r);
     const avoidableProps = (r.propChanges || []).filter((c) => AVOIDABLE_KINDS.has(c.kind));
-    if (r.avoidable && changes.length === 0) {
+    // Not memoized: props alone will never stop the re-render, so React.memo comes first (in addition to
+    // any prop fixes below). Reports from protocol-1 libraries have no `memoized`; assume memoized then.
+    if (r.avoidable && (changes.length === 0 || r.memoized === false)) {
+      const identical = changes.length === 0;
       out.push({
         kind: 'memo',
         owner: r.component,
         target: r.component,
         prop: null,
         label: `Wrap <${r.component}> in React.memo`,
-        detail: `<${r.component}> re-rendered with identical props because <${(r.parent && r.parent.name) || 'its parent'}> re-rendered.`,
+        detail: identical
+          ? `<${r.component}> re-rendered with identical props because <${(r.parent && r.parent.name) || 'its parent'}> re-rendered.`
+          : `<${r.component}> is not memoized: fixing its props alone will not stop the re-render.`,
         snippet: `// ${r.component}\nimport { memo } from 'react';\n\nexport const ${r.component} = memo(function ${r.component}(props) {\n  // ...\n});\n// class components: extend PureComponent instead`,
       });
     }
@@ -447,7 +454,10 @@
   function reportView(r, actions) {
     actions = actions || {};
     const frag = document.createDocumentFragment();
-    const duration = typeof r.selfDuration === 'number' ? ` \u00B7 ${fmtMs(r.selfDuration)}` : '';
+    const duration =
+      typeof r.selfDuration === 'number'
+        ? ` \u00B7 ${fmtMs(r.selfDuration)} self${typeof r.treeDuration === 'number' && r.treeDuration > r.selfDuration ? `, ${fmtMs(r.treeDuration)} with children` : ''}`
+        : '';
     const head = el('div', { class: 'section' }, [
       el('h3', { text: 'Why did this render?' }),
       el('div', null, [
@@ -478,6 +488,8 @@
     if (r.parent) by.append(el('div', { text: `Triggered by <${r.parent.name}> (${r.parent.trigger})` }));
     else by.append(el('div', { text: 'Update started in this component' }));
     if (r.owner) by.append(el('div', { class: 'meta', text: `Created by <${r.owner}>` }));
+    if (r.memoized === false) by.append(el('div', { class: 'meta', text: 'Not memoized (re-renders whenever its parent does)' }));
+    else if (r.memoized === true) by.append(el('div', { class: 'meta', text: 'Memoized (React.memo / PureComponent)' }));
     if (r.commitId) by.append(el('div', { class: 'meta', text: `Commit #${r.commitId}` }));
     frag.append(by);
     frag.append(kvSection('Props', r.props ? r.props.next : {}, r.propChanges || []));
@@ -1516,6 +1528,8 @@
         );
       }
       if (lib && lib.production) warnings.push('Production React build detected: component names may be minified and hooks are unlabeled. Use a development build.');
+      if (lib && lib.injected && lib.source === 'page')
+        warnings.push(`The page runs its own rerender-lens ${lib.library || ''}; the copy injected by the extension stepped aside. Turn injection off for this origin in Settings to avoid loading the library twice.`);
       if (lib && lib.enabled === false) warnings.push('rerender-lens is present but disabled in this page.');
       banner.hidden = warnings.length === 0;
       for (const w of warnings) banner.append(el('div', { text: w }));
@@ -1567,6 +1581,9 @@
             const inject = el('input', { type: 'checkbox' });
             inject.checked = st.inject;
             inject.disabled = !st.enabled;
+            const defer = el('input', { type: 'checkbox' });
+            defer.checked = !!st.deferHook;
+            defer.disabled = !st.inject;
             const msg = el('div', { class: 'meta' });
             const apply = async () => {
               try {
@@ -1578,7 +1595,7 @@
                     return;
                   }
                 }
-                await transport.setOrigin({ enabled: enabled.checked, inject: enabled.checked && inject.checked });
+                await transport.setOrigin({ enabled: enabled.checked, inject: enabled.checked && inject.checked, deferHook: inject.checked && defer.checked });
                 renderSettings();
               } catch (e) {
                 msg.textContent = String(e && e.message ? e.message : e);
@@ -1589,9 +1606,11 @@
               apply();
             });
             inject.addEventListener('change', apply);
+            defer.addEventListener('change', apply);
             site.append(
               el('label', { class: 'opt' }, [enabled, st.builtIn ? 'Enabled (local development host)' : 'Enable on this site']),
               el('label', { class: 'opt' }, [inject, 'Inject the library into the page (no app code needed)']),
+              el('label', { class: 'opt', title: 'Only needed when React DevTools is installed and its Components tab comes up empty' }, [defer, 'Let React DevTools create the hook (if both are installed)']),
               el('div', { class: 'meta', text: st.inject ? 'Injection is on. Reload the page after changing it.' : 'Without injection the page must call init({ notifier: createDevtoolsNotifier() }).' }),
               msg,
             );
@@ -1836,7 +1855,7 @@
         if (chrome.devtools.panels.openResource) chrome.devtools.panels.openResource(url, Math.max(0, (line || 1) - 1), Math.max(0, (col || 1) - 1), () => {});
       },
       originStatus: () => (origin ? send({ type: 'origin:status', origin }) : Promise.resolve(null)),
-      setOrigin: (cfg) => send({ type: 'origin:set', origin, enabled: cfg.enabled, inject: cfg.inject }),
+      setOrigin: (cfg) => send({ type: 'origin:set', origin, enabled: cfg.enabled, inject: cfg.inject, deferHook: cfg.deferHook }),
       requestPermission: () => chrome.permissions.request({ origins: [origin + '/*'] }),
       storage: {
         get: (key) => new Promise((resolve) => chrome.storage.local.get(`${key}:${origin}`, (got) => resolve(got ? got[`${key}:${origin}`] : undefined))),

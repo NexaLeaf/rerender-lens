@@ -79,8 +79,12 @@ export interface RenderReport {
   owner: string | null;
   /** Component ancestry from the root down to this component, display names only. */
   path: string[];
-  /** Render time of this component in ms, when React exposes it (dev/profiling builds). */
+  /** True for `React.memo` components and `PureComponent` classes: props alone decide whether they re-render. */
+  memoized: boolean;
+  /** Time spent in this component's own render (children excluded), in ms, when React exposes it (dev/profiling builds). */
   selfDuration?: number;
+  /** Time spent rendering this component and everything below it that rendered in the same commit, in ms. */
+  treeDuration?: number;
   /** Source location of the element that rendered this component, when React exposes it (dev builds). */
   source?: SourceLocation;
   /** Human-readable explanations and suggested fixes. */

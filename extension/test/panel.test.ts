@@ -47,7 +47,7 @@ interface Panel {
   importData(d: unknown): number;
   openSettings(): void;
 }
-interface Fix { kind: string; owner: string; prop: string | null; label: string; snippet: string; count?: number; key?: string }
+interface Fix { kind: string; owner: string; prop: string | null; label: string; detail: string; snippet: string; count?: number; key?: string }
 interface Factory {
   PROTOCOL: number;
   createPanel(root: HTMLElement, t: Transport, o?: object): Panel;
@@ -113,6 +113,17 @@ describe('devtools panel', () => {
     panel.handle({ type: 'hello', version: 2, payload: { library: '0.2.0', protocol: 2, react: [{ version: '18.3.1', bundleType: 0 }], production: true, enabled: true, options: {} } });
     expect(banner.textContent).toMatch(/Production React build/);
     expect(root.querySelector('.status-text')!.textContent).toContain('(prod)');
+    panel.handle({ type: 'hello', version: 2, payload: { library: '0.2.0', protocol: 2, react: [], production: false, enabled: true, options: {}, source: 'page', injected: true } });
+    expect(banner.textContent).toMatch(/runs its own rerender-lens.*stepped aside/);
+    panel.handle({ type: 'hello', version: 2, payload: { library: '0.2.0', protocol: 2, react: [], production: false, enabled: true, options: {}, source: 'extension', injected: true } });
+    expect(banner.hidden).toBe(true);
+  });
+
+  it('shows memoization and self/tree time on a report', () => {
+    send({ type: 'report', payload: report({ memoized: false, selfDuration: 0.4, treeDuration: 2.5 }) });
+    panel.select('Row');
+    expect(root.textContent).toContain('Not memoized');
+    expect(root.textContent).toContain('0.4 ms self, 2.5 ms with children');
   });
 
   it('builds a tree from report paths with avoidable badges and selects the latest report', () => {
@@ -358,7 +369,7 @@ describe('devtools panel', () => {
     inject.checked = true;
     inject.dispatchEvent(new Event('change'));
     await new Promise((r) => setTimeout(r, 0));
-    expect(originCalls).toEqual([{ enabled: true, inject: true }]);
+    expect(originCalls).toEqual([{ enabled: true, inject: true, deferHook: false }]);
   });
 });
 
@@ -402,6 +413,11 @@ describe('analysis', () => {
     expect(memo).toHaveLength(1);
     expect(memo[0]!.kind).toBe('memo');
     expect(memo[0]!.snippet).toContain('memo(function Row');
+    // not memoized + avoidable prop changes: memo first, then the prop fix
+    const both = fixesFor(report({ memoized: false }));
+    expect(both.map((f) => f.kind)).toEqual(['memo', 'useMemo']);
+    expect(both[0]!.detail).toContain('not memoized');
+    expect(fixesFor(report({ memoized: true })).map((f) => f.kind)).toEqual(['useMemo']);
     expect(fixesFor(report({ avoidable: false, trigger: 'props', propChanges: [{ path: 'n', kind: 'different', prev: 1, next: 2 }] }))).toEqual([]);
   });
 

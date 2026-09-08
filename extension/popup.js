@@ -52,6 +52,9 @@
     const inject = el('input', { type: 'checkbox' });
     inject.checked = st.inject;
     inject.disabled = !st.enabled;
+    const defer = el('input', { type: 'checkbox' });
+    defer.checked = st.deferHook;
+    defer.disabled = !st.inject;
 
     const apply = async () => {
       try {
@@ -59,7 +62,7 @@
           const ok = await chrome.permissions.request({ origins: [S.patternFor(origin)] });
           if (!ok) return render('Permission was not granted.');
         }
-        await send({ type: 'origin:set', origin, enabled: enabled.checked, inject: enabled.checked && inject.checked });
+        await send({ type: 'origin:set', origin, enabled: enabled.checked, inject: enabled.checked && inject.checked, deferHook: inject.checked && defer.checked });
         render();
       } catch (e) {
         render(String(e.message || e));
@@ -70,10 +73,12 @@
       apply();
     });
     inject.addEventListener('change', apply);
+    defer.addEventListener('change', apply);
 
     root.append(
       el('div', { class: 'row' }, [el('label', null, [enabled, st.builtIn ? 'Enabled (local development host)' : 'Enable on this site'])]),
       el('div', { class: 'row' }, [el('label', null, [inject, 'Inject the library (no app code needed)'])]),
+      el('div', { class: 'row' }, [el('label', null, [defer, 'Let React DevTools create the hook (if both are installed)'])]),
       el('div', { class: 'hint', text: st.inject ? 'Reload the page for injection to take effect.' : 'Without injection the page must call init({ notifier: createDevtoolsNotifier() }) itself.' }),
     );
     if (error) root.append(el('div', { class: 'err', text: error }));

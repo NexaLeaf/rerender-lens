@@ -15,7 +15,7 @@ import {
   VERSION,
   type HelloPayload,
 } from '../src/index';
-import { ensureDevtoolsHook, parseStackLocation, sourceOf, type Fiber } from '../src/fiber';
+import { durationsOf, ensureDevtoolsHook, parseStackLocation, sourceOf, type Fiber } from '../src/fiber';
 import { h, mount } from './helpers';
 
 afterEach(() => {
@@ -91,6 +91,63 @@ describe('commit ids and source', () => {
   });
 });
 
+describe('memoized flag and timing', () => {
+  it('marks memo / PureComponent as memoized and plain components as not, and explains the memo fix', () => {
+    const collector = createCollector();
+    init({ notifier: collector.notifier, silent: true, trackAllMemoized: true, include: ['Plain'] });
+    const Plain = (p: { style: object }) => h('span', null, JSON.stringify(p.style));
+    const Memo = React.memo(function Memo(p: { style: object }) {
+      return h('span', null, JSON.stringify(p.style));
+    });
+    class Pure extends React.PureComponent<{ style: object }> {
+      override render() {
+        return h('span', null, JSON.stringify(this.props.style));
+      }
+    }
+    const { Parent, rerender } = makeParent(() => h('div', null, h(Plain, { style: { a: 1 } }), h(Memo, { style: { a: 1 } }), h(Pure, { style: { a: 1 } })));
+    const hn = mount(h(Parent));
+    rerender();
+    const byName = new Map(collector.reports.map((r) => [r.component, r]));
+    expect(byName.get('Plain')!.memoized).toBe(false);
+    expect(byName.get('Memo')!.memoized).toBe(true);
+    expect(byName.get('Pure')!.memoized).toBe(true);
+    expect(byName.get('Plain')!.reasons.some((x) => /not memoized.*React\.memo/.test(x))).toBe(true);
+    expect(byName.get('Memo')!.reasons.some((x) => /not memoized/.test(x))).toBe(false);
+    hn.unmount();
+  });
+
+  it('reports self time without the children and the subtree time separately', () => {
+    const collector = createCollector();
+    init({ notifier: collector.notifier, silent: true });
+    const Child = track((p: { n: number }) => h('span', null, p.n), 'Child');
+    const Outer = track((p: { n: number }) => h('div', null, h(Child, { n: p.n })), 'Outer');
+    const { Parent, rerender } = makeParent(() => h(Outer, { n: 1 }));
+    const hn = mount(h(Parent));
+    rerender();
+    const outer = collector.reports.find((r) => r.component === 'Outer')!;
+    const child = collector.reports.find((r) => r.component === 'Child')!;
+    // React's dev build records actualDuration; in a profiling build these are real numbers.
+    if (typeof outer.treeDuration === 'number') {
+      expect(outer.selfDuration).toBeGreaterThanOrEqual(0);
+      expect(outer.treeDuration).toBeGreaterThanOrEqual(outer.selfDuration!);
+      expect(outer.treeDuration).toBeGreaterThanOrEqual(child.treeDuration ?? 0);
+    } else {
+      expect(outer.selfDuration).toBeUndefined();
+    }
+    hn.unmount();
+  });
+
+  it('synthetic fibers: self time subtracts direct children only', () => {
+    const child = { actualDuration: 2, child: null, sibling: null } as unknown as Fiber;
+    const child2 = { actualDuration: 3, child: null, sibling: null } as unknown as Fiber;
+    (child as { sibling: Fiber | null }).sibling = child2;
+    const f = { actualDuration: 10, child } as unknown as Fiber;
+    expect(durationsOf(f)).toEqual({ self: 5, tree: 10 });
+    expect(durationsOf({ actualDuration: 1, child: { actualDuration: 4, sibling: null } } as unknown as Fiber)).toEqual({ self: 0, tree: 1 });
+    expect(durationsOf({} as Fiber)).toBeNull();
+  });
+});
+
 describe('options round-trip', () => {
   it('serializes matchers as strings and back', () => {
     const s = serializeOptions({ trackAllMemoized: true, include: [/^Grid/i, 'Sidebar', () => true], maxReportsPerComponent: 3 });
@@ -117,6 +174,14 @@ describe('bridge v2', () => {
     // hello is posted while the notifier is created, before init() stores the options; info() sees them.
     expect(bridge.info().options).toEqual({ trackAllMemoized: true, silent: true });
     expect(bridge.info().enabled).toBe(true);
+    expect(bridge.info().source).toBe('page');
+    expect(bridge.info().injected).toBe(false);
+    // An injected copy marks the window; a page-created bridge then reports both facts.
+    window.__RERENDER_LENS_INJECTED__ = '0.2.0';
+    expect(bridge.info().injected).toBe(true);
+    delete window.__RERENDER_LENS_INJECTED__;
+    createDevtoolsNotifier({ target: { postMessage() {} } as unknown as Window, source: 'extension' });
+    expect(window.__RERENDER_LENS_DEVTOOLS__!.info().source).toBe('extension');
     const Child = track((p: { n: number }) => h('span', null, p.n), 'Child');
     const { Parent, rerender } = makeParent(() => h(Child, { n: 1 }));
     const hn = mount(h(Parent));

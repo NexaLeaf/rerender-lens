@@ -86,6 +86,8 @@ Every update of a tracked component produces a `RenderReport`:
 | `owner` | component that created the element (dev builds) |
 | `path` | component ancestry from the root |
 | `instanceId`, `renderCount` | stable per mounted instance |
+| `memoized` | `React.memo` / `PureComponent`: props alone decide whether it re-renders |
+| `selfDuration`, `treeDuration` | own render time, and with everything below that rendered (dev/profiling builds) |
 | `commitId` | shared by every report of one React commit |
 | `source` | file, line and column where the element was created (dev builds) |
 | `reasons` | human-readable explanations with the fix |

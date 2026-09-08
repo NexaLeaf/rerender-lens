@@ -15,7 +15,10 @@ export interface BuildInput {
   parent?: ParentInfo | null;
   owner?: string | null;
   path?: string[];
+  /** Default true: `useWhyRerender` and the console output assume the component decides on props alone. */
+  memoized?: boolean;
   selfDuration?: number;
+  treeDuration?: number;
   commitId?: number;
   source?: SourceLocation;
 }
@@ -81,6 +84,12 @@ export function buildReport(input: BuildInput): RenderReport {
     const fix = fixFor(c);
     reasons.push(fix ? `${describe(c)}: ${fix}.` : `${describe(c)}.`);
   }
+  const memoized = input.memoized !== false;
+  if (avoidable && !memoized && input.propChanges.length > 0) {
+    reasons.push(
+      `"${input.component}" is not memoized, so fixing the props alone will not stop this re-render: also wrap it in React.memo (or extend PureComponent).`,
+    );
+  }
   for (const c of stateChanges) {
     if (isGenuine(c)) reasons.push(`state "${c.path}" changed.`);
     else reasons.push(`setState was called with a value deep-equal to the current "${c.path}" (new reference, same contents).`);
@@ -99,6 +108,7 @@ export function buildReport(input: BuildInput): RenderReport {
     renderCount: input.renderCount,
     trigger,
     avoidable,
+    memoized,
     props: { prev: input.prevProps, next: input.nextProps },
     propChanges: input.propChanges,
     stateChanges,
@@ -110,6 +120,7 @@ export function buildReport(input: BuildInput): RenderReport {
     time: now(),
   };
   if (input.selfDuration !== undefined) report.selfDuration = input.selfDuration;
+  if (input.treeDuration !== undefined) report.treeDuration = input.treeDuration;
   if (input.source) report.source = input.source;
   return report;
 }

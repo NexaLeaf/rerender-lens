@@ -96,6 +96,8 @@ chrome.runtime.onConnect.addListener((port) => {
 // ---------- origins: relay + injection registration ----------
 const RELAY_FILES = ['content.js'];
 const INJECT_FILES = ['vendor/rerender-lens.js', 'inject.js'];
+// inject-deferred.js sets a flag that makes inject.js wait one task before creating the hook.
+const INJECT_FILES_DEFERRED = ['vendor/rerender-lens.js', 'inject-deferred.js', 'inject.js'];
 
 const relayId = (origin) => 'relay:' + origin;
 const injectId = (origin) => 'inject:' + origin;
@@ -114,7 +116,7 @@ async function hasPermission(origin) {
   }
 }
 
-/** Register (or update) the scripts for one origin according to `{ inject }`. */
+/** Register (or update) the scripts for one origin according to `{ inject, deferHook }`. */
 async function applyOrigin(origin, config) {
   const have = await registered();
   const matches = [S.patternFor(origin)];
@@ -123,7 +125,7 @@ async function applyOrigin(origin, config) {
     wanted.push({ id: relayId(origin), matches, js: RELAY_FILES, runAt: 'document_start', world: 'ISOLATED' });
   }
   if (config && config.inject) {
-    wanted.push({ id: injectId(origin), matches, js: INJECT_FILES, runAt: 'document_start', world: 'MAIN' });
+    wanted.push({ id: injectId(origin), matches, js: config.deferHook ? INJECT_FILES_DEFERRED : INJECT_FILES, runAt: 'document_start', world: 'MAIN' });
   }
   const toUpdate = wanted.filter((s) => have.has(s.id));
   const toRegister = wanted.filter((s) => !have.has(s.id));
@@ -180,6 +182,7 @@ async function originStatus(origin) {
     permitted: await hasPermission(origin),
     enabled: S.isBuiltInOrigin(origin) || !!cfg,
     inject: !!(cfg && cfg.inject),
+    deferHook: !!(cfg && cfg.deferHook),
   };
 }
 
@@ -199,7 +202,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           await removeOrigin(origin);
         } else {
           if (!(await hasPermission(origin))) throw new Error('no host permission for ' + origin);
-          const cfg = { inject: !!message.inject };
+          const cfg = { inject: !!message.inject, deferHook: !!message.inject && !!message.deferHook };
           if (S.isBuiltInOrigin(origin) && !cfg.inject) delete origins[origin];
           else origins[origin] = cfg;
           await applyOrigin(origin, cfg);

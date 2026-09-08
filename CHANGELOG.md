@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- `selfDuration` is now the component's own render time; the previous value (the whole subtree)
+  moved to `treeDuration`. Children that bailed out contribute nothing, as in the Profiler.
+- `memoized` on every report (`React.memo` / `PureComponent`). Reports of unmemoized components
+  with avoidable prop changes explain that `React.memo` is needed as well; the panel's Fixes view
+  lists it first.
+- Bridge `info()` reports `source` (`page` or `extension`) and `injected`. The panel warns when the
+  page runs its own copy next to the injected one.
+- Extension: per-origin "Let React DevTools create the hook" toggle (popup and Settings). With it
+  on, the injector waits one task so React DevTools' own script can install the global hook first.
+- Elements sidebar: an element without a React component above it now says so instead of
+  "not running".
+- jsdom tests for `background.js`, `popup.js` and `sidebar.js` (shared fake `chrome`).
+
 ## 0.2.0
 
 Library

@@ -28,6 +28,11 @@
   async function refresh() {
     const r = await evalIn(INSPECT);
     root.textContent = '';
+    // `null` is a real answer from inspect(): the element has no React component above it.
+    if (r === null) {
+      root.append(el('div', { class: 'empty', text: 'No React component renders this element.' }));
+      return;
+    }
     if (!r || r.missing) {
       root.append(el('div', { class: 'empty', text: 'rerender-lens is not running in this page.' }));
       return;
@@ -38,10 +43,6 @@
     }
     if (r.error) {
       root.append(el('div', { class: 'empty', text: String(r.error) }));
-      return;
-    }
-    if (r === null) {
-      root.append(el('div', { class: 'empty', text: 'No React component renders this element.' }));
       return;
     }
     root.append(

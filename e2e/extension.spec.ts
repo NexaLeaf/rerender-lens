@@ -101,6 +101,32 @@ test('injects the library into a page that does not load it when injection is en
   // trackAllMemoized is the injected default: Toolbar and ProductList are memo components with defeated props.
   expect((pulled.reports as Report[]).filter((r) => r.avoidable).map((r) => r.component)).toEqual(expect.arrayContaining(['Toolbar', 'ProductList']));
 
+  const info = await page.evaluate(() => window.__RERENDER_LENS_DEVTOOLS__!.info());
+  expect(info.source).toBe('extension');
+  expect(info.injected).toBe(true);
+  await page.close();
+
+  // Deferred mode: the hook is created one task later, which is still before react-dom loads.
+  await worker.evaluate(async () => {
+    await chrome.storage.local.set({ origins: { 'http://localhost:5199': { inject: true, deferHook: true } } });
+    await reconcile();
+  });
+  await expect
+    .poll(() => worker.evaluate(async () => (await chrome.scripting.getRegisteredContentScripts()).find((s) => s.id.startsWith('inject:'))?.js))
+    .toEqual(['vendor/rerender-lens.js', 'inject-deferred.js', 'inject.js']);
+  page = await context.newPage();
+  await page.goto('/plain.html');
+  await expect(page.getByRole('heading', { name: 'rerender-lens example' })).toBeVisible();
+  await page.getByRole('button', { name: /Re-render App/ }).click();
+  await expect.poll(() => page.evaluate(() => window.__RERENDER_LENS_DEVTOOLS__?.size ?? 0)).toBeGreaterThan(0);
+
+  // On the page that runs the library itself, the injected copy steps aside and says so.
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'rerender-lens example' })).toBeVisible();
+  const own = await page.evaluate(() => window.__RERENDER_LENS_DEVTOOLS__!.info());
+  expect(own.source).toBe('page');
+  expect(own.injected).toBe(true);
+
   // Disabling removes the registration again.
   await worker.evaluate(async () => {
     await chrome.storage.local.set({ origins: {} });

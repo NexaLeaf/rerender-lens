@@ -177,6 +177,28 @@ const flagsOf = (f: Fiber): number => f.flags ?? f.effectTag ?? 0;
 const isComponentTag = (tag: number): boolean =>
   tag === FunctionComponent || tag === ClassComponent || tag === ForwardRef || tag === MemoComponent || tag === SimpleMemoComponent;
 
+/** `React.memo` fibers, or class instances that extend `PureComponent`. */
+export function isMemoizedFiber(fiber: Fiber): boolean {
+  if (fiber.tag === MemoComponent || fiber.tag === SimpleMemoComponent) return true;
+  if (fiber.tag === ClassComponent) {
+    const inst = fiber.stateNode as { isPureReactComponent?: boolean } | null;
+    return !!(inst && inst.isPureReactComponent);
+  }
+  return false;
+}
+
+/**
+ * Timing from React's profiler fields. `actualDuration` covers the subtree; children that bailed
+ * out were reset to 0 by `createWorkInProgress`, so subtracting the direct children leaves self time.
+ */
+export function durationsOf(fiber: Fiber): { self: number; tree: number } | null {
+  if (typeof fiber.actualDuration !== 'number') return null;
+  const tree = fiber.actualDuration;
+  let children = 0;
+  for (let c = fiber.child; c; c = c.sibling) if (typeof c.actualDuration === 'number') children += c.actualDuration;
+  return { self: Math.max(0, tree - children), tree };
+}
+
 /** The value React DevTools would show as the fiber's type (memo/forwardRef outer object when present). */
 export function fiberType(fiber: Fiber): unknown {
   return fiber.elementType ?? fiber.type;
@@ -478,6 +500,7 @@ export function onCommit(root: FiberRoot): void {
   for (const fiber of rendered) {
     const alt = fiber.alternate!;
     const a = analyze(fiber, alt, trackHooks);
+    const durations = durationsOf(fiber);
     const report = buildReport({
       component: fiberName(fiber),
       instanceId: instanceId(fiber),
@@ -490,7 +513,9 @@ export function onCommit(root: FiberRoot): void {
       parent: a.trigger === 'parent' ? nearestRenderedAncestor(fiber, parentCache, trackHooks) : null,
       owner: ownerName(fiber),
       path: componentPath(fiber),
-      selfDuration: typeof fiber.actualDuration === 'number' ? fiber.actualDuration : undefined,
+      memoized: isMemoizedFiber(fiber),
+      selfDuration: durations ? durations.self : undefined,
+      treeDuration: durations ? durations.tree : undefined,
       commitId,
       source: sourceOf(fiber),
     });
