@@ -16,10 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Enables Pages (source: GitHub Actions) on first run; deploy-pages returns 404 until it is enabled.
+      # Requires Pages enabled in repo settings with source GitHub Actions - GITHUB_TOKEN cannot create the site.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
