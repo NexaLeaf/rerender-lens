@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "rerender-lens",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "See avoidable React re-renders as they happen, with the prop, state or context that caused each one.",
   "minimum_chrome_version": "116",
   "devtools_page": "devtools.html",

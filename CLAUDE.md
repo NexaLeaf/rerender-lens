@@ -10,7 +10,7 @@ React re-render debugger. See README.md for the public API.
 - `npm run e2e` (Playwright, Chromium with the extension loaded against the example app; needs `npm run build` and `npm --prefix examples/vite-react install` first).
 - `npm run lint:ext` (web-ext lint on the Firefox package), `npm run build:docs`, `npm run docs:media`.
 - `npm run check` runs the tests before `build`; after changing `extension/src/panel.ts` run `npx tsup` first or the jsdom tests read a stale `extension/panel.js`.
-- `npm run dev:example` builds the library and starts `examples/vite-react` on port 5199 (`/` runs the library itself, `/plain.html` does not, for testing injection).
+- `npm run dev:example` builds the library and starts `examples/vite-react` on port 5199 (`/` runs the library itself, `/plain.html` does not, for testing injection; `/scale.html?rows=N` is the scale test with a readout of `info().overhead` and `info().truncated`, used by the e2e suite).
 
 ## Layout
 

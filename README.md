@@ -428,6 +428,10 @@ deepEqual(a, b), diffRecords(prev, next), classify(prev, next)
 
 ## Example app
 
+`examples/vite-react/scale.html?rows=3000` is the scale test: thousands of memoized cells that all
+re-render avoidably, sharing one large context value and a typed-array prop. Its readout shows
+the library's own cost per commit and how many reports the per-commit cap skipped.
+
 `examples/vite-react` has three deliberate bugs. From the repo root:
 
 ```sh

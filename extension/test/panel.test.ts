@@ -127,6 +127,11 @@ describe('devtools panel', () => {
     expect(banner.textContent).toMatch(/runs its own rerender-lens.*stepped aside/);
     panel.handle({ type: 'hello', version: 2, payload: { library: '0.2.0', protocol: 2, react: [], production: false, enabled: true, options: {}, source: 'extension', injected: true } });
     expect(banner.hidden).toBe(true);
+    // reports skipped by the library's per-commit cap: tooltip and banner
+    panel.handle({ type: 'hello', version: 2, payload: { library: '0.4.0', protocol: 2, react: [], production: false, enabled: true, options: {}, truncated: 2800, commits: 3, overhead: { totalMs: 30, maxCommitMs: 12 } } });
+    expect(banner.hidden).toBe(false);
+    expect(banner.textContent).toMatch(/2800 reports skipped: a commit re-rendered more tracked components than the per-commit cap/);
+    expect(root.querySelector('.status')!.getAttribute('title')).toContain('2800 reports skipped by the per-commit cap');
   });
 
   it('summary strip shows totals, the top offender and the best fix, and links to them', () => {

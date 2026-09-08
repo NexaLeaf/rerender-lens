@@ -194,6 +194,31 @@ test('the panel served by the Vite plugin works without the extension, over a Br
   await app.close();
 });
 
+test('a page with thousands of memoized rows sharing a huge context stays responsive; the cap reports the first 200', async ({ context }) => {
+  const page = await context.newPage();
+  await page.goto('/scale.html?rows=3000');
+  await expect(page.getByRole('heading', { name: 'rerender-lens scale test' })).toBeVisible();
+  await expect(page.getByTestId('readout')).toContainText('commits');
+  const button = page.getByRole('button', { name: /Re-render everything/ });
+  for (let i = 0; i < 3; i++) await button.click();
+  await expect(page.getByRole('button', { name: 'Re-render everything (3)' })).toBeVisible();
+  // The page still answers promptly: a round trip through the event loop is not queued behind the commit hook.
+  const start = Date.now();
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 0)));
+  expect(Date.now() - start).toBeLessThan(2000);
+  const info = await page.evaluate(() => window.__RERENDER_LENS_DEVTOOLS__!.info());
+  expect(info.commits).toBeGreaterThanOrEqual(3);
+  // 3,000 avoidable cells per commit: only the first 200 are reported, the rest are counted.
+  expect(info.truncated).toBeGreaterThanOrEqual(3 * 2800);
+  expect(info.overhead.maxCommitMs).toBeLessThan(1000);
+  const pulled = await page.evaluate(() => window.__RERENDER_LENS_DEVTOOLS__!.pull(0));
+  const reports = pulled.reports as (Report & { propChanges: { path: string }[] })[];
+  expect(reports.length).toBeLessThanOrEqual(300);
+  expect(reports.filter((r) => r.component === 'Cell' && r.avoidable).length).toBeGreaterThan(0);
+  await expect(page.getByTestId('readout')).toContainText(/reports skipped by the cap: [1-9]\d*/);
+  await page.close();
+});
+
 declare const contentByTab: Map<number, unknown>;
 declare function reconcile(): Promise<void>;
 declare function removeOrigin(origin: string): Promise<void>;
