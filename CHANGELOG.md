@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`rerender-lens/vite`**: a Vite plugin that starts the library before React in dev, with the
+  DevTools notifier, from one line in `vite.config.ts`. **`rerender-lens/setup`**: a side-effect
+  entry for Next.js `instrumentation-client.ts`, Webpack entry arrays and the like.
+- CI lints the Firefox package with `web-ext lint`; `extension/store/QA.md` is the manual
+  checklist for what no test reaches. A docs site builds from the READMEs (`npm run build:docs`)
+  and deploys to GitHub Pages; `npm run docs:media` captures its screenshots and GIF.
 - **Full state on every report.** `hookState` (every `useState` / `useReducer` /
   `useSyncExternalStore` value), `contexts` (every context the component reads) and, for class
   components, `state`. The panel's report shows Hooks, State and Contexts in full, with the

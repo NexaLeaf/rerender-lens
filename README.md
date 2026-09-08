@@ -77,6 +77,41 @@ npm i -D rerender-lens
 
 Peer dependency: `react >= 16.8`. Tested with React 18 and 19.
 
+## One-line setup per bundler
+
+**Vite** (recommended for Vite users: no extension injection, no permissions, one line):
+
+```ts
+// vite.config.ts
+import { rerenderLens } from 'rerender-lens/vite';
+
+export default defineConfig({
+  plugins: [react(), rerenderLens({ trackAllMemoized: true })],
+});
+```
+
+The plugin injects a module before your entry in dev (`vite build` is untouched) that calls
+`init` with your options plus the DevTools notifier. Matchers can be strings or RegExps;
+`devtools: false` skips the bridge, `applyInBuild: true` keeps it in builds.
+
+**Next.js** (App or Pages router): run it before React from the client instrumentation file:
+
+```ts
+// instrumentation-client.ts
+import 'rerender-lens/setup';
+```
+
+**Webpack / Rspack / others**: put the setup entry first:
+
+```js
+entry: ['rerender-lens/setup', './src/index.tsx'],
+```
+
+`rerender-lens/setup` is a side-effect module that calls
+`init({ trackAllMemoized: true, notifier: createDevtoolsNotifier() })` unless
+`process.env.NODE_ENV === 'production'` or the page already runs the library. Use `configure()`
+afterwards to change options, or the extension's Settings.
+
 ## Setup
 
 ```ts
@@ -237,6 +272,8 @@ disable(): void
 isEnabled(): boolean
 track(component, name?): component
 ensureDevtoolsHook(): hook              // create the global hook early (test setup files)
+// 'rerender-lens/vite': rerenderLens(options), renderSetupModule(options)
+// 'rerender-lens/setup': side-effect entry (init with defaults outside production)
 useWhyRerender(name, values, options?)
 createCollector(): { reports, avoidable, notifier, clear, assertNoAvoidable }
 combineNotifiers(...notifiers): Notifier

@@ -12,3 +12,4 @@ dist-extension
 e2e/.results
 playwright-report
 test-results
+docs-site

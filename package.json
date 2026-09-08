@@ -15,7 +15,10 @@
   "license": "MIT",
   "author": "Palanisamy Muthusamy",
   "type": "module",
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/setup.js",
+    "./dist/setup.cjs"
+  ],
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -28,6 +31,26 @@
       "require": {
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
+      }
+    },
+    "./vite": {
+      "import": {
+        "types": "./dist/vite.d.ts",
+        "default": "./dist/vite.js"
+      },
+      "require": {
+        "types": "./dist/vite.d.cts",
+        "default": "./dist/vite.cjs"
+      }
+    },
+    "./setup": {
+      "import": {
+        "types": "./dist/setup.d.ts",
+        "default": "./dist/setup.js"
+      },
+      "require": {
+        "types": "./dist/setup.d.cts",
+        "default": "./dist/setup.cjs"
       }
     },
     "./package.json": "./package.json"
@@ -46,6 +69,9 @@
     "lint:pkg": "publint && attw --pack . --profile node16",
     "build:ext": "node scripts/build-extension.mjs",
     "e2e": "playwright test -c e2e/playwright.config.ts",
+    "build:docs": "node scripts/build-docs.mjs",
+    "docs:media": "node scripts/docs-media.mjs",
+    "lint:ext": "npx --yes web-ext lint --source-dir dist-extension/firefox --warnings-as-errors=false",
     "version": "node scripts/sync-version.mjs && git add extension/manifest.json",
     "check": "npm run typecheck && npm test && npm run build && npm run lint:pkg && npm run build:ext",
     "prepublishOnly": "npm run check",
@@ -62,11 +88,13 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "jsdom": "^29.1.1",
+    "marked": "^9.1.6",
     "publint": "^0.3.24",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
+    "vite": "^8.2.2",
     "vitest": "^5.0.0"
   },
   "engines": {

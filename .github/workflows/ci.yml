@@ -24,6 +24,9 @@ jobs:
         run: git diff --exit-code -- extension/panel.js || (echo "::error::extension/panel.js is out of date. Run 'npm run build' and commit it." && exit 1)
       - run: npm run lint:pkg
       - run: npm run build:ext
+      - name: Firefox add-on lint (manifest and API compatibility)
+        if: matrix.node == 22
+        run: npx --yes web-ext lint --source-dir dist-extension/firefox --warnings-as-errors=false
       - uses: actions/upload-artifact@v4
         if: matrix.node == 22
         with:
