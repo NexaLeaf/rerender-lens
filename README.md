@@ -136,6 +136,7 @@ Every update of a tracked component produces a `RenderReport`:
 | `propChanges` | one entry per changed prop with `path`, `kind`, `prev`, `next` |
 | `stateChanges` | class components: `this.state` diff |
 | `hookChanges` | `useState`, `useReducer`, `useSyncExternalStore` and `useContext` values that changed; context entries carry `provider` (who renders it) and `changedKeys` / `totalKeys` for object values |
+| `hookState`, `contexts`, `state` | current value of every state hook, every context read, and class `this.state` (off with `includeState: false`) |
 | `parent` | nearest ancestor that rendered in the same commit, and why |
 | `owner` | component that created the element (dev builds) |
 | `path` | component ancestry from the root |
@@ -254,6 +255,7 @@ deepEqual(a, b), diffRecords(prev, next), classify(prev, next)
 | `trackAllComponents` | `false` | track everything (noisy) |
 | `include` / `exclude` | | display-name matchers |
 | `trackHooks` | `true` | diff hook state and contexts |
+| `includeState` | `true` | put every hook, context and class state value on each report |
 | `logAll` | `false` | print non-avoidable reports too |
 | `silent` | `false` | never print; notifier still runs |
 | `notifier` | | receives every `RenderReport` |

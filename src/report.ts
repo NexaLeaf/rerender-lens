@@ -1,4 +1,4 @@
-import type { Change, CommitPriority, HookChange, Options, ParentInfo, RenderReport, RenderTrigger, SourceLocation } from './types';
+import type { Change, CommitPriority, HookChange, HookSnapshot, Options, ParentInfo, RenderReport, RenderTrigger, SourceLocation } from './types';
 
 const now = (): number =>
   typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
@@ -12,6 +12,9 @@ export interface BuildInput {
   propChanges: Change[];
   stateChanges?: Change[];
   hookChanges?: HookChange[];
+  hookState?: HookSnapshot[];
+  contexts?: { name: string; value: unknown }[];
+  state?: Record<string, unknown>;
   parent?: ParentInfo | null;
   owner?: string | null;
   path?: string[];
@@ -140,6 +143,9 @@ export function buildReport(input: BuildInput): RenderReport {
   if (input.treeDuration !== undefined) report.treeDuration = input.treeDuration;
   if (input.commitPriority) report.commitPriority = input.commitPriority;
   if (input.source) report.source = input.source;
+  if (input.hookState) report.hookState = input.hookState;
+  if (input.contexts) report.contexts = input.contexts;
+  if (input.state) report.state = input.state;
   return report;
 }
 
@@ -189,5 +195,8 @@ export function printReport(report: RenderReport, options: Options): void {
     c.log(`${ch.path} (${KIND_LABEL[ch.kind]})`, { prev: ch.prev, next: ch.next });
   }
   c.log('props', report.props);
+  if (report.hookState && report.hookState.length) c.log('hooks', Object.fromEntries(report.hookState.map((h) => [h.path, h.value])));
+  if (report.contexts && report.contexts.length) c.log('contexts', Object.fromEntries(report.contexts.map((x) => [x.name, x.value])));
+  if (report.state) c.log('state', report.state);
   c.groupEnd();
 }

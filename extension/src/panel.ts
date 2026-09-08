@@ -39,6 +39,10 @@ export interface Report {
   propChanges: Change[];
   stateChanges: Change[];
   hookChanges: Change[];
+  /** Current values (protocol 2 libraries with `includeState`). */
+  hookState?: { path: string; hook: string; index: number; value: unknown }[];
+  contexts?: { name: string; value: unknown }[];
+  state?: Record<string, unknown>;
   parent: { name: string; trigger: string } | null;
   owner: string | null;
   path: string[];
@@ -177,6 +181,7 @@ export interface SerializableOptions {
   include?: string[];
   exclude?: string[];
   trackHooks?: boolean;
+  includeState?: boolean;
   logAll?: boolean;
   silent?: boolean;
   collapse?: boolean;
@@ -401,6 +406,9 @@ function normalizeReport(p: unknown): Report | null {
   if (typeof p.treeDuration === 'number') r.treeDuration = p.treeDuration;
   if (typeof p.memoized === 'boolean') r.memoized = p.memoized;
   if (typeof p.commitPriority === 'string') r.commitPriority = p.commitPriority as CommitPriority;
+  if (Array.isArray(p.hookState)) r.hookState = p.hookState.filter((h): h is Report['hookState'] extends (infer T)[] | undefined ? T : never => isRecord(h) && typeof h.path === 'string');
+  if (Array.isArray(p.contexts)) r.contexts = p.contexts.filter((c): c is { name: string; value: unknown } => isRecord(c) && typeof c.name === 'string');
+  if (isRecord(p.state)) r.state = p.state;
   if (isRecord(p.source) && typeof p.source.fileName === 'string') r.source = p.source as unknown as SourceLocation;
   return r;
 }
@@ -868,6 +876,15 @@ function reportToMarkdown(r: Report): string {
     lines.push('', '| path | kind | prev | next |', '| --- | --- | --- | --- |');
     for (const c of changes) lines.push(`| ${c.path} | ${KIND_LABEL[c.kind] || c.kind} | \`${shortValue(c.prev, 40)}\` | \`${shortValue(c.next, 40)}\` |`);
   }
+  if (r.hookState && r.hookState.length) {
+    lines.push('', '**Hooks**', '');
+    for (const h of r.hookState) lines.push(`- ${h.path}: \`${shortValue(h.value, 60)}\``);
+  }
+  if (r.state && Object.keys(r.state).length) lines.push('', `**State:** \`${shortValue(r.state, 120)}\``);
+  if (r.contexts && r.contexts.length) {
+    lines.push('', '**Contexts**', '');
+    for (const c of r.contexts) lines.push(`- ${c.name}: \`${shortValue(c.value, 60)}\``);
+  }
   const fixes = fixesFor(r);
   if (fixes.length) {
     lines.push('', '**Fix**', '');
@@ -996,7 +1013,53 @@ function reportView(r: Report, actions: ReportViewActions = {}): DocumentFragmen
   if (r.commitId) by.append(el('div', { class: 'meta', text: `Commit #${r.commitId}${r.commitPriority ? ` · ${PRIORITY_LABEL[r.commitPriority] || r.commitPriority} priority` : ''}` }));
   frag.append(by);
   frag.append(kvSection('Props', r.props ? r.props.next : {}, r.propChanges || []));
-  const hooks = ([] as Change[]).concat(r.hookChanges || [], r.stateChanges || []);
+  const hookChanges = new Map((r.hookChanges || []).map((c) => [c.path, c] as const));
+  const stateChanges = r.stateChanges || [];
+  if (r.hookState || r.contexts || r.state) {
+    // Full snapshot: every hook / context / state key, changed ones as prev → next.
+    if (r.hookState && r.hookState.length) {
+      const table = el('table', { class: 'kv' });
+      for (const h of r.hookState) {
+        const c = hookChanges.get(h.path);
+        if (c) table.append(changeRow(h.path, c));
+        else {
+          const tr = el('tr');
+          tr.append(el('td', { class: 'k', text: h.path }));
+          const td = el('td');
+          td.append(valueNode(h.value));
+          tr.append(td);
+          table.append(tr);
+        }
+      }
+      frag.append(el('div', { class: 'section' }, [el('h3', { text: 'Hooks' }), table]));
+    }
+    if (r.state) frag.append(kvSection('State', r.state, stateChanges));
+    if (r.contexts && r.contexts.length) {
+      const table = el('table', { class: 'kv' });
+      for (const ctx of r.contexts) {
+        const c = hookChanges.get(`useContext(${ctx.name})`);
+        if (c) table.append(changeRow(ctx.name, c));
+        else {
+          const tr = el('tr');
+          tr.append(el('td', { class: 'k', text: ctx.name }));
+          const td = el('td');
+          td.append(valueNode(ctx.value));
+          tr.append(td);
+          table.append(tr);
+        }
+      }
+      frag.append(el('div', { class: 'section' }, [el('h3', { text: 'Contexts' }), table]));
+    }
+    // store hooks etc. that changed but are not in the snapshot (older library shape)
+    const leftover = [...hookChanges.values()].filter((c) => !(r.hookState || []).some((h) => h.path === c.path) && !(r.contexts || []).some((x) => `useContext(${x.name})` === c.path));
+    if (leftover.length) {
+      const table = el('table', { class: 'kv' });
+      for (const c of leftover) table.append(changeRow(c.path, c));
+      frag.append(el('div', { class: 'section' }, [el('h3', { text: 'Other hooks that changed' }), table]));
+    }
+    return frag;
+  }
+  const hooks = ([] as Change[]).concat(r.hookChanges || [], stateChanges);
   if (hooks.length) {
     const table = el('table', { class: 'kv' });
     for (const c of hooks) table.append(changeRow(c.path, c));
@@ -2586,6 +2649,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       optionRow('Track every React.memo / PureComponent', 'trackAllMemoized', current, applyOptions),
       optionRow('Track every component (noisy)', 'trackAllComponents', current, applyOptions),
       optionRow('Diff hook state and contexts', 'trackHooks', { trackHooks: current.trackHooks !== false }, applyOptions),
+      optionRow('Include current hooks, state and contexts in every report', 'includeState', { includeState: current.includeState !== false }, applyOptions),
       optionRow('Ignore Fast Refresh commits', 'ignoreHotReload', { ignoreHotReload: current.ignoreHotReload !== false }, applyOptions),
       optionRow('Print to the page console', 'silent', { silent: !current.silent }, (p) => applyOptions({ silent: !p.silent })),
       optionRow('Print genuine re-renders too (logAll)', 'logAll', current, applyOptions),
@@ -3094,6 +3158,12 @@ function sampleReports(): Record<string, unknown>[] {
       props: { prev: { placeholder: 'Search', filters: { sort: 'asc', page: 1 } }, next: { placeholder: 'Search', filters: { sort: 'asc', page: 2 } } },
       propChanges: [{ path: 'filters', kind: 'different', prev: { sort: 'asc', page: 1 }, next: { sort: 'asc', page: 2 } }], stateChanges: [],
       hookChanges: [{ path: 'useState#0', hook: 'useState', index: 0, kind: 'different', prev: 'ab', next: 'abc' }], reasons: ['useState #0 changed.'],
+      hookState: [
+        { path: 'useState#0', hook: 'useState', index: 0, value: 'abc' },
+        { path: 'useState#1', hook: 'useState', index: 1, value: 3 },
+        { path: 'useReducer#3', hook: 'useReducer', index: 3, value: { cart: [1, 2], open: false } },
+      ],
+      contexts: [{ name: 'Theme', value: { mode: 'light', user: 'ann' } }],
     },
     {
       component: 'Sidebar', path: ['App'], trigger: 'hooks', avoidable: false, renderCount: 1, instanceId: 5, owner: 'App', parent: null, commitId: 2, memoized: true, commitPriority: 'normal',

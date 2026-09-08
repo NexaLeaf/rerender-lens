@@ -3,7 +3,7 @@
  * hook, exactly like React DevTools itself. Element types are never touched, so
  * Fast Refresh, memo comparators and component identity all stay intact.
  */
-import type { Change, CommitPriority, HookChange, ParentInfo, RenderTrigger, SourceLocation } from './types';
+import type { Change, CommitPriority, HookChange, HookSnapshot, ParentInfo, RenderTrigger, SourceLocation } from './types';
 import { classify, diffRecords } from './diff';
 import { buildReport } from './report';
 import { dispatch, getState, warnOnce } from './state';
@@ -386,6 +386,39 @@ function hookLabel(node: HookNode): string {
 /** Hooks that never create a node in `memoizedState`. */
 const NODELESS_HOOKS = new Set(['useContext', 'useDebugValue', 'use']);
 
+/** Dev hook-type labels, only when they map 1:1 onto the node list (otherwise nodes are labelled by inspection). */
+function hookLabelsFor(fiber: Fiber, first: HookNode | null): string[] | null {
+  const types = fiber._debugHookTypes?.filter((t) => !NODELESS_HOOKS.has(t));
+  let nodeCount = 0;
+  for (let n: HookNode | null = first; n; n = n.next) nodeCount++;
+  return types && types.length === nodeCount ? types : null;
+}
+
+const isHookList = (v: unknown): v is HookNode => !!v && typeof v === 'object' && 'next' in (v as object);
+
+/** Current value of every state-bearing hook of a function component. */
+export function snapshotHooks(fiber: Fiber): HookSnapshot[] {
+  const out: HookSnapshot[] = [];
+  if (fiber.tag === ClassComponent) return out;
+  const first = fiber.memoizedState;
+  if (!isHookList(first)) return out;
+  const labels = hookLabelsFor(fiber, first);
+  let i = 0;
+  for (let n: HookNode | null = first; n; n = n.next, i++) {
+    if (!isStateNode(n) && !isStoreNode(n)) continue;
+    const hook = labels?.[i] ?? hookLabel(n);
+    out.push({ path: `${hook}#${i}`, hook, index: i, value: n.memoizedState });
+  }
+  return out;
+}
+
+/** Every context the fiber reads, with its current value. */
+export function snapshotContexts(fiber: Fiber): { name: string; value: unknown }[] {
+  const out: { name: string; value: unknown }[] = [];
+  for (let d = fiber.dependencies?.firstContext ?? null; d; d = d.next) out.push({ name: d.context.displayName ?? 'Context', value: d.memoizedValue });
+  return out;
+}
+
 /** Diff the state-bearing hook nodes of a function component. */
 function diffHooks(fiber: Fiber, alt: Fiber): HookChange[] {
   const out: HookChange[] = [];
@@ -394,11 +427,7 @@ function diffHooks(fiber: Fiber, alt: Fiber): HookChange[] {
   let b = fiber.memoizedState as HookNode | null;
   if (!a || !b || typeof b !== 'object' || !('next' in b)) return out;
 
-  // Only trust the dev hook-type list when it maps 1:1 onto the node list.
-  const types = fiber._debugHookTypes?.filter((t) => !NODELESS_HOOKS.has(t));
-  let nodeCount = 0;
-  for (let n: HookNode | null = b; n; n = n.next) nodeCount++;
-  const labels = types && types.length === nodeCount ? types : null;
+  const labels = hookLabelsFor(fiber, b);
 
   let i = 0;
   while (a && b) {
@@ -566,6 +595,13 @@ export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void
       propChanges: a.propChanges,
       stateChanges: a.stateChanges,
       hookChanges: a.hookChanges,
+      ...(o.includeState !== false
+        ? {
+            hookState: trackHooks ? snapshotHooks(fiber) : undefined,
+            contexts: trackHooks ? snapshotContexts(fiber) : undefined,
+            state: fiber.tag === ClassComponent && fiber.memoizedState && typeof fiber.memoizedState === 'object' ? (fiber.memoizedState as Record<string, unknown>) : undefined,
+          }
+        : {}),
       parent: a.trigger === 'parent' ? nearestRenderedAncestor(fiber, parentCache, trackHooks) : null,
       owner: ownerName(fiber),
       path: componentPath(fiber),

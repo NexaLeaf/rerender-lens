@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Full state on every report.** `hookState` (every `useState` / `useReducer` /
+  `useSyncExternalStore` value), `contexts` (every context the component reads) and, for class
+  components, `state`. The panel's report shows Hooks, State and Contexts in full, with the
+  changed entries as prev → next; the console prints them too. `includeState: false` turns it off
+  (also in the panel's Settings).
 - **Sessions.** Record, use the app, Stop; apply a fix; record again. The Sessions view compares
   two sessions: avoidable re-renders per component with deltas, totals, wasted time, and which
   suggested fixes went away. Summaries persist per origin; exports include them.

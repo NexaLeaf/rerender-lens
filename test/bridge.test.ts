@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import {
   combineNotifiers,
+  configure,
   createCollector,
   createDevtoolsNotifier,
   deserializeOptions,
@@ -146,6 +147,51 @@ describe('memoized flag and timing', () => {
     expect(durationsOf(f)).toEqual({ self: 5, tree: 10 });
     expect(durationsOf({ actualDuration: 1, child: { actualDuration: 4, sibling: null } } as unknown as Fiber)).toEqual({ self: 0, tree: 1 });
     expect(durationsOf({} as Fiber)).toBeNull();
+  });
+});
+
+describe('state snapshots', () => {
+  it('puts every state hook, context and class state on the report, and includeState:false turns it off', () => {
+    const collector = createCollector();
+    init({ notifier: collector.notifier, silent: true });
+    const Theme = React.createContext('light');
+    Theme.displayName = 'Theme';
+    const Fn = track(function Fn(p: { n: number }) {
+      const [a] = React.useState('a');
+      React.useEffect(() => {}, []);
+      const [b, dispatch] = React.useReducer((s: number) => s + 1, 0);
+      const t = React.useContext(Theme);
+      React.useEffect(() => {
+        if (p.n === 1) dispatch();
+      }, [p.n]);
+      return h('span', null, a + b + t);
+    }, 'Fn');
+    class Cls extends React.Component<{ n: number }, { count: number; label: string }> {
+      override state = { count: 0, label: 'x' };
+      override render() {
+        return h('span', null, this.state.count + this.props.n);
+      }
+    }
+    track(Cls);
+    const { Parent, rerender } = makeParent((n) => h('div', null, h(Fn, { n: n + 1 }), h(Cls, { n })));
+    const hn = mount(h(Parent));
+    rerender();
+    const fn = collector.reports.find((r) => r.component === 'Fn')!;
+    expect(fn.hookState!.map((x) => [x.path, x.value])).toEqual([
+      ['useState#0', 'a'],
+      ['useReducer#2', 1],
+    ]);
+    expect(fn.contexts).toEqual([{ name: 'Theme', value: 'light' }]);
+    expect(fn.state).toBeUndefined();
+    const cls = collector.reports.find((r) => r.component === 'Cls')!;
+    expect(cls.state).toEqual({ count: 0, label: 'x' });
+    expect(cls.hookState).toEqual([]);
+    configure({ includeState: false });
+    rerender();
+    const later = collector.reports.filter((r) => r.component === 'Fn').at(-1)!;
+    expect(later.hookState).toBeUndefined();
+    expect(later.contexts).toBeUndefined();
+    hn.unmount();
   });
 });
 
