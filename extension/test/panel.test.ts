@@ -630,6 +630,35 @@ describe('sessions and deeper analysis', () => {
     expect(fixes[0]!.snippet).toContain('useMemo');
   });
 
+  it('shows every hook, context and state key with the changed ones as prev → next', () => {
+    send({
+      type: 'report',
+      payload: report({
+        component: 'Cart', avoidable: false, trigger: 'state', propChanges: [],
+        hookChanges: [{ path: 'useState#1', hook: 'useState', index: 1, kind: 'different', prev: 2, next: 3 }],
+        hookState: [
+          { path: 'useState#0', hook: 'useState', index: 0, value: 'abc' },
+          { path: 'useState#1', hook: 'useState', index: 1, value: 3 },
+          { path: 'useReducer#3', hook: 'useReducer', index: 3, value: { open: false } },
+        ],
+        contexts: [{ name: 'Theme', value: { mode: 'light' } }],
+      }),
+    });
+    panel.select('Cart');
+    const sections = [...root.querySelectorAll('.section h3')].map((h) => h.textContent);
+    expect(sections).toEqual(['Why did this render?', 'Rendered by', 'Props', 'Hooks', 'Contexts']);
+    const hookRows = [...root.querySelectorAll('.section')].find((s) => s.querySelector('h3')!.textContent === 'Hooks')!.querySelectorAll('tr');
+    expect([...hookRows].map((tr) => tr.className + ':' + tr.querySelector('td.k')!.textContent)).toEqual([':useState#0', 'changed real:useState#1', ':useReducer#3']);
+    expect(hookRows[1]!.textContent).toContain('2→3');
+    expect(root.textContent).toContain('Theme');
+    // class state renders as its own section, with the changed key highlighted
+    send({ type: 'report', payload: report({ component: 'Legacy', avoidable: false, trigger: 'state', propChanges: [], stateChanges: [{ path: 'count', kind: 'different', prev: 1, next: 2 }], state: { count: 2, label: 'x' } }) });
+    panel.select('Legacy');
+    expect([...root.querySelectorAll('.section h3')].map((h) => h.textContent)).toContain('State');
+    expect(root.querySelector('.kv tr.changed td.k')!.textContent).toBe('count');
+    expect(factory.reportToMarkdown(report({ hookState: [{ path: 'useState#0', hook: 'useState', index: 0, value: 'abc' }] }))).toContain('- useState#0: `"abc"`');
+  });
+
   it('labels commit priority on the report and in the commits list', () => {
     send({ type: 'report', payload: report({ commitPriority: 'immediate' }) });
     send({ type: 'report', payload: report({ commitId: 2, commitPriority: 'normal', renderCount: 2 }) });

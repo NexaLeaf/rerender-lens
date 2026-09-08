@@ -46,6 +46,15 @@ export interface HookChange extends Change {
   totalKeys?: number;
 }
 
+/** Current value of one state-bearing hook (`useState`, `useReducer`, `useSyncExternalStore`) after the render. */
+export interface HookSnapshot {
+  /** Same label as `HookChange.path`, e.g. `useState#0`. */
+  path: string;
+  hook: string;
+  index: number;
+  value: unknown;
+}
+
 /** Scheduler priority of the commit, as React reports it to the DevTools hook (transitions run at `normal`). */
 export type CommitPriority = 'immediate' | 'user-blocking' | 'normal' | 'low' | 'idle';
 
@@ -83,6 +92,12 @@ export interface RenderReport {
   stateChanges: Change[];
   /** Function components: state hooks and contexts that changed. */
   hookChanges: HookChange[];
+  /** Function components: every state hook with its current value (changed or not). Omitted when `includeState` is off. */
+  hookState?: HookSnapshot[];
+  /** Every context the component reads, with its current value. Omitted when `includeState` is off. */
+  contexts?: { name: string; value: unknown }[];
+  /** Class components: `this.state` after the render. Omitted when `includeState` is off. */
+  state?: Record<string, unknown>;
   /** Nearest ancestor that rendered in the same commit, or null when the update started here. */
   parent: ParentInfo | null;
   /** Component that created this element (dev builds only). */
@@ -118,6 +133,8 @@ export interface Options {
   exclude?: ComponentMatcher[];
   /** Diff hook state and contexts of function components. Default true. */
   trackHooks?: boolean;
+  /** Put the current values of every state hook, context and class state on each report (`hookState`, `contexts`, `state`). Default true. */
+  includeState?: boolean;
   /** Report re-renders caused by genuine changes too, not only avoidable ones. Default false. */
   logAll?: boolean;
   /** Do not print to the console. Reports still reach `notifier`. Default false. */
