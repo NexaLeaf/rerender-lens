@@ -4,7 +4,7 @@
  * Fast Refresh, memo comparators and component identity all stay intact.
  */
 import type { Change, CommitCause, CommitPriority, HookChange, HookSnapshot, ParentInfo, RenderTrigger, SourceLocation } from './types';
-import { classify, diffRecords } from './diff';
+import { classify, diffRecords, beginDiffScope } from './diff';
 import { buildReport } from './report';
 import { dispatch, getState, warnOnce } from './state';
 import { getDisplayName, shouldTrack } from './tracker';
@@ -288,11 +288,15 @@ const ids = new WeakMap<Fiber, number>();
 const fibersById = new Map<number, WeakRef<Fiber>>();
 const hasWeakRef = typeof WeakRef === 'function';
 
+let pruneAt = 5000;
 function remember(id: number, fiber: Fiber): void {
   if (!hasWeakRef) return;
+  if (fibersById.get(id)?.deref() === fiber) return;
   fibersById.set(id, new WeakRef(fiber));
-  if (fibersById.size > 5000) {
+  // Prune on growth only: scanning 5,000 live entries on every report was O(n) per report.
+  if (fibersById.size > pruneAt) {
     for (const [k, ref] of fibersById) if (!ref.deref()) fibersById.delete(k);
+    pruneAt = Math.max(5000, fibersById.size * 2);
   }
 }
 
@@ -362,7 +366,7 @@ const INTERNAL_FRAME = /react-dom|react_jsx|jsx-(dev-)?runtime|\/react\/|node_mo
 
 /** Parse the first application frame out of a stack string (React 19 `_debugStack`). */
 export function parseStackLocation(stack: string): SourceLocation | undefined {
-  for (const line of stack.split('\n')) {
+  for (const line of stack.split('\n', 24)) {
     const m = /(?:at\s+(?:.*?\s+)?\(?|@)?((?:https?|file|webpack|vite|blob):[^\s()]+?):(\d+):(\d+)\)?\s*$/.exec(line.trim());
     if (!m || !m[1] || INTERNAL_FRAME.test(m[1])) continue;
     return { fileName: m[1], lineNumber: Number(m[2]), columnNumber: Number(m[3]) };
@@ -379,9 +383,17 @@ export function sourceOf(fiber: Fiber): SourceLocation | undefined {
     return out;
   }
   const st = fiber._debugStack;
-  const text = typeof st === 'string' ? st : st && typeof st.stack === 'string' ? st.stack : null;
-  return text ? parseStackLocation(text) : undefined;
+  if (st && typeof st === 'object') {
+    // Reading `.stack` formats the trace (V8 does it lazily); do it once per element, not once per report.
+    if (sourceCache.has(st)) return sourceCache.get(st);
+    const text = typeof st.stack === 'string' ? st.stack : null;
+    const out = text ? parseStackLocation(text) : undefined;
+    sourceCache.set(st, out);
+    return out;
+  }
+  return typeof st === 'string' ? parseStackLocation(st) : undefined;
 }
+const sourceCache = new WeakMap<object, SourceLocation | undefined>();
 
 function bumpCount(fiber: Fiber): number {
   const prev = counts.get(fiber) ?? (fiber.alternate ? counts.get(fiber.alternate) : undefined) ?? 0;
@@ -606,6 +618,9 @@ function updatersOf(root: FiberRoot): string[] {
 /** The previous commit, to spot effect → setState loops. */
 let lastCommit: { id: number; at: number; rendered: Set<string> } | null = null;
 const EFFECT_LOOP_WINDOW_MS = 50;
+/** Reports per commit and time per commit after which the rest of the commit is skipped (counted in `info().truncated`). */
+export const MAX_REPORTS_PER_COMMIT = 200;
+export const COMMIT_TIME_BUDGET_MS = 25;
 
 /** Inspect one committed root. */
 export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void {
@@ -644,7 +659,10 @@ export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void
   // Effect loop: the update was scheduled by something that rendered in the previous commit, right after it.
   let commitCause: CommitCause | undefined;
   let afterCommit: number | undefined;
-  if (lastCommit && at - lastCommit.at < EFFECT_LOOP_WINDOW_MS && updaters.some((u) => lastCommit!.rendered.has(u))) {
+  // Discrete input (typing, dragging) also produces back-to-back commits from the same components; only
+  // normal/low priority work right after a commit looks like an effect loop.
+  const inputDriven = commitPriority === 'immediate' || commitPriority === 'user-blocking';
+  if (!inputDriven && lastCommit && at - lastCommit.at < EFFECT_LOOP_WINDOW_MS && updaters.some((u) => lastCommit!.rendered.has(u))) {
     commitCause = 'effect-after-commit';
     afterCommit = lastCommit.id;
   } else if (suspenseResolved) commitCause = 'suspense-resolved';
@@ -656,7 +674,17 @@ export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void
   lastCommit = { id: commitId, at, rendered: renderedNames };
   const dispatcherRef = o.resolveHookNames ? getDispatcherRef() : null;
   const parentCache = new Map<Fiber, ParentInfo | null>();
-  for (const fiber of rendered) {
+  // One equality scope per commit: a large value shared by many components is compared once.
+  const endDiffScope = beginDiffScope();
+  const deadline = at + COMMIT_TIME_BUDGET_MS;
+  try {
+  for (let i = 0; i < rendered.length; i++) {
+    if (i >= MAX_REPORTS_PER_COMMIT || ((i & 15) === 15 && nowMs() > deadline)) {
+      s.truncated += rendered.length - i;
+      warnOnce('truncated', `a commit rendered ${rendered.length} tracked components; only ${i} were reported (see info().truncated). Narrow \`include\` or turn off includeState.`);
+      break;
+    }
+    const fiber = rendered[i]!;
     const alt = fiber.alternate!;
     const a = analyze(fiber, alt, trackHooks);
     const durations = durationsOf(fiber);
@@ -699,5 +727,8 @@ export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void
       source: sourceOf(fiber),
     });
     dispatch(report);
+  }
+  } finally {
+    endDiffScope();
   }
 }

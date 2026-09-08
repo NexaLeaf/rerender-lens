@@ -170,7 +170,6 @@ interface CascadeNode {
 }
 
 export interface HelloPayload {
-  count?: number;
   library?: string;
   protocol: number;
   react?: { version?: string; bundleType?: number }[];
@@ -180,7 +179,6 @@ export interface HelloPayload {
   source?: 'page' | 'extension';
   injected?: boolean;
   commits?: number;
-  scheduled?: number;
   overhead?: { totalMs: number; maxCommitMs: number };
 }
 
@@ -231,15 +229,12 @@ export interface Transport {
   storage?: { get(key: string): Promise<unknown> | unknown; set(key: string, value: unknown): unknown };
   badge?(count: number): void;
   copy?(text: string): unknown;
-  download?(name: string, text: string): unknown;
   /** Show this panel outside DevTools: Chrome's side panel next to the page, or its own window. */
   undock?(mode: 'sidepanel' | 'window'): Promise<unknown>;
   /** Standalone mode: which tab the panel follows (shown as a chip in the toolbar). */
   tabLabel?: string | null;
   /** Text of a page resource (the module that created an element), for source context. */
   readSource?(url: string): Promise<string | null>;
-  /** Absolute URL of this panel page, for shareable report links. */
-  panelUrl?: string;
 }
 
 export interface PanelOptions {
@@ -256,7 +251,6 @@ interface PersistedState {
   treeWidth?: number;
   flashOn?: boolean;
   byInstance?: boolean;
-  columns?: OffenderKey[];
 }
 
 type View = 'tree' | 'offenders' | 'commits' | 'fixes' | 'sessions';
@@ -287,7 +281,6 @@ export interface PanelState {
   flashOn: boolean;
   settingsOpen: boolean;
   origin: string | null;
-  legacyCommit: number;
   treeWidth?: number;
   tabLabel: string | null;
   compact: boolean;
@@ -296,9 +289,6 @@ export interface PanelState {
   selectedSession: string | null;
   compareWith: string | null;
   byInstance: boolean;
-  /** Optional Offenders columns currently shown. */
-  columns: OffenderKey[];
-  notes: Record<string, ComponentNote>;
 }
 
 export interface Panel {
@@ -312,10 +302,9 @@ export interface Panel {
   openSettings(): void;
   startRecording(name?: string): Session;
   stopRecording(): Session | null;
-  setNote(component: string, note: ComponentNote): void;
 }
 
-type OffenderKey = 'component' | 'avoidable' | 'total' | 'wasted' | 'lastSeen' | 'places';
+type OffenderKey = 'component' | 'avoidable' | 'total' | 'wasted';
 
 interface Offender {
   component: string;
@@ -323,29 +312,9 @@ interface Offender {
   avoidable: number;
   wasted: number;
   paths: Set<string>;
-  places: number;
-  lastSeen: number;
   reports: Report[];
   fix: string;
-  muted: boolean;
 }
-
-/** Optional Offenders columns (the first four are always shown). */
-const OPTIONAL_COLUMNS: { key: OffenderKey; label: string }[] = [
-  { key: 'places', label: 'Places' },
-  { key: 'lastSeen', label: 'Last seen' },
-];
-
-/** Per-component annotations kept per origin. */
-export interface ComponentNote {
-  note?: string;
-  /** Hidden from the Fixes ranking and the summary strip (known, tracked elsewhere). */
-  muted?: boolean;
-}
-
-/** Windowed rendering kicks in above this many rows. */
-const VIRTUAL_THRESHOLD = 200;
-const GRID_ROW_H = 26;
 
 declare global {
   interface Window {
@@ -919,73 +888,6 @@ function compareSessions(before: SessionSummary, after: SessionSummary): Compari
 
 const PRIORITY_LABEL: Record<string, string> = { immediate: 'discrete input', 'user-blocking': 'continuous input', normal: 'transition / async', low: 'low', idle: 'idle' };
 
-// ---------- shareable links ----------
-const b64url = (bytes: Uint8Array): string => {
-  let s = '';
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-};
-const unb64url = (s: string): Uint8Array => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
-
-/** Pipe bytes through a (de)compression stream; works in browsers and in Node's web streams alike. */
-async function transformBytes(bytes: Uint8Array, transform: ReadableWritablePair<Uint8Array, Uint8Array>): Promise<Uint8Array> {
-  const source = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(bytes);
-      controller.close();
-    },
-  });
-  const reader = source.pipeThrough(transform).getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    total += value.length;
-  }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const c of chunks) {
-    out.set(c, offset);
-    offset += c.length;
-  }
-  return out;
-}
-
-/** `report=` query value: deflated + base64url JSON when the browser can compress, plain base64url JSON otherwise. */
-async function encodeShare(report: Report): Promise<string> {
-  const json = JSON.stringify(report);
-  const bytes = new TextEncoder().encode(json);
-  if (typeof CompressionStream === 'function') {
-    try {
-      return 'd.' + b64url(await transformBytes(bytes, new CompressionStream('deflate-raw') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>));
-    } catch {
-      /* fall back to plain */
-    }
-  }
-  return 'j.' + b64url(bytes);
-}
-
-async function decodeShare(value: string): Promise<Report | null> {
-  const [kind, data] = value.split('.', 2);
-  if (!data) return null;
-  let bytes = unb64url(data);
-  if (kind === 'd') {
-    if (typeof DecompressionStream !== 'function') return null;
-    try {
-      bytes = await transformBytes(bytes, new DecompressionStream('deflate-raw') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>);
-    } catch {
-      return null;
-    }
-  }
-  try {
-    return normalizeReport(JSON.parse(new TextDecoder().decode(bytes)));
-  } catch {
-    return null;
-  }
-}
-
 /** Lines around a location in a module's source, for the "where the element was created" box. */
 function sourceContext(text: string, line: number, around = 3): { n: number; text: string; hit: boolean }[] {
   const lines = text.split('\n');
@@ -1094,8 +996,6 @@ export interface ReportViewActions {
   openSource?: ((src: SourceLocation) => void) | null;
   highlight?: ((id: number) => void) | null;
   copy?: ((text: string) => void) | null;
-  /** Copy a link that opens this report in the panel. */
-  share?: ((r: Report) => void) | null;
   /** Source text of a module, for the context box under the actions. */
   readSource?: ((url: string) => Promise<string | null>) | null;
   compact?: boolean;
@@ -1129,10 +1029,6 @@ function reportView(r: Report, actions: ReportViewActions = {}): DocumentFragmen
     if (actions.copy) {
       const copy = actions.copy;
       bar.append(el('button', { onclick: () => copy(reportToMarkdown(r)) }, '⎘ Copy as Markdown'));
-    }
-    if (actions.share) {
-      const share = actions.share;
-      bar.append(el('button', { title: 'Copy a link that opens this report in the panel', onclick: () => share(r) }, '🔗 Copy link'));
     }
     if (bar.children.length) head.append(bar);
     // Source context: the lines around where the element was created, loaded lazily.
@@ -1351,7 +1247,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     flashOn: false,
     settingsOpen: false,
     origin: null,
-    legacyCommit: 0,
     tabLabel: transport.tabLabel ?? null,
     compact: false,
     sessions: [],
@@ -1359,8 +1254,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     selectedSession: null,
     compareWith: null,
     byInstance: false,
-    columns: [],
-    notes: {},
   };
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let queue: Report[] = [];
@@ -1544,10 +1437,10 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       if (!r.avoidable) continue;
       avoidable++;
       if (typeof r.selfDuration === 'number') wasted += r.selfDuration;
-      if (!isMuted(r.component)) perComponent.set(r.component, (perComponent.get(r.component) || 0) + 1);
+      perComponent.set(r.component, (perComponent.get(r.component) || 0) + 1);
     }
     const top = [...perComponent].sort((a, b) => b[1] - a[1])[0];
-    const fix = avoidable ? rankFixes(state.reports.filter((r) => !isMuted(r.component)))[0] : undefined;
+    const fix = avoidable ? rankFixes(state.reports)[0] : undefined;
     const stat = (value: string, label: string, cls = ''): HTMLElement => el('span', { class: 'stat ' + cls }, [el('b', { text: value }), el('span', { class: 'label', text: label })]);
     summary.append(stat(String(total), plural(total, 'render').replace(/^\d+ /, '')), stat(String(avoidable), 'avoidable', avoidable ? 'bad' : 'good'));
     if (wasted) summary.append(stat(fmtMs(wasted), 'wasted', 'bad'));
@@ -1621,7 +1514,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         treeWidth: state.treeWidth,
         flashOn: state.flashOn,
         byInstance: state.byInstance,
-        columns: state.columns,
       };
       transport.storage!.set('panel', saved);
     }, 150);
@@ -1676,7 +1568,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       instancesBtn.classList.toggle('active', state.byInstance);
       rebuildTree();
     }
-    if (Array.isArray(saved.columns)) state.columns = saved.columns.filter((c): c is OffenderKey => OPTIONAL_COLUMNS.some((o) => o.key === c));
     if (saved.tab === 'history' || saved.tab === 'fix') state.tab = saved.tab;
     if (saved.view && viewButtons.has(saved.view)) state.view = saved.view;
     for (const n of state.nodesByKey.values()) n.expanded = !state.collapsed.has(n.key);
@@ -1731,12 +1622,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     renderDetails();
   }
 
-  function commitKeyFor(report: Report): number {
-    if (report.commitId > 0) return report.commitId;
-    // Protocol 1 libraries have no commit id: reports delivered in one flush count as one commit.
-    return -state.legacyCommit;
-  }
-
   function ingest(report: Report): TreeNode {
     if (!report.receivedAt) report.receivedAt = Date.now();
     state.reports.push(report);
@@ -1752,7 +1637,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     node.lastReport = report;
     node.flash = true;
     node.flashAt = Date.now();
-    const ck = commitKeyFor(report);
+    const ck = report.commitId;
     let list = state.commits.get(ck);
     if (!list) {
       list = [];
@@ -1770,7 +1655,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     if (!queue.length) return;
     const batch = queue;
     queue = [];
-    state.legacyCommit++;
     let touchedSelected = false;
     let avoidableCount = 0;
     for (const r of batch) {
@@ -1858,10 +1742,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     return false;
   }
 
-  const isMuted = (component: string): boolean => !!state.notes[component]?.muted;
   const passes = (r: Report): boolean => (!state.avoidableOnly || r.avoidable) && matchesFilter(r.component) && matchesValues(r);
-  /** Reports that count towards rankings: filtered and not muted. */
-  const ranked = (): Report[] => state.reports.filter((r) => passes(r) && !isMuted(r.component));
   const filteredReports = (): Report[] => state.reports.filter(passes);
 
   // ---------- left pane ----------
@@ -1954,7 +1835,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     row.classList.toggle('selected', state.selectedKey === node.key);
     row.setAttribute('aria-selected', state.selectedKey === node.key ? 'true' : 'false');
     row.setAttribute('aria-level', String(depth + 1));
-    row.classList.toggle('muted', isMuted(node.lastReport ? node.lastReport.component : node.name));
     const indent = row.querySelector('.indent') as HTMLElement;
     if (indent.childElementCount !== depth) {
       indent.textContent = '';
@@ -2066,7 +1946,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     for (const r of filteredReports()) {
       let o = byName.get(r.component);
       if (!o) {
-        o = { component: r.component, total: 0, avoidable: 0, wasted: 0, paths: new Set(), places: 0, lastSeen: 0, reports: [], fix: '', muted: isMuted(r.component) };
+        o = { component: r.component, total: 0, avoidable: 0, wasted: 0, paths: new Set(), reports: [], fix: '' };
         byName.set(r.component, o);
       }
       o.total++;
@@ -2075,12 +1955,10 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         if (typeof r.selfDuration === 'number') o.wasted += r.selfDuration;
       }
       o.paths.add(keyOf(r.path));
-      o.lastSeen = Math.max(o.lastSeen, r.receivedAt);
       o.reports.push(r);
     }
     const rows = [...byName.values()];
     for (const o of rows) {
-      o.places = o.paths.size;
       const fixes = o.avoidable ? rankFixes(o.reports) : [];
       o.fix = fixes.length ? fixes[0]!.label : '';
     }
@@ -2094,67 +1972,25 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     return rows;
   }
 
-  function columnsMenu(): HTMLElement {
-    const menu = el('details', { class: 'columns-menu' }, [el('summary', { title: 'Choose columns', text: '⚙ Columns' })]);
-    const box = el('div', { class: 'menu' });
-    for (const col of OPTIONAL_COLUMNS) {
-      const input = el('input', { type: 'checkbox' });
-      input.checked = state.columns.includes(col.key);
-      input.addEventListener('change', () => {
-        state.columns = OPTIONAL_COLUMNS.map((c) => c.key).filter((k) => (k === col.key ? input.checked : state.columns.includes(k)));
-        renderOffenders();
-        persist();
-      });
-      box.append(el('label', { class: 'opt' }, [input, col.label]));
-    }
-    menu.append(box);
-    return menu;
-  }
-
-  const offenderCell = (o: Offender, key: OffenderKey): HTMLElement => {
-    switch (key) {
-      case 'places':
-        return el('td', { class: 'num', text: String(o.places) });
-      case 'lastSeen':
-        return el('td', { class: 'num mono', text: o.lastSeen ? fmtTime(o.lastSeen) : '' });
-      default:
-        return el('td');
-    }
-  };
-
-  function offenderRow(o: Offender, tag: 'tr' | 'div'): HTMLElement {
-    const cells: HTMLElement[] = [
-      el('td', { class: 'c' }, [el('span', { class: 'name', text: o.component }), o.muted ? el('span', { class: 'badge', text: 'muted' }) : null, o.paths.size > 1 && !state.columns.includes('places') ? el('span', { class: 'meta', text: ` ×${o.paths.size} places` }) : null]),
-      el('td', { class: 'num' }, o.avoidable ? el('span', { class: 'badge avoid', text: String(o.avoidable) }) : '0'),
-      el('td', { class: 'num', text: String(o.total) }),
-      el('td', { class: 'num', text: o.wasted ? fmtMs(o.wasted) : '' }),
-      ...state.columns.map((k) => offenderCell(o, k)),
-      el('td', { class: 'fix', text: o.fix }),
-    ];
-    const attrs: Attrs = {
-      class: (o.avoidable ? 'has-avoid' : '') + (o.muted ? ' muted' : ''),
-      role: tag === 'div' ? 'listitem' : null,
-      onclick: () => {
-        const last = o.reports[o.reports.length - 1]!;
-        state.tab = 'fix';
-        select(nodeOfReport(last), last);
+  function offenderRow(o: Offender): HTMLElement {
+    return el(
+      'tr',
+      {
+        class: o.avoidable ? 'has-avoid' : '',
+        onclick: () => {
+          const last = o.reports[o.reports.length - 1]!;
+          state.tab = 'fix';
+          select(nodeOfReport(last), last);
+        },
       },
-    };
-    if (tag === 'tr') return el('tr', attrs, cells);
-    // windowed variant: a div row with grid columns, cells re-tagged as spans
-    const row = el('div', { ...attrs, class: 'vrow ' + attrs.class });
-    for (const c of cells) {
-      const span = el('span', { class: c.className });
-      span.append(...c.childNodes);
-      row.append(span);
-    }
-    return row;
-  }
-
-  const offendersList = virtualList<Offender>(table, GRID_ROW_H, (o) => offenderRow(o, 'div'), { attach: false, headerHeight: () => (table.querySelector('.vhead') as HTMLElement | null)?.offsetHeight || 0 });
-
-  function offendersHeader(): HTMLElement[] {
-    return [sortableHeader('Component', 'component'), sortableHeader('Avoidable', 'avoidable', true), sortableHeader('Total', 'total', true), sortableHeader('Wasted', 'wasted', true), ...state.columns.map((k) => sortableHeader(OPTIONAL_COLUMNS.find((c) => c.key === k)!.label, k, true)), el('th', { text: 'Top fix' })];
+      [
+        el('td', { class: 'c' }, [el('span', { class: 'name', text: o.component }), o.paths.size > 1 ? el('span', { class: 'meta', text: ` ×${o.paths.size} places` }) : null]),
+        el('td', { class: 'num' }, o.avoidable ? el('span', { class: 'badge avoid', text: String(o.avoidable) }) : '0'),
+        el('td', { class: 'num', text: String(o.total) }),
+        el('td', { class: 'num', text: o.wasted ? fmtMs(o.wasted) : '' }),
+        el('td', { class: 'fix', text: o.fix }),
+      ],
+    );
   }
 
   function renderOffenders(): void {
@@ -2164,29 +2000,12 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       table.append(el('div', { class: 'empty', text: 'No re-renders reported yet.' }));
       return;
     }
-    const gridCols = `minmax(140px, 2fr) 70px 60px 80px ${state.columns.map(() => '90px').join(' ')} minmax(120px, 2fr)`;
-    if (rows.length > VIRTUAL_THRESHOLD) {
-      // Windowed: a sticky header row plus positioned div rows.
-      const head = el('div', { class: 'vhead', style: `grid-template-columns:${gridCols}` });
-      for (const th of offendersHeader()) {
-        const cell = el('span', { class: th.className, onclick: null });
-        cell.append(...th.childNodes);
-        cell.addEventListener('click', () => th.click());
-        head.append(cell);
-      }
-      head.append(columnsMenu());
-      table.append(head, offendersList.inner);
-      offendersList.inner.style.setProperty('--grid-cols', gridCols);
-      offendersList.setItems(rows);
-      return;
-    }
     const t = el('table', { class: 'grid' });
-    const headRow = el('tr', null, offendersHeader());
-    t.append(el('thead', null, headRow));
+    t.append(el('thead', null, el('tr', null, [sortableHeader('Component', 'component'), sortableHeader('Avoidable', 'avoidable', true), sortableHeader('Total', 'total', true), sortableHeader('Wasted', 'wasted', true), el('th', { text: 'Top fix' })])));
     const body = el('tbody');
-    for (const o of rows) body.append(offenderRow(o, 'tr'));
+    for (const o of rows) body.append(offenderRow(o));
     t.append(body);
-    table.append(el('div', { class: 'table-tools' }, columnsMenu()), t);
+    table.append(t);
   }
 
   // ---------- commits ----------
@@ -2226,7 +2045,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       const root = analysis.roots[0];
       list.append(
         el('li', { class: (state.selectedCommit === key && state.tab === 'commit' ? 'selected ' : '') + (analysis.avoidable ? 'has-avoid' : ''), onclick: () => showCommit(key) }, [
-          el('span', { class: 'id', text: key > 0 ? `#${key}` : '—' }),
+          el('span', { class: 'id', text: `#${key}` }),
           el('span', { class: 't', text: fmtTime(analysis.receivedAt) }),
           el('span', { class: 'n', text: plural(analysis.total, 'render') }),
           analysis.avoidable ? el('span', { class: 'badge avoid', text: `${analysis.avoidable} avoidable` }) : el('span', { class: 'badge', text: 'ok' }),
@@ -2247,13 +2066,13 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   }
 
   // ---------- fixes ----------
-  function fixItem(f: RankedFix, tag: 'li' | 'div'): HTMLElement {
+  function fixItem(f: RankedFix): HTMLElement {
+    const selected = state.selectedFix === f.key && state.tab === 'fixlist';
     return el(
-      tag,
+      'li',
       {
-        class: (tag === 'div' ? 'vrow fix-row ' : '') + (state.selectedFix === f.key && state.tab === 'fixlist' ? 'selected' : ''),
-        role: tag === 'div' ? 'listitem' : null,
-        'aria-selected': state.selectedFix === f.key && state.tab === 'fixlist' ? 'true' : null,
+        class: selected ? 'selected' : '',
+        'aria-selected': selected ? 'true' : null,
         onclick: () => {
           state.selectedFix = f.key;
           state.tab = 'fixlist';
@@ -2269,28 +2088,19 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     );
   }
 
-  const fixesList = virtualList<RankedFix>(table, GRID_ROW_H, (f) => fixItem(f, 'div'), { attach: false, headerHeight: () => (table.querySelector('.section-title') as HTMLElement | null)?.offsetHeight || 0 });
-
   function renderFixes(): void {
     table.textContent = '';
-    const reports = ranked();
+    const reports = filteredReports();
     const fixes = rankFixes(reports);
     const contexts = contextAttribution(reports);
-    const mutedCount = Object.values(state.notes).filter((n) => n.muted).length;
     if (!fixes.length && !contexts.length) {
-      table.append(el('div', { class: 'empty', text: mutedCount ? `No avoidable re-renders outside the ${plural(mutedCount, 'muted component')}.` : 'No avoidable re-renders, nothing to fix.' }));
+      table.append(el('div', { class: 'empty', text: 'No avoidable re-renders, nothing to fix.' }));
       return;
     }
     if (fixes.length) {
-      const title = el('div', { class: 'section-title', text: `Ranked by avoidable re-renders removed${mutedCount ? ` (${plural(mutedCount, 'muted component')} hidden)` : ''}` });
-      if (fixes.length > VIRTUAL_THRESHOLD) {
-        table.append(title, fixesList.inner);
-        fixesList.setItems(fixes);
-      } else {
-        const list = el('ol', { class: 'fixes', role: 'list' });
-        for (const f of fixes) list.append(fixItem(f, 'li'));
-        table.append(title, list);
-      }
+      const list = el('ol', { class: 'fixes', role: 'list' });
+      for (const f of fixes) list.append(fixItem(f));
+      table.append(el('div', { class: 'section-title', text: 'Ranked by avoidable re-renders removed' }), list);
     }
     if (contexts.length) {
       const list = el('ul', { class: 'contexts' });
@@ -2332,11 +2142,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     openSource: transport.openResource ? (src) => transport.openResource!(src.fileName, src.lineNumber, src.columnNumber) : null,
     highlight: transport.highlight ? (id) => transport.highlight!(id) : null,
     copy: copyText,
-    share: transport.panelUrl
-      ? (r) => {
-          void encodeShare(r).then((code) => copyText(`${transport.panelUrl}?report=${code}`));
-        }
-      : null,
     readSource: transport.readSource ? (url) => transport.readSource!(url) : null,
   });
 
@@ -2347,15 +2152,9 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       details.append(el('div', { class: 'empty', text: 'Select a component to see why it re-rendered.' }));
       return;
     }
-    const componentName = node.lastReport ? node.lastReport.component : node.name;
-    const note = state.notes[componentName] || {};
-    const noteBtn = el('button', { class: 'ib small' + (note.note ? ' active' : ''), title: note.note ? note.note : 'Add a note for this component', 'aria-label': 'Note', onclick: () => toggleNoteEditor() }, [el('span', { class: 'glyph', text: '✎' })]);
-    const muteBtn = el('button', { class: 'ib small' + (note.muted ? ' active' : ''), title: note.muted ? 'Muted: hidden from Fixes and the summary. Click to unmute.' : 'Mute: hide this component from Fixes and the summary', 'aria-label': note.muted ? 'Unmute' : 'Mute', onclick: () => setNote(componentName, { muted: !note.muted }) }, [el('span', { class: 'glyph', text: note.muted ? '🔕' : '🔔' })]);
     const header = el('div', { class: 'details-header' }, [
       el('span', { class: 'title' }, [el('span', { class: 'bracket', text: '<' }), el('span', { class: 'name', text: node.name }), el('span', { class: 'bracket', text: '>' })]),
       el('span', { class: 'meta', text: `${plural(node.total, 're-render')}, ${node.avoidable} avoidable${node.wasted ? ', ' + fmtMs(node.wasted) + ' wasted' : ''}` }),
-      noteBtn,
-      muteBtn,
       el('span', { class: 'tabs' }, [
         tabButton('latest', 'Report', () => {
           state.tab = 'latest';
@@ -2378,21 +2177,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     details.append(header);
     const body = el('div', { class: 'details-body' });
     details.append(body);
-    if (note.note || noteEditorOpen === componentName) {
-      const input = el('input', { type: 'text', class: 'note-input', placeholder: 'Note for this component (e.g. "known, ticket #123")', value: note.note || '' });
-      input.addEventListener('change', () => {
-        setNote(componentName, { note: input.value.trim() || undefined });
-        noteEditorOpen = null;
-      });
-      input.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-          noteEditorOpen = null;
-          renderDetails();
-        }
-      });
-      body.append(el('div', { class: 'note-box' + (note.muted ? ' muted' : '') }, [el('span', { class: 'glyph', text: '✎' }), input, note.muted ? el('span', { class: 'badge', text: 'muted' }) : null]));
-      if (noteEditorOpen === componentName) setTimeout(() => input.focus(), 0);
-    }
     if (state.tab === 'history') {
       const list = el('ul', { class: 'history' });
       for (const r of [...node.reports].reverse()) {
@@ -2452,7 +2236,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     const a = analyzeCommit(reports);
     details.append(
       el('div', { class: 'details-header' }, [
-        el('span', { class: 'title', text: key > 0 ? `Commit #${key}` : 'Commit' }),
+        el('span', { class: 'title', text: `Commit #${key}` }),
         el('span', { class: 'meta', text: `${plural(a.total, 'render')}, ${a.avoidable} avoidable${a.wasted ? ', ' + fmtMs(a.wasted) + ' wasted' : ''} · ${fmtTime(a.receivedAt)}` }),
       ]),
     );
@@ -2542,7 +2326,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     for (const c of s.commits) {
       list.append(
         el('li', { onclick: () => showCommit(c.key) }, [
-          el('span', { class: 'id', text: c.key > 0 ? `#${c.key}` : '—' }),
+          el('span', { class: 'id', text: `#${c.key}` }),
           el('span', { class: 't', text: fmtTime(c.analysis.receivedAt) }),
           el('span', { class: 'badge avoid', text: `${c.count} avoidable` }),
           el('span', { class: 'root', text: componentList(c.components) }),
@@ -2554,41 +2338,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       body.append(el('div', { class: 'section-title', text: 'Fixes' }));
       body.append(fixView(s.fixes, { copy: copyText }));
     }
-  }
-
-  // ---------- notes and mute ----------
-  let noteEditorOpen: string | null = null;
-  function toggleNoteEditor(): void {
-    const node = state.selectedKey ? state.nodesByKey.get(state.selectedKey) : null;
-    const name = node ? (node.lastReport ? node.lastReport.component : node.name) : null;
-    noteEditorOpen = noteEditorOpen === name ? null : name;
-    renderDetails();
-  }
-
-  function setNote(component: string, patch: ComponentNote): void {
-    const next = { ...(state.notes[component] || {}), ...patch };
-    if (!next.note && !next.muted) delete state.notes[component];
-    else state.notes[component] = next;
-    if (transport.storage) transport.storage.set('notes', state.notes);
-    renderSummary();
-    renderLeft();
-    renderDetails();
-  }
-
-  function restoreNotes(raw: unknown): void {
-    if (!isRecord(raw)) return;
-    const notes: Record<string, ComponentNote> = {};
-    for (const [k, v] of Object.entries(raw)) {
-      if (!isRecord(v)) continue;
-      const n: ComponentNote = {};
-      if (typeof v.note === 'string' && v.note) n.note = v.note;
-      if (v.muted === true) n.muted = true;
-      if (n.note || n.muted) notes[k] = n;
-    }
-    state.notes = notes;
-    renderSummary();
-    renderLeft();
-    renderDetails();
   }
 
   // ---------- sessions ----------
@@ -2827,10 +2576,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     };
     const text = JSON.stringify(data, null, 2);
     const name = `rerender-lens-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-    if (transport.download) {
-      transport.download(name, text);
-      return;
-    }
     try {
       const blob = new Blob([text], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -2900,13 +2645,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     tabChip.textContent = state.tabLabel || '';
     banner.textContent = '';
     const warnings: string[] = [];
-    if (lib && typeof lib.protocol === 'number' && lib.protocol !== PROTOCOL) {
-      warnings.push(
-        lib.protocol < PROTOCOL
-          ? `The page runs rerender-lens ${lib.library || ''} (protocol ${lib.protocol}); this panel expects protocol ${PROTOCOL}. Update the rerender-lens package for commit grouping, source links and settings.`
-          : `The page runs a newer rerender-lens (protocol ${lib.protocol}) than this panel (${PROTOCOL}). Update the extension.`,
-      );
-    }
+    if (lib && typeof lib.protocol === 'number' && lib.protocol > PROTOCOL) warnings.push(`The page runs a newer rerender-lens (protocol ${lib.protocol}) than this panel (${PROTOCOL}). Update the extension.`);
     if (lib && lib.production) warnings.push('Production React build detected: component names may be minified and hooks are unlabeled. Use a development build.');
     if (lib && lib.injected && lib.source === 'page')
       warnings.push(`The page runs its own rerender-lens ${lib.library || ''}; the copy injected by the extension stepped aside. Turn injection off for this origin in Settings to avoid loading the library twice.`);
@@ -3026,10 +2765,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       sec.append(el('div', { class: 'meta', text: 'Connect to a page running rerender-lens to change its options.' }));
       return;
     }
-    if (lib.protocol < PROTOCOL) {
-      sec.append(el('div', { class: 'meta', text: 'The page library is too old to be configured from here.' }));
-      return;
-    }
     const current: SerializableOptions = Object.assign({}, lib.options || {});
     const applyOptions = async (patch: SerializableOptions): Promise<void> => {
       Object.assign(current, patch);
@@ -3092,7 +2827,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         renderStatus();
         break;
       case 'hello':
-        setLibrary(isRecord(message.payload) ? Object.assign({ protocol: message.version || 1 }, message.payload as unknown as HelloPayload) : { protocol: message.version || 1 });
+        if (isRecord(message.payload)) setLibrary(message.payload as unknown as HelloPayload);
         break;
       case 'clear':
       case 'navigated':
@@ -3124,7 +2859,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     openSettings: () => toggleSettings(true),
     startRecording,
     stopRecording,
-    setNote,
   };
 
   if (options.theme === 'dark') document.documentElement.classList.add('theme-dark');
@@ -3138,10 +2872,73 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   if (transport.storage) {
     Promise.resolve(transport.storage.get('panel')).then(restore, () => {});
     Promise.resolve(transport.storage.get('sessions')).then(restoreSessions, () => {});
-    Promise.resolve(transport.storage.get('notes')).then(restoreNotes, () => {});
   }
   transport.subscribe(handle);
   return panelApi;
+}
+
+// ---------- transport helpers ----------
+const systemTheme = (): 'dark' | 'light' => (typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+
+/** Module source over HTTP (dev servers serve it as-is); null when unreachable. */
+const fetchSource = (url: string): Promise<string | null> => fetch(url).then((res) => (res.ok ? res.text() : null)).catch(() => null);
+
+/** Panel storage in `localStorage`, keys prefixed per transport. */
+function localStorageAdapter(prefix: string): NonNullable<Transport['storage']> {
+  const mem = (key: string): string => `${prefix}:${key}`;
+  return {
+    get: (key) => {
+      try {
+        const raw = localStorage.getItem(mem(key));
+        return raw ? JSON.parse(raw) : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    set: (key, value) => {
+      try {
+        localStorage.setItem(mem(key), JSON.stringify(value));
+      } catch {
+        /* quota or private mode */
+      }
+    },
+  };
+}
+
+/**
+ * Request/response over a message stream: `bridge(cmd, arg)` sends a `__rerenderLensCmd` message and resolves with
+ * the matching `__rerenderLensReply` (null after `timeoutMs` when nobody answers); `reply(m)` feeds incoming messages
+ * and returns true when it consumed one.
+ */
+function commandBridge(send: (message: { __rerenderLensCmd: true; id: string; cmd: string; arg: unknown }) => unknown, timeoutMs: number) {
+  const pending = new Map<string, { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
+  const bridge = <T = unknown,>(cmd: string, arg?: unknown): Promise<T | null> =>
+    new Promise((resolve, reject) => {
+      const id = Math.random().toString(36).slice(2);
+      const fail = (): void => {
+        clearTimeout(timer);
+        pending.delete(id);
+        resolve(null);
+      };
+      const timer = setTimeout(fail, timeoutMs);
+      pending.set(id, { resolve: (v) => (v instanceof Error ? reject(v) : resolve(v as T)), timer });
+      try {
+        void Promise.resolve(send({ __rerenderLensCmd: true, id, cmd, arg })).catch(fail);
+      } catch {
+        fail();
+      }
+    });
+  const reply = (m: Record<string, unknown>): boolean => {
+    if (m.__rerenderLensReply !== true || typeof m.id !== 'string') return false;
+    const p = pending.get(m.id);
+    if (p) {
+      pending.delete(m.id);
+      clearTimeout(p.timer);
+      p.resolve(typeof m.error === 'string' ? new Error(m.error) : m.result);
+    }
+    return true;
+  };
+  return { bridge, reply };
 }
 
 // ---------- boot: extension ----------
@@ -3200,7 +2997,7 @@ function createRelayTransport(io: TransportIO): Transport {
     try {
       const info = await io.bridge<HelloPayload>('info');
       if (info) {
-        emit({ type: 'hello', version: info.protocol || 1, payload: info });
+        emit({ type: 'hello', version: info.protocol, payload: info });
         return true;
       }
     } catch {
@@ -3284,7 +3081,9 @@ function createRelayTransport(io: TransportIO): Transport {
       listener = fn;
       connect();
       io.onNavigated(() => {
+        // The old page is gone: stop evaluating into it until the new one answers `info` (attachToPage restarts polling).
         since = 0;
+        setPolling(false);
         fn({ type: 'navigated' });
         void resolveOrigin().then(() => {
           setTimeout(() => void attachToPage(), 1200);
@@ -3339,7 +3138,6 @@ function createRelayTransport(io: TransportIO): Transport {
   if (io.openResource) transport.openResource = io.openResource;
   if (io.undock) transport.undock = io.undock;
   if (io.readSource) transport.readSource = io.readSource;
-  transport.panelUrl = chrome.runtime.getURL('panel.html');
   return transport;
 }
 
@@ -3361,7 +3159,7 @@ function devtoolsIO(): TransportIO {
       }),
     );
   const expressions: Record<BridgeCommand, (arg: unknown) => string> = {
-    info: () => 'b.info?b.info():{count:b.size,protocol:b.version}',
+    info: () => 'b.info()',
     pull: (since) => `b.pull?b.pull(${Number(since) || 0}):null`,
     replay: () => 'b.replay()',
     clear: () => 'b.clear()',
@@ -3396,12 +3194,12 @@ function devtoolsIO(): TransportIO {
 
 /** Runs inside the inspected page (MAIN world) via chrome.scripting; must not close over anything. */
 function pageBridgeCommand(cmd: string, arg: unknown): unknown {
-  const b = (window as unknown as { __RERENDER_LENS_DEVTOOLS__?: Record<string, (...a: unknown[]) => unknown> & { size?: number; version?: number } }).__RERENDER_LENS_DEVTOOLS__;
+  const b = (window as unknown as { __RERENDER_LENS_DEVTOOLS__?: Record<string, (...a: unknown[]) => unknown> }).__RERENDER_LENS_DEVTOOLS__;
   if (!b) return null;
   try {
     switch (cmd) {
       case 'info':
-        return b.info ? b.info() : { count: b.size, protocol: b.version };
+        return b.info!();
       case 'pull':
         return b.pull ? b.pull(arg) : null;
       case 'replay':
@@ -3520,21 +3318,19 @@ function standaloneIO(opts: StandaloneOptions = {}): TransportIO {
     },
     openResource: (url) => void chrome.tabs.create({ url }),
     undock: (mode) => (tabId === null ? Promise.reject(new Error('no tab')) : openOutside(mode, tabId)),
-    // Dev servers serve the module source; host permission for the origin is required (and present when the panel works at all).
-    readSource: (url) => fetch(url).then((res) => (res.ok ? res.text() : null)).catch(() => null),
+    // Host permission for the origin is required to fetch the module source (and present when the panel works at all).
+    readSource: fetchSource,
   };
   return io;
 }
 
 function bootExtension(): void {
-  const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
-  const theme = chrome.devtools.panels.themeName === 'dark' || prefersDark ? 'dark' : 'light';
+  const theme = chrome.devtools.panels.themeName === 'dark' ? 'dark' : systemTheme();
   createPanel(document.getElementById('root')!, createRelayTransport(devtoolsIO()), { theme });
 }
 
 function bootStandalone(opts: StandaloneOptions = {}): Panel {
-  const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
-  return createPanel(document.getElementById('root')!, createRelayTransport(standaloneIO(opts)), { theme: prefersDark ? 'dark' : 'light' });
+  return createPanel(document.getElementById('root')!, createRelayTransport(standaloneIO(opts)), { theme: systemTheme() });
 }
 
 // ---------- boot: demo ----------
@@ -3617,7 +3413,6 @@ function floodReports(n: number): Record<string, unknown>[] {
 function createBroadcastTransport(name: string): Transport {
   let listener: ((m: Message) => void) | null = null;
   let channel: BroadcastChannel | null = null;
-  const pending = new Map<string, { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
   const emit = (m: Message): void => {
     if (listener) listener(m);
   };
@@ -3626,37 +3421,16 @@ function createBroadcastTransport(name: string): Transport {
     channel = new BroadcastChannel(name);
     channel.onmessage = (event: MessageEvent) => {
       const data = event.data as Record<string, unknown> | null;
-      if (!data) return;
-      if (data.__rerenderLensReply === true && typeof data.id === 'string') {
-        const p = pending.get(data.id);
-        if (!p) return;
-        pending.delete(data.id);
-        clearTimeout(p.timer);
-        p.resolve(typeof data.error === 'string' ? new Error(data.error) : data.result);
-        return;
-      }
+      if (!data || reply(data)) return;
       if (data.__rerenderLens === true && typeof data.type === 'string') emit({ type: data.type, version: typeof data.version === 'number' ? data.version : undefined, payload: data.payload });
     };
     return channel;
   };
-  const bridge = <T = unknown,>(cmd: string, arg?: unknown): Promise<T | null> =>
-    new Promise((resolve, reject) => {
-      const id = Math.random().toString(36).slice(2);
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        resolve(null); // nobody answered: no app tab with the library on this channel
-      }, 1500);
-      pending.set(id, {
-        resolve: (v) => (v instanceof Error ? reject(v) : resolve(v as T)),
-        timer,
-      });
-      open().postMessage({ __rerenderLensCmd: true, id, cmd, arg });
-    });
-  const mem = (key: string): string => `rerender-lens:${name}:${key}`;
+  // 1.5 s without an answer: no app tab with the library on this channel.
+  const { bridge, reply } = commandBridge((message) => open().postMessage(message), 1500);
   const transport: Transport = {
     origin: location.origin,
     tabLabel: `channel "${name}"`,
-    panelUrl: location.origin + location.pathname,
     subscribe(fn) {
       listener = fn;
       open();
@@ -3666,7 +3440,7 @@ function createBroadcastTransport(name: string): Transport {
           fn({ type: 'disconnected' });
           return;
         }
-        fn({ type: 'hello', version: info.protocol || 1, payload: info });
+        fn({ type: 'hello', version: info.protocol, payload: info });
         const res = await bridge<{ reports: unknown[] }>('pull', 0);
         if (res) for (const p of res.reports) fn({ type: 'report', payload: p });
       });
@@ -3676,24 +3450,8 @@ function createBroadcastTransport(name: string): Transport {
     configure: (options) => bridge<SerializableOptions>('configure', options).then((r) => r ?? undefined),
     highlight: (id) => bridge('highlight', id).catch(() => {}),
     flashAvoidable: (on) => bridge('flash', !!on).catch(() => {}),
-    storage: {
-      get: (key) => {
-        try {
-          const raw = localStorage.getItem(mem(key));
-          return raw ? JSON.parse(raw) : undefined;
-        } catch {
-          return undefined;
-        }
-      },
-      set: (key, value) => {
-        try {
-          localStorage.setItem(mem(key), JSON.stringify(value));
-        } catch {
-          /* quota or private mode */
-        }
-      },
-    },
-    readSource: (url) => fetch(url).then((res) => (res.ok ? res.text() : null)).catch(() => null),
+    storage: localStorageAdapter(`rerender-lens:${name}`),
+    readSource: fetchSource,
     copy: (text) => navigator.clipboard.writeText(text).catch(() => {}),
   };
   return transport;
@@ -3713,25 +3471,11 @@ function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = Even
   let listener: ((m: Message) => void) | null = null;
   let stream: EventSourceLike | null = null;
   let appsOnline: number | null = null;
-  const pending = new Map<string, { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
   const emit = (m: Message): void => {
     if (listener) listener(m);
   };
   const post = (message: unknown): Promise<void> => fetch(`${base}/message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(message) }).then(() => undefined);
-  const bridge = <T = unknown,>(cmd: string, arg?: unknown): Promise<T | null> =>
-    new Promise((resolve, reject) => {
-      const id = Math.random().toString(36).slice(2);
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        resolve(null);
-      }, 2000);
-      pending.set(id, { resolve: (v) => (v instanceof Error ? reject(v) : resolve(v as T)), timer });
-      post({ __rerenderLensCmd: true, id, cmd, arg }).catch(() => {
-        clearTimeout(timer);
-        pending.delete(id);
-        resolve(null);
-      });
-    });
+  const { bridge, reply } = commandBridge(post, 2000);
   const handleData = (data: string): void => {
     let parsed: unknown;
     try {
@@ -3740,14 +3484,8 @@ function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = Even
       return;
     }
     for (const m of Array.isArray(parsed) ? parsed : [parsed]) {
-      if (!isRecord(m)) continue;
-      if (m.__rerenderLensReply === true && typeof m.id === 'string') {
-        const p = pending.get(m.id);
-        if (!p) continue;
-        pending.delete(m.id);
-        clearTimeout(p.timer);
-        p.resolve(typeof m.error === 'string' ? new Error(m.error) : m.result);
-      } else if (m.__rerenderLens === true && m.type === 'relay') {
+      if (!isRecord(m) || reply(m)) continue;
+      if (m.__rerenderLens === true && m.type === 'relay') {
         const apps = isRecord(m.payload) && typeof m.payload.apps === 'number' ? m.payload.apps : 0;
         const wasOnline = appsOnline;
         appsOnline = apps;
@@ -3763,15 +3501,13 @@ function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = Even
       return;
     }
     emit({ type: 'connected' });
-    emit({ type: 'hello', version: info.protocol || 1, payload: info });
+    emit({ type: 'hello', version: info.protocol, payload: info });
     const res = await bridge<{ reports: unknown[] }>('pull', 0);
     if (res) for (const p of res.reports) emit({ type: 'report', payload: p });
   }
-  const mem = (key: string): string => `rerender-lens:relay:${base}:${key}`;
   const transport: Transport = {
     origin: base,
     tabLabel: `relay ${base.replace(/^https?:\/\//, '')}`,
-    panelUrl: location.origin + location.pathname,
     subscribe(fn) {
       listener = fn;
       const open = (): void => {
@@ -3789,50 +3525,19 @@ function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = Even
     configure: (options) => bridge<SerializableOptions>('configure', options).then((r) => r ?? undefined),
     highlight: (id) => bridge('highlight', id).catch(() => {}),
     flashAvoidable: (on) => bridge('flash', !!on).catch(() => {}),
-    storage: {
-      get: (key) => {
-        try {
-          const raw = localStorage.getItem(mem(key));
-          return raw ? JSON.parse(raw) : undefined;
-        } catch {
-          return undefined;
-        }
-      },
-      set: (key, value) => {
-        try {
-          localStorage.setItem(mem(key), JSON.stringify(value));
-        } catch {
-          /* quota or private mode */
-        }
-      },
-    },
-    readSource: (url) => fetch(url).then((res) => (res.ok ? res.text() : null)).catch(() => null),
+    storage: localStorageAdapter(`rerender-lens:relay:${base}`),
+    readSource: fetchSource,
     copy: (text) => navigator.clipboard.writeText(text).catch(() => {}),
   };
   return transport;
 }
 
 function bootRelay(relayUrl: string): Panel {
-  const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
-  return createPanel(document.getElementById('root')!, createRelayClientTransport(relayUrl), { theme: prefersDark ? 'dark' : 'light' });
+  return createPanel(document.getElementById('root')!, createRelayClientTransport(relayUrl), { theme: systemTheme() });
 }
 
 function bootBroadcast(name: string): Panel {
-  const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
-  return createPanel(document.getElementById('root')!, createBroadcastTransport(name), { theme: prefersDark ? 'dark' : 'light' });
-}
-
-/** `panel.html?report=…`: a single shared report, no page. */
-async function bootShared(code: string): Promise<void> {
-  const report = await decodeShare(code);
-  const transport: Transport = { subscribe() {}, panelUrl: location.origin + location.pathname };
-  const panel = createPanel(document.getElementById('root')!, transport, { theme: typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light' });
-  if (!report) {
-    panel.handle({ type: 'hello', version: PROTOCOL, payload: { protocol: PROTOCOL, library: 'shared link', react: [], enabled: false } });
-    return;
-  }
-  panel.importData([report]);
-  panel.select(report.component);
+  return createPanel(document.getElementById('root')!, createBroadcastTransport(name), { theme: systemTheme() });
 }
 
 function bootDemo(): void {
@@ -3846,7 +3551,7 @@ function bootDemo(): void {
     origin: 'http://localhost:5199',
     subscribe(fn) {
       fn({ type: 'connected' });
-      fn({ type: 'hello', version: PROTOCOL, payload: { count: 0, library: 'demo', protocol: PROTOCOL, react: [{ version: '19.2.0', bundleType: 1 }], production: false, enabled: true, options: { trackAllMemoized: true, silent: true }, source: 'page', injected: false } });
+      fn({ type: 'hello', version: PROTOCOL, payload: { library: 'demo', protocol: PROTOCOL, react: [{ version: '19.2.0', bundleType: 1 }], production: false, enabled: true, options: { trackAllMemoized: true, silent: true }, source: 'page', injected: false } });
       if (flood > 0) {
         const t0 = performance.now();
         for (const r of floodReports(flood)) fn({ type: 'report', payload: r });
@@ -3872,11 +3577,9 @@ function bootDemo(): void {
     originStatus: () => Promise.resolve({ origin: 'http://localhost:5199', builtIn: true, permitted: true, enabled: true, inject: false, deferHook: false }),
     setOrigin: () => Promise.resolve(),
     storage: { get: (k) => Promise.resolve(mem[k]), set: (k, v) => Promise.resolve((mem[k] = v)) },
-    panelUrl: location.origin + location.pathname,
     readSource: () => Promise.resolve("import { memo } from 'react';\n\nexport const ProductList = memo(function ProductList(props) {\n  const [selected, setSelected] = useState(null);\n  return (\n    <ul>\n      {props.products.map((p) => (\n        <ProductRow key={p.id} product={p} style={{ color: 'red' }} onSelect={(id) => props.onSelect(id)} />\n      ))}\n    </ul>\n  );\n});\n"),
   };
-  const dark = /theme=dark/.test(location.search) || (typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches);
-  createPanel(document.getElementById('root')!, transport, { theme: dark ? 'dark' : 'light' });
+  createPanel(document.getElementById('root')!, transport, { theme: /theme=dark/.test(location.search) ? 'dark' : systemTheme() });
 }
 
 const api = {
@@ -3896,8 +3599,6 @@ const api = {
   createRelayTransport,
   createBroadcastTransport,
   createRelayClientTransport,
-  encodeShare,
-  decodeShare,
   sourceContext,
   analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary, summarizeSession, compareSessions },
 };
@@ -3907,8 +3608,7 @@ const hasChrome = typeof chrome !== 'undefined' && !!chrome && !!chrome.runtime 
 const hasDevtools = hasChrome && !!chrome.devtools && !!chrome.devtools.inspectedWindow;
 const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
 const pathname = typeof location !== 'undefined' ? String(location.pathname) : '';
-if (params.has('report')) void bootShared(params.get('report') || '');
-else if (params.has('relay') && typeof EventSource === 'function') bootRelay(params.get('relay') || location.origin);
+if (params.has('relay') && typeof EventSource === 'function') bootRelay(params.get('relay') || location.origin);
 else if (params.has('channel') && typeof BroadcastChannel === 'function') bootBroadcast(params.get('channel') || 'rerender-lens');
 else if (hasDevtools && /panel\.html/.test(pathname) && !params.has('tabId')) bootExtension();
 else if (hasChrome && (/sidepanel\.html/.test(pathname) || params.has('tabId'))) bootStandalone({ tabId: params.has('tabId') ? Number(params.get('tabId')) : null });

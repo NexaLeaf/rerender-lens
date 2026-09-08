@@ -93,6 +93,14 @@ describe('standalone panel (side panel / window)', () => {
     expect(page.calls).toContainEqual(['highlight', 1]);
     // no undock buttons outside DevTools for a pinned tab? they exist (window/side panel) and route to the tab
     expect([...document.querySelectorAll('.toolbar .ib .label')].map((l) => l.textContent)).toContain('Side panel');
+    // the content script going away resumes polling; a navigation stops it until the new page answers `info`
+    ports[0]!.onMessage.emit({ type: 'disconnected' });
+    await settle();
+    await settle();
+    expect(panel.state.polling).toBe(true);
+    chrome.tabs.onUpdated.emit(7, { status: 'loading' });
+    expect(panel.state.polling).toBe(false);
+    expect(panel.state.reports).toHaveLength(0);
   });
 
   it('follows the active tab when not pinned and starts over on tab switch', async () => {

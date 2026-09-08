@@ -19,6 +19,9 @@ function load(chrome: FakeChrome): Api {
   return fn(chrome, self, undefined) as Api;
 }
 
+/** The badge is painted at most every 100 ms. */
+const painted = () => new Promise((r) => setTimeout(r, 120));
+
 const send = (chrome: FakeChrome, message: unknown) =>
   new Promise<{ ok: boolean; result?: Record<string, unknown>; error?: string }>((resolve) => chrome.runtime.sendMessage(message, (r) => resolve(r as never)));
 
@@ -45,6 +48,7 @@ describe('background', () => {
     content.onMessage.emit({ type: 'report', payload: { component: 'B', avoidable: false } });
     content.onMessage.emit({ type: 'report', payload: { component: 'C', avoidable: true } });
     expect(panel.sent.filter((m) => (m as { type: string }).type === 'report')).toHaveLength(3);
+    await painted();
     expect(chrome._badges.get(3)).toBe('2');
 
     // another tab's panel gets nothing
@@ -61,6 +65,7 @@ describe('background', () => {
 
     // a polling panel reports its own count
     panel.onMessage.emit({ type: 'badge', count: 5 });
+    await painted();
     expect(chrome._badges.get(3)).toBe('5');
 
     content.onDisconnect.emit();

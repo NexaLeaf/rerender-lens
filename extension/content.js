@@ -1,7 +1,7 @@
 // Relays rerender-lens messages posted on window to the extension (isolated world -> background),
 // and hands the page the options saved for this origin (for the injected library).
 (function () {
-  if (window.__rerenderLensRelay) return; // registered twice (static + dynamic) for the same page
+  if (window.__rerenderLensRelay) return; // defensive: run once per page even if registered twice
   window.__rerenderLensRelay = true;
 
   let port = null;
@@ -35,12 +35,17 @@
     }
   }
 
+  // The library posts reports on window only after hearing this (so pages without the extension pay
+  // nothing per report); say it now and again whenever a library announces itself.
+  const ready = () => window.postMessage({ __rerenderLensReady: true }, '*');
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
     const data = event.data;
     if (!data || data.__rerenderLens !== true) return;
+    if (data.type === 'hello') ready();
     send({ type: data.type, version: data.version, payload: data.payload });
   });
+  ready();
 
   // Saved options for this origin -> injected library (inject.js listens for this).
   try {

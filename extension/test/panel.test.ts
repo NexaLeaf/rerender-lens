@@ -38,7 +38,7 @@ const report = (over: Record<string, unknown> = {}) => ({
 });
 
 interface Panel {
-  state: { reports: unknown[]; selectedKey: string | null; paused: boolean; view: string; tab: string; library: unknown; relay: boolean; flashOn: boolean; recording: unknown; sessions: { name: string }[]; sort: { key: string; dir: number }; columns: string[]; notes: Record<string, { note?: string; muted?: boolean }> };
+  state: { reports: unknown[]; selectedKey: string | null; paused: boolean; view: string; tab: string; library: unknown; relay: boolean; flashOn: boolean; recording: unknown; sessions: { name: string }[]; sort: { key: string; dir: number } };
   handle(m: unknown): void;
   flush(): void;
   select(name: string): void;
@@ -48,7 +48,6 @@ interface Panel {
   openSettings(): void;
   startRecording(name?: string): { id: string; name: string };
   stopRecording(): { id: string; name: string; avoidable: number; fixes: { label: string }[] } | null;
-  setNote(component: string, note: { note?: string; muted?: boolean }): void;
 }
 interface Fix { kind: string; owner: string; prop: string | null; label: string; detail: string; snippet: string; count?: number; key?: string }
 interface Factory {
@@ -59,8 +58,6 @@ interface Factory {
   reportToMarkdown(r: unknown): string;
   sampleReports(): Record<string, unknown>[];
   floodReports(n: number): Record<string, unknown>[];
-  encodeShare(r: unknown): Promise<string>;
-  decodeShare(code: string): Promise<unknown>;
   sourceContext(text: string, line: number, around?: number): { n: number; text: string; hit: boolean }[];
   analysis: {
     firstDifferentPath(a: unknown, b: unknown): string | null;
@@ -117,12 +114,12 @@ describe('devtools panel', () => {
     expect(root.querySelector('.status-text')!.textContent).toBe('no page');
   });
 
-  it('warns about protocol mismatch and production builds', () => {
+  it('warns about a newer page protocol and production builds', () => {
     panel.handle({ type: 'connected' });
-    panel.handle({ type: 'hello', version: 1, payload: { count: 0 } });
+    panel.handle({ type: 'hello', version: 3, payload: { library: '9.0.0', protocol: 3 } });
     const banner = root.querySelector('.banner') as HTMLElement;
     expect(banner.hidden).toBe(false);
-    expect(banner.textContent).toMatch(/protocol 1.*expects protocol 2/);
+    expect(banner.textContent).toMatch(/newer rerender-lens \(protocol 3\).*Update the extension/);
     panel.handle({ type: 'hello', version: 2, payload: { library: '0.2.0', protocol: 2, react: [{ version: '18.3.1', bundleType: 0 }], production: true, enabled: true, options: {} } });
     expect(banner.textContent).toMatch(/Production React build/);
     expect(root.querySelector('.status-text')!.textContent).toContain('(prod)');
@@ -717,30 +714,14 @@ describe('sessions and deeper analysis', () => {
     expect(names(root)).toEqual(['App', 'List', 'Row', 'Other']);
   });
 
-  it('share links round-trip a report and the shared page shows it; source context loads around the element', async () => {
+  it('loads source context around the line where the element was created', async () => {
     const r = factory.normalizeReport(report({ source: { fileName: 'http://localhost:5199/src/List.tsx?t=1', lineNumber: 4, columnNumber: 5 } }))!;
-    const code = await factory.encodeShare(r as never);
-    expect(code.startsWith('j.') || code.startsWith('d.')).toBe(true);
-    const back = await factory.decodeShare(code);
-    expect(back).toEqual(r);
-    expect(await factory.decodeShare('x.nope')).toBeNull();
-    expect(await factory.decodeShare('')).toBeNull();
-    // the panel's Copy link button copies panelUrl?report=<code>
-    const copied: string[] = [];
     const reads: string[] = [];
     panel = factory.createPanel(root, makeTransport({
-      panelUrl: 'chrome-extension://id/panel.html',
-      copy: (t: string) => copied.push(t),
       readSource: (url: string) => (reads.push(url), Promise.resolve('line1\nline2\nline3\nconst x = <Row />;\nline5\nline6\nline7\nline8')),
     }));
     send({ type: 'report', payload: r });
     panel.select('Row');
-    button(root, '.actions button', 'Copy link').click();
-    // compression runs off the main thread in Node; wait for the copy rather than a fixed tick
-    for (let i = 0; i < 50 && !copied.length; i++) await new Promise((res) => setTimeout(res, 10));
-    expect(copied[0]).toMatch(/^chrome-extension:\/\/id\/panel\.html\?report=[jd]\./);
-    // the panel stamps receivedAt on ingest; everything else round-trips
-    expect({ ...(await factory.decodeShare(copied[0]!.split('report=')[1]!) as object), receivedAt: 0 }).toEqual(r);
     // source context: ±3 lines with the element line highlighted
     await new Promise((res) => setTimeout(res, 0));
     expect(reads).toEqual(['http://localhost:5199/src/List.tsx?t=1']);
@@ -753,50 +734,33 @@ describe('sessions and deeper analysis', () => {
     ]);
   });
 
-  it('windows the Offenders and Fixes views above 200 rows, with a sticky header and a column chooser', () => {
+  it('renders Offenders as a plain sortable table and Fixes as a plain list at any size', () => {
     for (const r of factory.floodReports(3000)) panel.handle({ type: 'report', payload: r });
     panel.flush();
     panel.setView('offenders');
-    expect(root.querySelector('.table-wrap .vhead')).not.toBeNull();
-    const rows = root.querySelectorAll('.table-wrap .vrow');
-    expect(rows.length).toBeGreaterThan(10);
-    expect(rows.length).toBeLessThan(100);
-    expect(root.querySelector('.table-wrap table')).toBeNull();
-    // sorting through the windowed header still works
-    (root.querySelector('.vhead span.num') as HTMLElement).click();
+    expect(root.querySelector('.table-wrap table.grid')).not.toBeNull();
+    expect(root.querySelectorAll('.grid tbody tr')).toHaveLength(300);
+    expect(root.querySelector('.table-wrap .virtual-inner')).toBeNull();
+    (root.querySelector('.grid th.num') as HTMLElement).click();
     expect(panel.state.sort).toEqual({ key: 'avoidable', dir: 1 });
-    // column chooser adds "Last seen"
-    const lastSeen = [...root.querySelectorAll('.columns-menu label')].find((l) => l.textContent!.includes('Last seen'))!.querySelector('input') as HTMLInputElement;
-    lastSeen.checked = true;
-    lastSeen.dispatchEvent(new Event('change'));
-    expect(panel.state.columns).toEqual(['lastSeen']);
-    expect([...root.querySelectorAll('.vhead > span')].map((s) => s.textContent)).toContain('Last seen');
-    expect(root.querySelector('.vrow > span.mono')!.textContent).toMatch(/^\d\d:\d\d:\d\d\.\d{3}$/);
-    // the flood has 40 owners, so its fixes stay a plain list; 300 distinct owners switch to windowed rows
-    panel.setView('fixes');
-    expect(root.querySelector('.table-wrap .fixes li')).not.toBeNull();
     panel.clearAll();
     for (let i = 0; i < 300; i++) panel.handle({ type: 'report', payload: report({ component: `C${i}`, path: ['App'], owner: `Owner${i}`, parent: { name: `Owner${i}`, trigger: 'state' } }) });
     panel.flush();
-    expect(root.querySelector('.table-wrap .fix-row')).not.toBeNull();
-    expect(root.querySelectorAll('.table-wrap .fix-row').length).toBeLessThan(100);
-    (root.querySelector('.table-wrap .fix-row') as HTMLElement).click();
+    panel.setView('fixes');
+    expect(root.querySelectorAll('.table-wrap .fixes li')).toHaveLength(300);
+    (root.querySelector('.table-wrap .fixes li') as HTMLElement).click();
     expect(panel.state.tab).toBe('fixlist');
     expect(root.querySelector('.details-header .title')!.textContent).toMatch(/^useMemo\(style\) in <Owner\d+>$/);
   });
 
-  it('keeps the plain table below the threshold, with the column chooser', () => {
+  it('shows the fixed Offenders columns and how many places a component renders in', () => {
     send({ type: 'report', payload: report({ selfDuration: 1 }) });
     send({ type: 'report', payload: report({ component: 'Other', path: ['App'], avoidable: false, trigger: 'props', propChanges: [] }) });
     send({ type: 'report', payload: report({ component: 'Other', path: ['App', 'B'], avoidable: false, trigger: 'props', propChanges: [] }) });
     panel.setView('offenders');
     expect(root.querySelector('.table-wrap table.grid')).not.toBeNull();
     expect([...root.querySelectorAll('.grid th')].map((t) => t.textContent)).toEqual(['Component', 'Avoidable ▾', 'Total', 'Wasted', 'Top fix']);
-    const places = [...root.querySelectorAll('.columns-menu label')].find((l) => l.textContent!.includes('Places'))!.querySelector('input') as HTMLInputElement;
-    places.checked = true;
-    places.dispatchEvent(new Event('change'));
-    expect([...root.querySelectorAll('.grid th')].map((t) => t.textContent)).toEqual(['Component', 'Avoidable ▾', 'Total', 'Wasted', 'Places', 'Top fix']);
-    expect([...root.querySelectorAll('.grid tbody tr')].map((tr) => tr.children[4]!.textContent)).toEqual(['1', '2']);
+    expect([...root.querySelectorAll('.grid tbody tr td.c')].map((td) => td.textContent)).toEqual(['Row', 'Other ×2 places']);
   });
 
   it('searches values with the ~ prefix across props, hooks, contexts and state', () => {
@@ -819,39 +783,6 @@ describe('sessions and deeper analysis', () => {
     expect(names(root)).toEqual(['App', 'List', 'Row', 'Cart', 'Themed']);
     query('cart');
     expect(names(root)).toEqual(['App', 'Cart']);
-  });
-
-  it('notes and mute per component persist and hide muted components from Fixes and the summary', async () => {
-    send({ type: 'report', payload: report() });
-    send({ type: 'report', payload: report({ component: 'Noisy', path: ['App'], owner: 'App', propChanges: [], renderCount: 1 }) });
-    send({ type: 'report', payload: report({ component: 'Noisy', path: ['App'], owner: 'App', propChanges: [], renderCount: 2 }) });
-    send({ type: 'report', payload: report({ component: 'Noisy', path: ['App'], owner: 'App', propChanges: [], renderCount: 3 }) });
-    expect(root.querySelector('.summary .stat.link .mono')!.textContent).toBe('<Noisy>');
-    panel.select('Noisy');
-    (root.querySelector('.details-header button[aria-label="Mute"]') as HTMLElement).click();
-    expect(panel.state.notes).toEqual({ Noisy: { muted: true } });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(store.notes).toEqual({ Noisy: { muted: true } });
-    expect(root.querySelector('.summary .stat.link .mono')!.textContent).toBe('<Row>');
-    panel.setView('fixes');
-    expect([...root.querySelectorAll('.fixes li .label')].map((l) => l.textContent)).toEqual(['useMemo(style) in <List>']);
-    expect(root.querySelector('.section-title')!.textContent).toContain('1 muted component hidden');
-    panel.setView('tree');
-    const row = [...root.querySelectorAll('.row')].find((r) => r.querySelector('.name')!.textContent === 'Noisy')!;
-    expect(row.classList.contains('muted')).toBe(true);
-    // a note shows in the details and survives a reload of the panel
-    panel.select('Noisy');
-    (root.querySelector('.details-header button[aria-label="Note"]') as HTMLElement).click();
-    const input = root.querySelector('.note-input') as HTMLInputElement;
-    input.value = 'known, ticket #123';
-    input.dispatchEvent(new Event('change'));
-    expect(panel.state.notes.Noisy).toEqual({ muted: true, note: 'known, ticket #123' });
-    document.body.innerHTML = '<div id="root"></div>';
-    const again = factory.createPanel(document.getElementById('root')!, makeTransport({ storage: { get: (k: string) => Promise.resolve(store[k]), set: (k: string, v: unknown) => Promise.resolve((store[k] = v)) } }));
-    await new Promise((r) => setTimeout(r, 0));
-    expect(again.state.notes).toEqual({ Noisy: { muted: true, note: 'known, ticket #123' } });
-    again.setNote('Noisy', { muted: false, note: undefined });
-    expect(again.state.notes).toEqual({});
   });
 
   it('exposes roles and states for assistive tech', () => {

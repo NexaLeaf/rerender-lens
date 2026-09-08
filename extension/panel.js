@@ -2,12 +2,6 @@
 "use strict";
 (() => {
   // extension/src/panel.ts
-  var OPTIONAL_COLUMNS = [
-    { key: "places", label: "Places" },
-    { key: "lastSeen", label: "Last seen" }
-  ];
-  var VIRTUAL_THRESHOLD = 200;
-  var GRID_ROW_H = 26;
   var PROTOCOL = 2;
   var KIND_LABEL = {
     "deep-equal": "equal by value",
@@ -544,65 +538,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     };
   }
   var PRIORITY_LABEL = { immediate: "discrete input", "user-blocking": "continuous input", normal: "transition / async", low: "low", idle: "idle" };
-  var b64url = (bytes) => {
-    let s = "";
-    for (const b of bytes) s += String.fromCharCode(b);
-    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  };
-  var unb64url = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
-  async function transformBytes(bytes, transform) {
-    const source = new ReadableStream({
-      start(controller) {
-        controller.enqueue(bytes);
-        controller.close();
-      }
-    });
-    const reader = source.pipeThrough(transform).getReader();
-    const chunks = [];
-    let total = 0;
-    for (; ; ) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      total += value.length;
-    }
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (const c of chunks) {
-      out.set(c, offset);
-      offset += c.length;
-    }
-    return out;
-  }
-  async function encodeShare(report) {
-    const json = JSON.stringify(report);
-    const bytes = new TextEncoder().encode(json);
-    if (typeof CompressionStream === "function") {
-      try {
-        return "d." + b64url(await transformBytes(bytes, new CompressionStream("deflate-raw")));
-      } catch {
-      }
-    }
-    return "j." + b64url(bytes);
-  }
-  async function decodeShare(value) {
-    const [kind, data] = value.split(".", 2);
-    if (!data) return null;
-    let bytes = unb64url(data);
-    if (kind === "d") {
-      if (typeof DecompressionStream !== "function") return null;
-      try {
-        bytes = await transformBytes(bytes, new DecompressionStream("deflate-raw"));
-      } catch {
-        return null;
-      }
-    }
-    try {
-      return normalizeReport(JSON.parse(new TextDecoder().decode(bytes)));
-    } catch {
-      return null;
-    }
-  }
   function sourceContext(text, line, around = 3) {
     const lines = text.split("\n");
     const from = Math.max(1, line - around);
@@ -724,10 +659,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       if (actions.copy) {
         const copy = actions.copy;
         bar.append(el("button", { onclick: () => copy(reportToMarkdown(r)) }, "\u2398 Copy as Markdown"));
-      }
-      if (actions.share) {
-        const share = actions.share;
-        bar.append(el("button", { title: "Copy a link that opens this report in the panel", onclick: () => share(r) }, "\u{1F517} Copy link"));
       }
       if (bar.children.length) head.append(bar);
       const loc = r.source;
@@ -922,16 +853,13 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       flashOn: false,
       settingsOpen: false,
       origin: null,
-      legacyCommit: 0,
       tabLabel: transport.tabLabel ?? null,
       compact: false,
       sessions: [],
       recording: null,
       selectedSession: null,
       compareWith: null,
-      byInstance: false,
-      columns: [],
-      notes: {}
+      byInstance: false
     };
     let persistTimer = null;
     let queue = [];
@@ -1106,10 +1034,10 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         if (!r.avoidable) continue;
         avoidable++;
         if (typeof r.selfDuration === "number") wasted += r.selfDuration;
-        if (!isMuted(r.component)) perComponent.set(r.component, (perComponent.get(r.component) || 0) + 1);
+        perComponent.set(r.component, (perComponent.get(r.component) || 0) + 1);
       }
       const top = [...perComponent].sort((a, b) => b[1] - a[1])[0];
-      const fix = avoidable ? rankFixes(state.reports.filter((r) => !isMuted(r.component)))[0] : void 0;
+      const fix = avoidable ? rankFixes(state.reports)[0] : void 0;
       const stat = (value, label, cls = "") => el("span", { class: "stat " + cls }, [el("b", { text: value }), el("span", { class: "label", text: label })]);
       summary.append(stat(String(total), plural(total, "render").replace(/^\d+ /, "")), stat(String(avoidable), "avoidable", avoidable ? "bad" : "good"));
       if (wasted) summary.append(stat(fmtMs(wasted), "wasted", "bad"));
@@ -1177,8 +1105,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           collapsed: [...state.collapsed],
           treeWidth: state.treeWidth,
           flashOn: state.flashOn,
-          byInstance: state.byInstance,
-          columns: state.columns
+          byInstance: state.byInstance
         };
         transport.storage.set("panel", saved);
       }, 150);
@@ -1230,7 +1157,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         instancesBtn.classList.toggle("active", state.byInstance);
         rebuildTree();
       }
-      if (Array.isArray(saved.columns)) state.columns = saved.columns.filter((c) => OPTIONAL_COLUMNS.some((o) => o.key === c));
       if (saved.tab === "history" || saved.tab === "fix") state.tab = saved.tab;
       if (saved.view && viewButtons.has(saved.view)) state.view = saved.view;
       for (const n of state.nodesByKey.values()) n.expanded = !state.collapsed.has(n.key);
@@ -1277,10 +1203,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       renderLeft();
       renderDetails();
     }
-    function commitKeyFor(report) {
-      if (report.commitId > 0) return report.commitId;
-      return -state.legacyCommit;
-    }
     function ingest(report) {
       if (!report.receivedAt) report.receivedAt = Date.now();
       state.reports.push(report);
@@ -1296,7 +1218,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       node.lastReport = report;
       node.flash = true;
       node.flashAt = Date.now();
-      const ck = commitKeyFor(report);
+      const ck = report.commitId;
       let list = state.commits.get(ck);
       if (!list) {
         list = [];
@@ -1312,7 +1234,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       if (!queue.length) return;
       const batch = queue;
       queue = [];
-      state.legacyCommit++;
       let touchedSelected = false;
       let avoidableCount = 0;
       for (const r of batch) {
@@ -1390,9 +1311,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       for (const c of node.children.values()) if (visible(c)) return true;
       return false;
     }
-    const isMuted = (component) => !!state.notes[component]?.muted;
     const passes = (r) => (!state.avoidableOnly || r.avoidable) && matchesFilter(r.component) && matchesValues(r);
-    const ranked = () => state.reports.filter((r) => passes(r) && !isMuted(r.component));
     const filteredReports = () => state.reports.filter(passes);
     function setView(view) {
       state.view = view;
@@ -1472,7 +1391,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       row.classList.toggle("selected", state.selectedKey === node.key);
       row.setAttribute("aria-selected", state.selectedKey === node.key ? "true" : "false");
       row.setAttribute("aria-level", String(depth + 1));
-      row.classList.toggle("muted", isMuted(node.lastReport ? node.lastReport.component : node.name));
       const indent = row.querySelector(".indent");
       if (indent.childElementCount !== depth) {
         indent.textContent = "";
@@ -1574,7 +1492,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       for (const r of filteredReports()) {
         let o = byName.get(r.component);
         if (!o) {
-          o = { component: r.component, total: 0, avoidable: 0, wasted: 0, paths: /* @__PURE__ */ new Set(), places: 0, lastSeen: 0, reports: [], fix: "", muted: isMuted(r.component) };
+          o = { component: r.component, total: 0, avoidable: 0, wasted: 0, paths: /* @__PURE__ */ new Set(), reports: [], fix: "" };
           byName.set(r.component, o);
         }
         o.total++;
@@ -1583,12 +1501,10 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           if (typeof r.selfDuration === "number") o.wasted += r.selfDuration;
         }
         o.paths.add(keyOf(r.path));
-        o.lastSeen = Math.max(o.lastSeen, r.receivedAt);
         o.reports.push(r);
       }
       const rows = [...byName.values()];
       for (const o of rows) {
-        o.places = o.paths.size;
         const fixes = o.avoidable ? rankFixes(o.reports) : [];
         o.fix = fixes.length ? fixes[0].label : "";
       }
@@ -1601,62 +1517,25 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       });
       return rows;
     }
-    function columnsMenu() {
-      const menu = el("details", { class: "columns-menu" }, [el("summary", { title: "Choose columns", text: "\u2699 Columns" })]);
-      const box = el("div", { class: "menu" });
-      for (const col of OPTIONAL_COLUMNS) {
-        const input = el("input", { type: "checkbox" });
-        input.checked = state.columns.includes(col.key);
-        input.addEventListener("change", () => {
-          state.columns = OPTIONAL_COLUMNS.map((c) => c.key).filter((k) => k === col.key ? input.checked : state.columns.includes(k));
-          renderOffenders();
-          persist();
-        });
-        box.append(el("label", { class: "opt" }, [input, col.label]));
-      }
-      menu.append(box);
-      return menu;
-    }
-    const offenderCell = (o, key) => {
-      switch (key) {
-        case "places":
-          return el("td", { class: "num", text: String(o.places) });
-        case "lastSeen":
-          return el("td", { class: "num mono", text: o.lastSeen ? fmtTime(o.lastSeen) : "" });
-        default:
-          return el("td");
-      }
-    };
-    function offenderRow(o, tag) {
-      const cells = [
-        el("td", { class: "c" }, [el("span", { class: "name", text: o.component }), o.muted ? el("span", { class: "badge", text: "muted" }) : null, o.paths.size > 1 && !state.columns.includes("places") ? el("span", { class: "meta", text: ` \xD7${o.paths.size} places` }) : null]),
-        el("td", { class: "num" }, o.avoidable ? el("span", { class: "badge avoid", text: String(o.avoidable) }) : "0"),
-        el("td", { class: "num", text: String(o.total) }),
-        el("td", { class: "num", text: o.wasted ? fmtMs(o.wasted) : "" }),
-        ...state.columns.map((k) => offenderCell(o, k)),
-        el("td", { class: "fix", text: o.fix })
-      ];
-      const attrs = {
-        class: (o.avoidable ? "has-avoid" : "") + (o.muted ? " muted" : ""),
-        role: tag === "div" ? "listitem" : null,
-        onclick: () => {
-          const last = o.reports[o.reports.length - 1];
-          state.tab = "fix";
-          select(nodeOfReport(last), last);
-        }
-      };
-      if (tag === "tr") return el("tr", attrs, cells);
-      const row = el("div", { ...attrs, class: "vrow " + attrs.class });
-      for (const c of cells) {
-        const span = el("span", { class: c.className });
-        span.append(...c.childNodes);
-        row.append(span);
-      }
-      return row;
-    }
-    const offendersList = virtualList(table, GRID_ROW_H, (o) => offenderRow(o, "div"), { attach: false, headerHeight: () => table.querySelector(".vhead")?.offsetHeight || 0 });
-    function offendersHeader() {
-      return [sortableHeader("Component", "component"), sortableHeader("Avoidable", "avoidable", true), sortableHeader("Total", "total", true), sortableHeader("Wasted", "wasted", true), ...state.columns.map((k) => sortableHeader(OPTIONAL_COLUMNS.find((c) => c.key === k).label, k, true)), el("th", { text: "Top fix" })];
+    function offenderRow(o) {
+      return el(
+        "tr",
+        {
+          class: o.avoidable ? "has-avoid" : "",
+          onclick: () => {
+            const last = o.reports[o.reports.length - 1];
+            state.tab = "fix";
+            select(nodeOfReport(last), last);
+          }
+        },
+        [
+          el("td", { class: "c" }, [el("span", { class: "name", text: o.component }), o.paths.size > 1 ? el("span", { class: "meta", text: ` \xD7${o.paths.size} places` }) : null]),
+          el("td", { class: "num" }, o.avoidable ? el("span", { class: "badge avoid", text: String(o.avoidable) }) : "0"),
+          el("td", { class: "num", text: String(o.total) }),
+          el("td", { class: "num", text: o.wasted ? fmtMs(o.wasted) : "" }),
+          el("td", { class: "fix", text: o.fix })
+        ]
+      );
     }
     function renderOffenders() {
       table.textContent = "";
@@ -1665,28 +1544,12 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         table.append(el("div", { class: "empty", text: "No re-renders reported yet." }));
         return;
       }
-      const gridCols = `minmax(140px, 2fr) 70px 60px 80px ${state.columns.map(() => "90px").join(" ")} minmax(120px, 2fr)`;
-      if (rows.length > VIRTUAL_THRESHOLD) {
-        const head = el("div", { class: "vhead", style: `grid-template-columns:${gridCols}` });
-        for (const th of offendersHeader()) {
-          const cell = el("span", { class: th.className, onclick: null });
-          cell.append(...th.childNodes);
-          cell.addEventListener("click", () => th.click());
-          head.append(cell);
-        }
-        head.append(columnsMenu());
-        table.append(head, offendersList.inner);
-        offendersList.inner.style.setProperty("--grid-cols", gridCols);
-        offendersList.setItems(rows);
-        return;
-      }
       const t = el("table", { class: "grid" });
-      const headRow = el("tr", null, offendersHeader());
-      t.append(el("thead", null, headRow));
+      t.append(el("thead", null, el("tr", null, [sortableHeader("Component", "component"), sortableHeader("Avoidable", "avoidable", true), sortableHeader("Total", "total", true), sortableHeader("Wasted", "wasted", true), el("th", { text: "Top fix" })])));
       const body = el("tbody");
-      for (const o of rows) body.append(offenderRow(o, "tr"));
+      for (const o of rows) body.append(offenderRow(o));
       t.append(body);
-      table.append(el("div", { class: "table-tools" }, columnsMenu()), t);
+      table.append(t);
     }
     function commitSummaries() {
       const out = [];
@@ -1721,7 +1584,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         const root2 = analysis.roots[0];
         list.append(
           el("li", { class: (state.selectedCommit === key && state.tab === "commit" ? "selected " : "") + (analysis.avoidable ? "has-avoid" : ""), onclick: () => showCommit(key) }, [
-            el("span", { class: "id", text: key > 0 ? `#${key}` : "\u2014" }),
+            el("span", { class: "id", text: `#${key}` }),
             el("span", { class: "t", text: fmtTime(analysis.receivedAt) }),
             el("span", { class: "n", text: plural(analysis.total, "render") }),
             analysis.avoidable ? el("span", { class: "badge avoid", text: `${analysis.avoidable} avoidable` }) : el("span", { class: "badge", text: "ok" }),
@@ -1736,13 +1599,13 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       }
       table.append(list);
     }
-    function fixItem(f, tag) {
+    function fixItem(f) {
+      const selected = state.selectedFix === f.key && state.tab === "fixlist";
       return el(
-        tag,
+        "li",
         {
-          class: (tag === "div" ? "vrow fix-row " : "") + (state.selectedFix === f.key && state.tab === "fixlist" ? "selected" : ""),
-          role: tag === "div" ? "listitem" : null,
-          "aria-selected": state.selectedFix === f.key && state.tab === "fixlist" ? "true" : null,
+          class: selected ? "selected" : "",
+          "aria-selected": selected ? "true" : null,
           onclick: () => {
             state.selectedFix = f.key;
             state.tab = "fixlist";
@@ -1757,27 +1620,19 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         ]
       );
     }
-    const fixesList = virtualList(table, GRID_ROW_H, (f) => fixItem(f, "div"), { attach: false, headerHeight: () => table.querySelector(".section-title")?.offsetHeight || 0 });
     function renderFixes() {
       table.textContent = "";
-      const reports = ranked();
+      const reports = filteredReports();
       const fixes = rankFixes(reports);
       const contexts = contextAttribution(reports);
-      const mutedCount = Object.values(state.notes).filter((n) => n.muted).length;
       if (!fixes.length && !contexts.length) {
-        table.append(el("div", { class: "empty", text: mutedCount ? `No avoidable re-renders outside the ${plural(mutedCount, "muted component")}.` : "No avoidable re-renders, nothing to fix." }));
+        table.append(el("div", { class: "empty", text: "No avoidable re-renders, nothing to fix." }));
         return;
       }
       if (fixes.length) {
-        const title = el("div", { class: "section-title", text: `Ranked by avoidable re-renders removed${mutedCount ? ` (${plural(mutedCount, "muted component")} hidden)` : ""}` });
-        if (fixes.length > VIRTUAL_THRESHOLD) {
-          table.append(title, fixesList.inner);
-          fixesList.setItems(fixes);
-        } else {
-          const list = el("ol", { class: "fixes", role: "list" });
-          for (const f of fixes) list.append(fixItem(f, "li"));
-          table.append(title, list);
-        }
+        const list = el("ol", { class: "fixes", role: "list" });
+        for (const f of fixes) list.append(fixItem(f));
+        table.append(el("div", { class: "section-title", text: "Ranked by avoidable re-renders removed" }), list);
       }
       if (contexts.length) {
         const list = el("ul", { class: "contexts" });
@@ -1816,9 +1671,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       openSource: transport.openResource ? (src) => transport.openResource(src.fileName, src.lineNumber, src.columnNumber) : null,
       highlight: transport.highlight ? (id) => transport.highlight(id) : null,
       copy: copyText,
-      share: transport.panelUrl ? (r) => {
-        void encodeShare(r).then((code) => copyText(`${transport.panelUrl}?report=${code}`));
-      } : null,
       readSource: transport.readSource ? (url) => transport.readSource(url) : null
     });
     const tabButton = (id, label, onclick) => el("button", { class: state.tab === id ? "active" : "", onclick }, label);
@@ -1827,15 +1679,9 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         details.append(el("div", { class: "empty", text: "Select a component to see why it re-rendered." }));
         return;
       }
-      const componentName = node.lastReport ? node.lastReport.component : node.name;
-      const note = state.notes[componentName] || {};
-      const noteBtn = el("button", { class: "ib small" + (note.note ? " active" : ""), title: note.note ? note.note : "Add a note for this component", "aria-label": "Note", onclick: () => toggleNoteEditor() }, [el("span", { class: "glyph", text: "\u270E" })]);
-      const muteBtn = el("button", { class: "ib small" + (note.muted ? " active" : ""), title: note.muted ? "Muted: hidden from Fixes and the summary. Click to unmute." : "Mute: hide this component from Fixes and the summary", "aria-label": note.muted ? "Unmute" : "Mute", onclick: () => setNote(componentName, { muted: !note.muted }) }, [el("span", { class: "glyph", text: note.muted ? "\u{1F515}" : "\u{1F514}" })]);
       const header = el("div", { class: "details-header" }, [
         el("span", { class: "title" }, [el("span", { class: "bracket", text: "<" }), el("span", { class: "name", text: node.name }), el("span", { class: "bracket", text: ">" })]),
         el("span", { class: "meta", text: `${plural(node.total, "re-render")}, ${node.avoidable} avoidable${node.wasted ? ", " + fmtMs(node.wasted) + " wasted" : ""}` }),
-        noteBtn,
-        muteBtn,
         el("span", { class: "tabs" }, [
           tabButton("latest", "Report", () => {
             state.tab = "latest";
@@ -1858,21 +1704,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       details.append(header);
       const body = el("div", { class: "details-body" });
       details.append(body);
-      if (note.note || noteEditorOpen === componentName) {
-        const input = el("input", { type: "text", class: "note-input", placeholder: 'Note for this component (e.g. "known, ticket #123")', value: note.note || "" });
-        input.addEventListener("change", () => {
-          setNote(componentName, { note: input.value.trim() || void 0 });
-          noteEditorOpen = null;
-        });
-        input.addEventListener("keydown", (e) => {
-          if (e.key === "Escape") {
-            noteEditorOpen = null;
-            renderDetails();
-          }
-        });
-        body.append(el("div", { class: "note-box" + (note.muted ? " muted" : "") }, [el("span", { class: "glyph", text: "\u270E" }), input, note.muted ? el("span", { class: "badge", text: "muted" }) : null]));
-        if (noteEditorOpen === componentName) setTimeout(() => input.focus(), 0);
-      }
       if (state.tab === "history") {
         const list = el("ul", { class: "history" });
         for (const r2 of [...node.reports].reverse()) {
@@ -1930,7 +1761,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       const a = analyzeCommit(reports);
       details.append(
         el("div", { class: "details-header" }, [
-          el("span", { class: "title", text: key > 0 ? `Commit #${key}` : "Commit" }),
+          el("span", { class: "title", text: `Commit #${key}` }),
           el("span", { class: "meta", text: `${plural(a.total, "render")}, ${a.avoidable} avoidable${a.wasted ? ", " + fmtMs(a.wasted) + " wasted" : ""} \xB7 ${fmtTime(a.receivedAt)}` })
         ])
       );
@@ -2016,7 +1847,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       for (const c of s.commits) {
         list.append(
           el("li", { onclick: () => showCommit(c.key) }, [
-            el("span", { class: "id", text: c.key > 0 ? `#${c.key}` : "\u2014" }),
+            el("span", { class: "id", text: `#${c.key}` }),
             el("span", { class: "t", text: fmtTime(c.analysis.receivedAt) }),
             el("span", { class: "badge avoid", text: `${c.count} avoidable` }),
             el("span", { class: "root", text: componentList(c.components) })
@@ -2028,37 +1859,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         body.append(el("div", { class: "section-title", text: "Fixes" }));
         body.append(fixView(s.fixes, { copy: copyText }));
       }
-    }
-    let noteEditorOpen = null;
-    function toggleNoteEditor() {
-      const node = state.selectedKey ? state.nodesByKey.get(state.selectedKey) : null;
-      const name = node ? node.lastReport ? node.lastReport.component : node.name : null;
-      noteEditorOpen = noteEditorOpen === name ? null : name;
-      renderDetails();
-    }
-    function setNote(component, patch) {
-      const next = { ...state.notes[component] || {}, ...patch };
-      if (!next.note && !next.muted) delete state.notes[component];
-      else state.notes[component] = next;
-      if (transport.storage) transport.storage.set("notes", state.notes);
-      renderSummary();
-      renderLeft();
-      renderDetails();
-    }
-    function restoreNotes(raw) {
-      if (!isRecord(raw)) return;
-      const notes = {};
-      for (const [k, v] of Object.entries(raw)) {
-        if (!isRecord(v)) continue;
-        const n = {};
-        if (typeof v.note === "string" && v.note) n.note = v.note;
-        if (v.muted === true) n.muted = true;
-        if (n.note || n.muted) notes[k] = n;
-      }
-      state.notes = notes;
-      renderSummary();
-      renderLeft();
-      renderDetails();
     }
     const sessionSummary = (s) => summarizeSession(s, s.reports);
     function persistSessions() {
@@ -2278,10 +2078,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       };
       const text = JSON.stringify(data, null, 2);
       const name = `rerender-lens-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`;
-      if (transport.download) {
-        transport.download(name, text);
-        return;
-      }
       try {
         const blob = new Blob([text], { type: "application/json" });
         const url = URL.createObjectURL(blob);
@@ -2347,11 +2143,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       tabChip.textContent = state.tabLabel || "";
       banner.textContent = "";
       const warnings = [];
-      if (lib && typeof lib.protocol === "number" && lib.protocol !== PROTOCOL) {
-        warnings.push(
-          lib.protocol < PROTOCOL ? `The page runs rerender-lens ${lib.library || ""} (protocol ${lib.protocol}); this panel expects protocol ${PROTOCOL}. Update the rerender-lens package for commit grouping, source links and settings.` : `The page runs a newer rerender-lens (protocol ${lib.protocol}) than this panel (${PROTOCOL}). Update the extension.`
-        );
-      }
+      if (lib && typeof lib.protocol === "number" && lib.protocol > PROTOCOL) warnings.push(`The page runs a newer rerender-lens (protocol ${lib.protocol}) than this panel (${PROTOCOL}). Update the extension.`);
       if (lib && lib.production) warnings.push("Production React build detected: component names may be minified and hooks are unlabeled. Use a development build.");
       if (lib && lib.injected && lib.source === "page")
         warnings.push(`The page runs its own rerender-lens ${lib.library || ""}; the copy injected by the extension stepped aside. Turn injection off for this origin in Settings to avoid loading the library twice.`);
@@ -2460,10 +2252,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         sec.append(el("div", { class: "meta", text: "Connect to a page running rerender-lens to change its options." }));
         return;
       }
-      if (lib.protocol < PROTOCOL) {
-        sec.append(el("div", { class: "meta", text: "The page library is too old to be configured from here." }));
-        return;
-      }
       const current = Object.assign({}, lib.options || {});
       const applyOptions = async (patch) => {
         Object.assign(current, patch);
@@ -2522,7 +2310,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           renderStatus();
           break;
         case "hello":
-          setLibrary(isRecord(message.payload) ? Object.assign({ protocol: message.version || 1 }, message.payload) : { protocol: message.version || 1 });
+          if (isRecord(message.payload)) setLibrary(message.payload);
           break;
         case "clear":
         case "navigated":
@@ -2552,8 +2340,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       setView,
       openSettings: () => toggleSettings(true),
       startRecording,
-      stopRecording,
-      setNote
+      stopRecording
     };
     if (options.theme === "dark") document.documentElement.classList.add("theme-dark");
     state.origin = transport.origin || null;
@@ -2568,11 +2355,59 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       });
       Promise.resolve(transport.storage.get("sessions")).then(restoreSessions, () => {
       });
-      Promise.resolve(transport.storage.get("notes")).then(restoreNotes, () => {
-      });
     }
     transport.subscribe(handle);
     return panelApi;
+  }
+  var systemTheme = () => typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  var fetchSource = (url) => fetch(url).then((res) => res.ok ? res.text() : null).catch(() => null);
+  function localStorageAdapter(prefix) {
+    const mem = (key) => `${prefix}:${key}`;
+    return {
+      get: (key) => {
+        try {
+          const raw = localStorage.getItem(mem(key));
+          return raw ? JSON.parse(raw) : void 0;
+        } catch {
+          return void 0;
+        }
+      },
+      set: (key, value) => {
+        try {
+          localStorage.setItem(mem(key), JSON.stringify(value));
+        } catch {
+        }
+      }
+    };
+  }
+  function commandBridge(send, timeoutMs) {
+    const pending = /* @__PURE__ */ new Map();
+    const bridge = (cmd, arg) => new Promise((resolve, reject) => {
+      const id = Math.random().toString(36).slice(2);
+      const fail = () => {
+        clearTimeout(timer);
+        pending.delete(id);
+        resolve(null);
+      };
+      const timer = setTimeout(fail, timeoutMs);
+      pending.set(id, { resolve: (v) => v instanceof Error ? reject(v) : resolve(v), timer });
+      try {
+        void Promise.resolve(send({ __rerenderLensCmd: true, id, cmd, arg })).catch(fail);
+      } catch {
+        fail();
+      }
+    });
+    const reply = (m) => {
+      if (m.__rerenderLensReply !== true || typeof m.id !== "string") return false;
+      const p = pending.get(m.id);
+      if (p) {
+        pending.delete(m.id);
+        clearTimeout(p.timer);
+        p.resolve(typeof m.error === "string" ? new Error(m.error) : m.result);
+      }
+      return true;
+    };
+    return { bridge, reply };
   }
   function createRelayTransport(io) {
     let listener = null;
@@ -2600,7 +2435,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       try {
         const info = await io.bridge("info");
         if (info) {
-          emit({ type: "hello", version: info.protocol || 1, payload: info });
+          emit({ type: "hello", version: info.protocol, payload: info });
           return true;
         }
       } catch {
@@ -2678,6 +2513,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         connect();
         io.onNavigated(() => {
           since = 0;
+          setPolling(false);
           fn({ type: "navigated" });
           void resolveOrigin().then(() => {
             setTimeout(() => void attachToPage(), 1200);
@@ -2737,7 +2573,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     if (io.openResource) transport.openResource = io.openResource;
     if (io.undock) transport.undock = io.undock;
     if (io.readSource) transport.readSource = io.readSource;
-    transport.panelUrl = chrome.runtime.getURL("panel.html");
     return transport;
   }
   function devtoolsIO() {
@@ -2749,7 +2584,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       })
     );
     const expressions = {
-      info: () => "b.info?b.info():{count:b.size,protocol:b.version}",
+      info: () => "b.info()",
       pull: (since) => `b.pull?b.pull(${Number(since) || 0}):null`,
       replay: () => "b.replay()",
       clear: () => "b.clear()",
@@ -2786,7 +2621,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     try {
       switch (cmd) {
         case "info":
-          return b.info ? b.info() : { count: b.size, protocol: b.version };
+          return b.info();
         case "pull":
           return b.pull ? b.pull(arg) : null;
         case "replay":
@@ -2893,19 +2728,17 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       },
       openResource: (url) => void chrome.tabs.create({ url }),
       undock: (mode) => tabId === null ? Promise.reject(new Error("no tab")) : openOutside(mode, tabId),
-      // Dev servers serve the module source; host permission for the origin is required (and present when the panel works at all).
-      readSource: (url) => fetch(url).then((res) => res.ok ? res.text() : null).catch(() => null)
+      // Host permission for the origin is required to fetch the module source (and present when the panel works at all).
+      readSource: fetchSource
     };
     return io;
   }
   function bootExtension() {
-    const prefersDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
-    const theme = chrome.devtools.panels.themeName === "dark" || prefersDark ? "dark" : "light";
+    const theme = chrome.devtools.panels.themeName === "dark" ? "dark" : systemTheme();
     createPanel(document.getElementById("root"), createRelayTransport(devtoolsIO()), { theme });
   }
   function bootStandalone(opts = {}) {
-    const prefersDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
-    return createPanel(document.getElementById("root"), createRelayTransport(standaloneIO(opts)), { theme: prefersDark ? "dark" : "light" });
+    return createPanel(document.getElementById("root"), createRelayTransport(standaloneIO(opts)), { theme: systemTheme() });
   }
   function sampleReports() {
     const fn = (name) => FN_PREFIX + name;
@@ -3036,7 +2869,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
   function createBroadcastTransport(name) {
     let listener = null;
     let channel = null;
-    const pending = /* @__PURE__ */ new Map();
     const emit = (m) => {
       if (listener) listener(m);
     };
@@ -3045,36 +2877,15 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       channel = new BroadcastChannel(name);
       channel.onmessage = (event) => {
         const data = event.data;
-        if (!data) return;
-        if (data.__rerenderLensReply === true && typeof data.id === "string") {
-          const p = pending.get(data.id);
-          if (!p) return;
-          pending.delete(data.id);
-          clearTimeout(p.timer);
-          p.resolve(typeof data.error === "string" ? new Error(data.error) : data.result);
-          return;
-        }
+        if (!data || reply(data)) return;
         if (data.__rerenderLens === true && typeof data.type === "string") emit({ type: data.type, version: typeof data.version === "number" ? data.version : void 0, payload: data.payload });
       };
       return channel;
     };
-    const bridge = (cmd, arg) => new Promise((resolve, reject) => {
-      const id = Math.random().toString(36).slice(2);
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        resolve(null);
-      }, 1500);
-      pending.set(id, {
-        resolve: (v) => v instanceof Error ? reject(v) : resolve(v),
-        timer
-      });
-      open().postMessage({ __rerenderLensCmd: true, id, cmd, arg });
-    });
-    const mem = (key) => `rerender-lens:${name}:${key}`;
+    const { bridge, reply } = commandBridge((message) => open().postMessage(message), 1500);
     const transport = {
       origin: location.origin,
       tabLabel: `channel "${name}"`,
-      panelUrl: location.origin + location.pathname,
       subscribe(fn) {
         listener = fn;
         open();
@@ -3084,7 +2895,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
             fn({ type: "disconnected" });
             return;
           }
-          fn({ type: "hello", version: info.protocol || 1, payload: info });
+          fn({ type: "hello", version: info.protocol, payload: info });
           const res = await bridge("pull", 0);
           if (res) for (const p of res.reports) fn({ type: "report", payload: p });
         });
@@ -3096,23 +2907,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       }),
       flashAvoidable: (on) => bridge("flash", !!on).catch(() => {
       }),
-      storage: {
-        get: (key) => {
-          try {
-            const raw = localStorage.getItem(mem(key));
-            return raw ? JSON.parse(raw) : void 0;
-          } catch {
-            return void 0;
-          }
-        },
-        set: (key, value) => {
-          try {
-            localStorage.setItem(mem(key), JSON.stringify(value));
-          } catch {
-          }
-        }
-      },
-      readSource: (url) => fetch(url).then((res) => res.ok ? res.text() : null).catch(() => null),
+      storage: localStorageAdapter(`rerender-lens:${name}`),
+      readSource: fetchSource,
       copy: (text) => navigator.clipboard.writeText(text).catch(() => {
       })
     };
@@ -3123,24 +2919,11 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     let listener = null;
     let stream = null;
     let appsOnline = null;
-    const pending = /* @__PURE__ */ new Map();
     const emit = (m) => {
       if (listener) listener(m);
     };
     const post = (message) => fetch(`${base}/message`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(message) }).then(() => void 0);
-    const bridge = (cmd, arg) => new Promise((resolve, reject) => {
-      const id = Math.random().toString(36).slice(2);
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        resolve(null);
-      }, 2e3);
-      pending.set(id, { resolve: (v) => v instanceof Error ? reject(v) : resolve(v), timer });
-      post({ __rerenderLensCmd: true, id, cmd, arg }).catch(() => {
-        clearTimeout(timer);
-        pending.delete(id);
-        resolve(null);
-      });
-    });
+    const { bridge, reply } = commandBridge(post, 2e3);
     const handleData = (data) => {
       let parsed;
       try {
@@ -3149,14 +2932,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         return;
       }
       for (const m of Array.isArray(parsed) ? parsed : [parsed]) {
-        if (!isRecord(m)) continue;
-        if (m.__rerenderLensReply === true && typeof m.id === "string") {
-          const p = pending.get(m.id);
-          if (!p) continue;
-          pending.delete(m.id);
-          clearTimeout(p.timer);
-          p.resolve(typeof m.error === "string" ? new Error(m.error) : m.result);
-        } else if (m.__rerenderLens === true && m.type === "relay") {
+        if (!isRecord(m) || reply(m)) continue;
+        if (m.__rerenderLens === true && m.type === "relay") {
           const apps = isRecord(m.payload) && typeof m.payload.apps === "number" ? m.payload.apps : 0;
           const wasOnline = appsOnline;
           appsOnline = apps;
@@ -3172,15 +2949,13 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         return;
       }
       emit({ type: "connected" });
-      emit({ type: "hello", version: info.protocol || 1, payload: info });
+      emit({ type: "hello", version: info.protocol, payload: info });
       const res = await bridge("pull", 0);
       if (res) for (const p of res.reports) emit({ type: "report", payload: p });
     }
-    const mem = (key) => `rerender-lens:relay:${base}:${key}`;
     const transport = {
       origin: base,
       tabLabel: `relay ${base.replace(/^https?:\/\//, "")}`,
-      panelUrl: location.origin + location.pathname,
       subscribe(fn) {
         listener = fn;
         const open = () => {
@@ -3200,47 +2975,18 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       }),
       flashAvoidable: (on) => bridge("flash", !!on).catch(() => {
       }),
-      storage: {
-        get: (key) => {
-          try {
-            const raw = localStorage.getItem(mem(key));
-            return raw ? JSON.parse(raw) : void 0;
-          } catch {
-            return void 0;
-          }
-        },
-        set: (key, value) => {
-          try {
-            localStorage.setItem(mem(key), JSON.stringify(value));
-          } catch {
-          }
-        }
-      },
-      readSource: (url) => fetch(url).then((res) => res.ok ? res.text() : null).catch(() => null),
+      storage: localStorageAdapter(`rerender-lens:relay:${base}`),
+      readSource: fetchSource,
       copy: (text) => navigator.clipboard.writeText(text).catch(() => {
       })
     };
     return transport;
   }
   function bootRelay(relayUrl) {
-    const prefersDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
-    return createPanel(document.getElementById("root"), createRelayClientTransport(relayUrl), { theme: prefersDark ? "dark" : "light" });
+    return createPanel(document.getElementById("root"), createRelayClientTransport(relayUrl), { theme: systemTheme() });
   }
   function bootBroadcast(name) {
-    const prefersDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
-    return createPanel(document.getElementById("root"), createBroadcastTransport(name), { theme: prefersDark ? "dark" : "light" });
-  }
-  async function bootShared(code) {
-    const report = await decodeShare(code);
-    const transport = { subscribe() {
-    }, panelUrl: location.origin + location.pathname };
-    const panel = createPanel(document.getElementById("root"), transport, { theme: typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light" });
-    if (!report) {
-      panel.handle({ type: "hello", version: PROTOCOL, payload: { protocol: PROTOCOL, library: "shared link", react: [], enabled: false } });
-      return;
-    }
-    panel.importData([report]);
-    panel.select(report.component);
+    return createPanel(document.getElementById("root"), createBroadcastTransport(name), { theme: systemTheme() });
   }
   function bootDemo() {
     const params2 = new URLSearchParams(location.search);
@@ -3253,7 +2999,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       origin: "http://localhost:5199",
       subscribe(fn) {
         fn({ type: "connected" });
-        fn({ type: "hello", version: PROTOCOL, payload: { count: 0, library: "demo", protocol: PROTOCOL, react: [{ version: "19.2.0", bundleType: 1 }], production: false, enabled: true, options: { trackAllMemoized: true, silent: true }, source: "page", injected: false } });
+        fn({ type: "hello", version: PROTOCOL, payload: { library: "demo", protocol: PROTOCOL, react: [{ version: "19.2.0", bundleType: 1 }], production: false, enabled: true, options: { trackAllMemoized: true, silent: true }, source: "page", injected: false } });
         if (flood > 0) {
           const t0 = performance.now();
           for (const r of floodReports(flood)) fn({ type: "report", payload: r });
@@ -3283,11 +3029,9 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       originStatus: () => Promise.resolve({ origin: "http://localhost:5199", builtIn: true, permitted: true, enabled: true, inject: false, deferHook: false }),
       setOrigin: () => Promise.resolve(),
       storage: { get: (k) => Promise.resolve(mem[k]), set: (k, v) => Promise.resolve(mem[k] = v) },
-      panelUrl: location.origin + location.pathname,
       readSource: () => Promise.resolve("import { memo } from 'react';\n\nexport const ProductList = memo(function ProductList(props) {\n  const [selected, setSelected] = useState(null);\n  return (\n    <ul>\n      {props.products.map((p) => (\n        <ProductRow key={p.id} product={p} style={{ color: 'red' }} onSelect={(id) => props.onSelect(id)} />\n      ))}\n    </ul>\n  );\n});\n")
     };
-    const dark = /theme=dark/.test(location.search) || typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
-    createPanel(document.getElementById("root"), transport, { theme: dark ? "dark" : "light" });
+    createPanel(document.getElementById("root"), transport, { theme: /theme=dark/.test(location.search) ? "dark" : systemTheme() });
   }
   var api = {
     PROTOCOL,
@@ -3306,8 +3050,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     createRelayTransport,
     createBroadcastTransport,
     createRelayClientTransport,
-    encodeShare,
-    decodeShare,
     sourceContext,
     analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary, summarizeSession, compareSessions }
   };
@@ -3316,8 +3058,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
   var hasDevtools = hasChrome && !!chrome.devtools && !!chrome.devtools.inspectedWindow;
   var params = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
   var pathname = typeof location !== "undefined" ? String(location.pathname) : "";
-  if (params.has("report")) void bootShared(params.get("report") || "");
-  else if (params.has("relay") && typeof EventSource === "function") bootRelay(params.get("relay") || location.origin);
+  if (params.has("relay") && typeof EventSource === "function") bootRelay(params.get("relay") || location.origin);
   else if (params.has("channel") && typeof BroadcastChannel === "function") bootBroadcast(params.get("channel") || "rerender-lens");
   else if (hasDevtools && /panel\.html/.test(pathname) && !params.has("tabId")) bootExtension();
   else if (hasChrome && (/sidepanel\.html/.test(pathname) || params.has("tabId"))) bootStandalone({ tabId: params.has("tabId") ? Number(params.get("tabId")) : null });

@@ -30,8 +30,29 @@ function broadcast(tabId, message) {
 }
 
 // ---------- badge ----------
+// Paint at most every 100 ms per tab: a commit with thousands of avoidable reports is thousands of
+// port messages, and two chrome.action calls per message kept the service worker busy for seconds.
+const badgeTimers = new Map();
 function setBadge(tabId, count) {
   badgeByTab.set(tabId, count);
+  if (count === 0) {
+    clearTimeout(badgeTimers.get(tabId));
+    badgeTimers.delete(tabId);
+    paintBadge(tabId);
+    return;
+  }
+  if (badgeTimers.has(tabId)) return;
+  badgeTimers.set(
+    tabId,
+    setTimeout(() => {
+      badgeTimers.delete(tabId);
+      paintBadge(tabId);
+    }, 100),
+  );
+}
+
+function paintBadge(tabId) {
+  const count = badgeByTab.get(tabId) || 0;
   const text = count > 999 ? '999+' : count > 0 ? String(count) : '';
   chrome.action.setBadgeText({ tabId, text }).catch(() => {});
   if (count > 0) chrome.action.setBadgeBackgroundColor({ tabId, color: '#d93025' }).catch(() => {});
@@ -49,9 +70,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   badgeByTab.delete(tabId);
   panelsByTab.delete(tabId);
   contentByTab.delete(tabId);
-});
-chrome.webNavigation?.onCommitted?.addListener?.((d) => {
-  if (d.frameId === 0) setBadge(d.tabId, 0);
 });
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (info.status === 'loading') setBadge(tabId, 0);
@@ -214,8 +232,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await S.saveOrigins(origins);
         return originStatus(origin);
       }
-      case 'origins:list':
-        return S.loadOrigins();
       case 'window:open': {
         // The panel in its own window, pinned to a tab (tile it next to the browser).
         const url = chrome.runtime.getURL('panel.html?tabId=' + encodeURIComponent(message.tabId));

@@ -39,6 +39,8 @@ export interface HelloPayload {
   commits: number;
   /** The library's own cost: total and worst-case time spent inspecting commits, in ms. */
   overhead: { totalMs: number; maxCommitMs: number };
+  /** Reports skipped because a commit exceeded the per-commit cap or time budget. */
+  truncated: number;
 }
 
 /** Command sent by a panel over the BroadcastChannel; answered with a `ChannelReply` of the same id. */
@@ -164,8 +166,17 @@ declare global {
   }
 }
 
-/** Convert a report into a structured-clone-safe value (functions, elements, cycles removed). */
-export function serialize(value: unknown, maxDepth = 6, seen: WeakSet<object> = new WeakSet(), depth = 0): unknown {
+/** Entries kept per array / object / Map / Set when serializing; the rest becomes one `…+N more` marker. */
+export const SERIALIZE_MAX_ENTRIES = 100;
+/** Objects visited per serialized report; beyond it values become `[…]`. */
+export const SERIALIZE_MAX_NODES = 20_000;
+
+/**
+ * Convert a report into a structured-clone-safe value (functions, elements, cycles removed).
+ * Depth, breadth and total size are bounded so a giant prop (a 100k-row list, an image buffer,
+ * a scene graph) costs a bounded amount of time and memory per report.
+ */
+export function serialize(value: unknown, maxDepth = 4, seen: WeakSet<object> = new WeakSet(), depth = 0, budget: { nodes: number } = { nodes: SERIALIZE_MAX_NODES }): unknown {
   if (value === null || value === undefined) return value;
   const t = typeof value;
   if (t === 'string' || t === 'boolean') return value;
@@ -176,25 +187,58 @@ export function serialize(value: unknown, maxDepth = 6, seen: WeakSet<object> = 
   const obj = value as object;
   if (seen.has(obj)) return '[Circular]';
   if (depth >= maxDepth) return '[…]';
+  if (--budget.nodes < 0) return '[…]';
+  const next = (v: unknown): unknown => serialize(v, maxDepth, seen, depth + 1, budget);
   seen.add(obj);
   try {
     if (isReactElement(obj)) {
       // Keep the props so the panel can diff element trees (children) leaf by leaf.
       const out: Record<string, unknown> = { $type: 'element', name: getDisplayName(obj.type) };
       if (obj.key !== null && obj.key !== undefined) out.key = String(obj.key);
-      out.props = serialize(obj.props, maxDepth, seen, depth + 1);
+      out.props = next(obj.props);
       return out;
     }
     if (obj instanceof Date) return { $type: 'Date', value: obj.toISOString() };
     if (obj instanceof RegExp) return { $type: 'RegExp', value: String(obj) };
-    if (obj instanceof Map) {
-      return { $type: 'Map', entries: [...obj].map(([k, v]) => [serialize(k, maxDepth, seen, depth + 1), serialize(v, maxDepth, seen, depth + 1)]) };
+    if (ArrayBuffer.isView(obj) || obj instanceof ArrayBuffer) {
+      // Binary data: `Object.keys` of a typed array would enumerate every index.
+      const bin = obj as { length?: number; byteLength: number; constructor?: { name?: string } };
+      return { $type: bin.constructor?.name || 'ArrayBuffer', length: typeof bin.length === 'number' ? bin.length : bin.byteLength };
     }
-    if (obj instanceof Set) return { $type: 'Set', values: [...obj].map((v) => serialize(v, maxDepth, seen, depth + 1)) };
-    if (Array.isArray(obj)) return obj.map((v) => serialize(v, maxDepth, seen, depth + 1));
-    if (typeof Element !== 'undefined' && obj instanceof Element) return `<${obj.tagName.toLowerCase()}>`;
+    if (obj instanceof Promise) return '[Promise]';
+    if (typeof Node !== 'undefined' && obj instanceof Node) return typeof Element !== 'undefined' && obj instanceof Element ? `<${obj.tagName.toLowerCase()}>` : `[${obj.nodeName}]`;
+    if (obj === globalThis) return '[Window]';
+    if (obj instanceof Map) {
+      const entries: unknown[] = [];
+      for (const [k, v] of obj) {
+        if (entries.length >= SERIALIZE_MAX_ENTRIES) {
+          entries.push(['…', `+${obj.size - SERIALIZE_MAX_ENTRIES} more`]);
+          break;
+        }
+        entries.push([next(k), next(v)]);
+      }
+      return { $type: 'Map', entries };
+    }
+    if (obj instanceof Set) {
+      const values: unknown[] = [];
+      for (const v of obj) {
+        if (values.length >= SERIALIZE_MAX_ENTRIES) {
+          values.push(`…+${obj.size - SERIALIZE_MAX_ENTRIES} more`);
+          break;
+        }
+        values.push(next(v));
+      }
+      return { $type: 'Set', values };
+    }
+    if (Array.isArray(obj)) {
+      const out = obj.slice(0, SERIALIZE_MAX_ENTRIES).map(next);
+      if (obj.length > SERIALIZE_MAX_ENTRIES) out.push(`…+${obj.length - SERIALIZE_MAX_ENTRIES} more`);
+      return out;
+    }
     const out: Record<string, unknown> = {};
-    for (const k of Object.keys(obj)) out[k] = serialize((obj as Record<string, unknown>)[k], maxDepth, seen, depth + 1);
+    const keys = Object.keys(obj);
+    for (const k of keys.slice(0, SERIALIZE_MAX_ENTRIES)) out[k] = next((obj as Record<string, unknown>)[k]);
+    if (keys.length > SERIALIZE_MAX_ENTRIES) out['…'] = `+${keys.length - SERIALIZE_MAX_ENTRIES} more`;
     const proto = Object.getPrototypeOf(obj) as { constructor?: { name?: string } } | null;
     if (proto && proto !== Object.prototype && proto.constructor?.name) out.$type = proto.constructor.name;
     return out;
@@ -251,14 +295,26 @@ interface Entry {
  */
 export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): Notifier {
   const bufferSize = options.bufferSize ?? 300;
-  const maxDepth = options.maxDepth ?? 6;
+  const maxDepth = options.maxDepth ?? 4;
   const target = options.target ?? (typeof window !== 'undefined' ? window : undefined);
   const buffer: Entry[] = [];
   let seq = 0;
   let flashOn = options.flashAvoidable ?? false;
 
+  // Reports go on `window` only once the page side said it listens (the extension's content script posts
+  // `__rerenderLensReady`, or something called `replay()`): a page without an open panel then pays no
+  // structured clone per report and wakes none of the app's own `message` listeners. Targets without
+  // `addEventListener` (tests, custom sinks) are treated as listening.
+  let live = !target || typeof (target as Window).addEventListener !== 'function';
+  if (!live) {
+    (target as Window).addEventListener('message', (event: MessageEvent) => {
+      const data = event.data as { __rerenderLensReady?: boolean } | null;
+      // jsdom leaves `source` null; the marker alone is specific enough for a flag that only opens the gate.
+      if ((event.source === target || !event.source) && data && data.__rerenderLensReady === true) live = true;
+    });
+  }
   const post = (type: DevtoolsMessage['type'], payload?: unknown): void => {
-    if (!target) return;
+    if (!target || (type === 'report' && !live)) return;
     const msg: DevtoolsMessage = { [DEVTOOLS_MARKER]: true, version: PROTOCOL_VERSION, type, payload };
     target.postMessage(msg, '*');
   };
@@ -277,10 +333,12 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     scheduled: getState().scheduled,
     commits: getState().commits,
     overhead: { totalMs: getState().overheadMs, maxCommitMs: getState().maxCommitMs },
+    truncated: getState().truncated,
   });
 
   const bridge: DevtoolsBridge = {
     replay: () => {
+      live = true;
       post('hello', info());
       for (const e of buffer) post('report', e.payload);
     },

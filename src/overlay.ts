@@ -78,13 +78,28 @@ export function highlight(target: OverlayBox | null): void {
   for (const s of l.sticky) s.remove();
   l.sticky = [];
   if (!target) return;
-  for (const node of target.nodes) {
-    const rect = node.getBoundingClientRect();
-    if (rect.width === 0 && rect.height === 0) continue;
+  // Measure every node before touching the DOM: an append between two measurements forces a reflow each time.
+  const frag = document.createDocumentFragment();
+  for (const rect of measure(target.nodes)) {
     const b = box(rect, '#1a73e8', 'rgba(26, 115, 232, 0.12)', target.label);
-    l.root.appendChild(b);
+    frag.appendChild(b);
     l.sticky.push(b);
   }
+  l.root.appendChild(frag);
+}
+
+/** Boxes drawn per call at most; a re-render of thousands of rows should not paint thousands of boxes. */
+const MAX_BOXES = 100;
+
+function measure(nodes: Iterable<Element>): DOMRect[] {
+  const rects: DOMRect[] = [];
+  for (const node of nodes) {
+    if (rects.length >= MAX_BOXES) break;
+    const rect = node.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) continue;
+    rects.push(rect);
+  }
+  return rects;
 }
 
 export function clearHighlight(): void {
@@ -95,17 +110,22 @@ export function clearHighlight(): void {
 export function flash(target: OverlayBox, duration = 500): void {
   const l = ensureLayer();
   if (!l) return;
-  for (const node of target.nodes) {
-    const rect = node.getBoundingClientRect();
-    if (rect.width === 0 && rect.height === 0) continue;
+  const frag = document.createDocumentFragment();
+  const boxes: HTMLElement[] = [];
+  for (const rect of measure(target.nodes)) {
     const b = box(rect, '#d93025', 'rgba(217, 48, 37, 0.15)');
     b.style.transition = `opacity ${duration}ms ease-out`;
-    l.root.appendChild(b);
-    requestAnimationFrame(() => {
-      b.style.opacity = '0';
-    });
-    setTimeout(() => b.remove(), duration + 50);
+    frag.appendChild(b);
+    boxes.push(b);
   }
+  if (!boxes.length) return;
+  l.root.appendChild(frag);
+  requestAnimationFrame(() => {
+    for (const b of boxes) b.style.opacity = '0';
+  });
+  setTimeout(() => {
+    for (const b of boxes) b.remove();
+  }, duration + 50);
 }
 
 /** Remove the overlay layer entirely. */

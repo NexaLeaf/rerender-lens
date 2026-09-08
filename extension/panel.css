@@ -363,40 +363,6 @@ button.ib.rec .glyph { color: var(--danger); animation: blink 1.2s ease-in-out i
 .views button.instances { color: var(--text-dim); }
 .views button.instances.active { background: var(--accent-bg); color: var(--accent); }
 
-/* ---------- windowed grids, column chooser, notes ---------- */
-.vhead { display: grid; position: sticky; top: 0; z-index: 1; background: var(--bg-alt); border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 600; color: var(--text-dim); align-items: center; }
-.vhead > span { padding: 6px 10px; white-space: nowrap; cursor: pointer; user-select: none; }
-.vhead > span.sorted { color: var(--accent); }
-.vhead > span.num { text-align: right; }
-.vrow { display: grid; grid-template-columns: var(--grid-cols); align-items: center; height: 26px; position: absolute; left: 0; right: 0; border-bottom: 1px solid var(--border); font-size: 11px; cursor: pointer; box-sizing: border-box; }
-.vrow:hover { background: var(--hover); }
-.vrow > span { padding: 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vrow > span.num { text-align: right; font-variant-numeric: tabular-nums; }
-.vrow > span.c .name { font-family: var(--mono); color: var(--key); }
-.vrow > span.c .name::before { content: "<"; color: var(--text-faint); }
-.vrow > span.c .name::after { content: ">"; color: var(--text-faint); }
-.vrow > span.fix { color: var(--text-dim); font-family: var(--mono); }
-.vrow.fix-row { display: flex; gap: 8px; padding: 0 10px; }
-.vrow.fix-row .label { font-family: var(--mono); }
-.vrow.fix-row .meta { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
-.vrow.selected, .vrow.fix-row.selected { background: var(--selected); color: var(--selected-text); box-shadow: inset 2px 0 0 var(--accent); }
-.table-tools { display: flex; justify-content: flex-end; padding: 3px 8px; border-bottom: 1px solid var(--border); background: var(--bg-alt); }
-.columns-menu { position: relative; font-size: 11px; font-weight: 400; }
-.columns-menu summary { list-style: none; cursor: pointer; color: var(--text-dim); padding: 2px 6px; border-radius: var(--radius); }
-.columns-menu summary::-webkit-details-marker { display: none; }
-.columns-menu summary:hover { background: var(--hover); color: var(--text); }
-.columns-menu .menu { position: absolute; right: 0; top: 100%; z-index: 3; background: var(--bg); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow); padding: 6px 10px; min-width: 140px; }
-.vhead .columns-menu { justify-self: end; }
-.grid td.mono { font-family: var(--mono); }
-tr.muted td, .vrow.muted > span, .row.muted .tag { opacity: 0.55; }
-.row.muted .tag .name::after { content: " ·muted"; color: var(--text-faint); font-family: var(--font); font-size: 10px; }
-button.ib.small { height: 22px; padding: 0 6px; }
-.note-box { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: var(--warn-bg); border-bottom: 1px solid var(--border); }
-.note-box.muted { background: var(--bg-inset); }
-.note-box .glyph { color: var(--warn); }
-.note-input { flex: 1; height: 24px; padding: 0 8px; border: 1px solid transparent; border-radius: var(--radius); background: transparent; font: inherit; color: inherit; }
-.note-input:hover, .note-input:focus { border-color: var(--border-strong); background: var(--bg); outline: none; }
-
 /* ---------- compact layout (side panel, narrow windows) ---------- */
 .compact .toolbar { flex-wrap: wrap; gap: 3px; }
 .compact .toolbar input[type="search"] { min-width: 120px; flex-basis: 100%; max-width: none; order: -1; margin-bottom: 3px; }

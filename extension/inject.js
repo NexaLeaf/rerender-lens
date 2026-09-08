@@ -18,7 +18,9 @@
     if (window.__RERENDER_LENS_DEVTOOLS__) return; // the page's own init() won the race
     L.ensureDevtoolsHook(); // wraps an existing hook (React DevTools, Fast Refresh) or creates one
     window.__RERENDER_LENS_INJECTED__ = L.VERSION;
-    L.init({ trackAllMemoized: true, silent: true, notifier: L.createDevtoolsNotifier({ source: 'extension' }) });
+    // includeState is off by default here: snapshotting every hook/context/state value for every report is the
+    // single biggest per-commit cost on large apps. Settings can turn it on per origin.
+    L.init({ trackAllMemoized: true, includeState: false, silent: true, notifier: L.createDevtoolsNotifier({ source: 'extension' }) });
     if (pending && window.__RERENDER_LENS_DEVTOOLS__) window.__RERENDER_LENS_DEVTOOLS__.configure(pending);
   }
 

@@ -25,15 +25,8 @@ Settings drawer that changes the library's options live (persisted per origin).
 
 Keyboard: `/` focuses search, arrows move in the tree, `f` opens the Fix tab, `Esc` clears the
 highlight (and closes Settings). Search matches component names, `/regex/`, or `~text` to search
-prop, hook, context and state values. Every list is virtualized (tree and stream always, Offenders
-and Fixes above 200 rows), so tens of thousands of reports stay smooth; `panel.html?demo&flood=5000`
-is the scale test.
-
-Per component you can add a **note** and **mute** it: muted components stay in the tree and the
-Offenders table (dimmed) but leave the Fixes ranking and the summary strip. Notes and mutes are
-saved per origin. *Copy link* on a report produces a `panel.html?report=…` URL that opens the report
-without the page, for issues and reviews. The Offenders table has a column chooser (*Places*, *Last
-seen*).
+prop, hook, context and state values. The tree and the live stream are virtualized, so tens of
+thousands of reports stay smooth; `panel.html?demo&flood=5000` is the scale test.
 
 ## Next to the page, or in a window
 

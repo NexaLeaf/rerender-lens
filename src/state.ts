@@ -17,6 +17,8 @@ export interface LensState {
   /** Time spent inspecting commits (ms), to show the library's own cost. */
   overheadMs: number;
   maxCommitMs: number;
+  /** Reports skipped by the per-commit cap / time budget (see `onCommit`). */
+  truncated: number;
 }
 
 const KEY = Symbol.for('rerender-lens.state');
@@ -26,7 +28,7 @@ export function getState(): LensState {
   const g = globalThis as unknown as Record<symbol, LensState | undefined>;
   let s = g[KEY];
   if (!s) {
-    s = { options: {}, enabled: false, printed: new Map(), detach: null, nextInstanceId: 1, nextCommitId: 1, warnedOnce: new Set(), scheduled: 0, commits: 0, overheadMs: 0, maxCommitMs: 0 };
+    s = { options: {}, enabled: false, printed: new Map(), detach: null, nextInstanceId: 1, nextCommitId: 1, warnedOnce: new Set(), scheduled: 0, commits: 0, overheadMs: 0, maxCommitMs: 0, truncated: 0 };
     g[KEY] = s;
   }
   return s;
@@ -59,7 +61,7 @@ export function dispatch(report: RenderReport, override?: Options): void {
     try {
       options.notifier(report);
     } catch (err) {
-      (options.console ?? console).warn('[rerender-lens] notifier threw', err);
+      warnOnce('notifier', `notifier threw: ${String(err)}`);
     }
   }
 }

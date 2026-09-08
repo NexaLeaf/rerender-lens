@@ -18,6 +18,12 @@
   `clearReports`, `expectWithinBudget`.
 - A second copy of the library (another bundle on the same page) no longer wraps the hook
   again, which doubled every report.
+- Removed: per-component notes and mute, share links (`panel.html?report=…`), the Offenders
+  column chooser (*Places*, *Last seen*), and the windowed Offenders/Fixes variant above 200 rows.
+  Offenders and Fixes always render plain rows; the tree and the stream stay virtualized. The
+  panel also drops its protocol-1 fallbacks: protocol 2 is the only one it speaks.
+- Fix: after a navigation the panel's polling fallback stops until the new page answers `info`,
+  instead of evaluating into pages without the library every 500 ms.
 
 ## 0.3.0
 

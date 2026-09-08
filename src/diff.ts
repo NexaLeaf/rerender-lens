@@ -29,6 +29,34 @@ function remember(seen: Seen, a: object, b: object): boolean {
 }
 
 /**
+ * Bounds the work of one comparison scope (a commit, or one public `deepEqual` call): pairs already
+ * compared are memoized, so a large value shared by many components is walked once per commit, and
+ * a visit budget turns a huge structure into "different" instead of freezing the page.
+ */
+interface DiffScope {
+  cache: WeakMap<object, WeakMap<object, boolean>>;
+  remaining: number;
+  exhausted: boolean;
+}
+let scope: DiffScope | null = null;
+/** Object visits allowed for one public `deepEqual` call. */
+export const DEFAULT_DIFF_BUDGET = 50_000;
+
+/** Start a scope (`onCommit` does this per commit); call the returned function to end it. */
+export function beginDiffScope(budget = 200_000): () => void {
+  const previous = scope;
+  scope = { cache: new WeakMap(), remaining: budget, exhausted: false };
+  return () => {
+    scope = previous;
+  };
+}
+
+/** True when the current scope gave up on a value because it was too large to walk. */
+export function diffBudgetExhausted(): boolean {
+  return scope?.exhausted === true;
+}
+
+/**
  * Structural equality that understands Map, Set, Date, RegExp, typed arrays,
  * React elements and cyclic references. Functions are equal only by reference.
  */
@@ -36,9 +64,36 @@ export function deepEqual(a: unknown, b: unknown, seen: Seen = new Map()): boole
   if (Object.is(a, b)) return true;
   if (typeof a !== typeof b) return false;
   if (typeof a !== 'object' || a === null || b === null) return false;
+  if (!scope) {
+    const end = beginDiffScope(DEFAULT_DIFF_BUDGET);
+    try {
+      return deepEqual(a, b, seen);
+    } finally {
+      end();
+    }
+  }
+  const sc = scope;
   const objA = a as object;
   const objB = b as object;
+  const hit = sc.cache.get(objA)?.get(objB);
+  if (hit !== undefined) return hit;
+  if (--sc.remaining < 0) {
+    sc.exhausted = true;
+    return false;
+  }
+  const result = deepEqualObjects(objA, objB, seen);
+  let m = sc.cache.get(objA);
+  if (!m) {
+    m = new WeakMap();
+    sc.cache.set(objA, m);
+  }
+  m.set(objB, result);
+  return result;
+}
 
+function deepEqualObjects(a: object, b: object, seen: Seen): boolean {
+  const objA = a;
+  const objB = b;
   if (remember(seen, objA, objB)) return true; // cycle: assume equal on this branch
 
   if (a instanceof Date) return b instanceof Date && a.getTime() === b.getTime();
@@ -69,6 +124,11 @@ export function deepEqual(a: unknown, b: unknown, seen: Seen = new Map()): boole
   }
   if (a instanceof Set) {
     if (!(b instanceof Set) || a.size !== b.size) return false;
+    if (a.size > 50) {
+      // Members that are equal-but-not-identical would need O(n²) work; large sets compare by identity.
+      for (const v of a) if (!b.has(v)) return false;
+      return true;
+    }
     outer: for (const v of a) {
       if (b.has(v)) continue;
       for (const w of b) if (deepEqual(v, w, seen)) continue outer;
@@ -86,9 +146,10 @@ export function deepEqual(a: unknown, b: unknown, seen: Seen = new Map()): boole
     const ka = Object.keys(a);
     const kb = Object.keys(b);
     if (ka.length !== kb.length) return false;
+    const rb = b as Record<string, unknown>;
     for (const k of ka) {
       if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
-      if (!deepEqual(a[k], (b as Record<string, unknown>)[k], seen)) return false;
+      if (!deepEqual((a as Record<string, unknown>)[k], rb[k], seen)) return false;
     }
     return true;
   }
@@ -145,7 +206,8 @@ export function diffRecords(
     if (Object.is(a, b)) continue;
     const kind = classify(a, b);
     if (kind === 'different') {
-      changes.push({ path: firstDifferentPath(a, b, path), kind, prev: a, next: b });
+      // Once the budget is gone the nested walk would only burn more time; report the top-level key.
+      changes.push({ path: diffBudgetExhausted() ? path : firstDifferentPath(a, b, path), kind, prev: a, next: b });
     } else {
       changes.push({ path, kind, prev: a, next: b });
     }
