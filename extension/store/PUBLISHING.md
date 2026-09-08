@@ -18,8 +18,9 @@ release with the zips but no npm publish, plus a warning in the workflow log.
 2. `npm run build && npm run build:ext`, upload `dist-extension/chrome.zip` as a new item.
 3. Fill the listing from `LISTING.md`; privacy tab from `PRIVACY.md` (host it, e.g. the GitHub
    file URL, and paste the link). Choose *Unlisted* for the first release.
-4. Screenshots: run `npx http-server extension` (or any static server) and open
-   `panel.html?demo`, `panel.html?demo&theme=dark`. Resize the window to 1280x800.
+4. Screenshots and promo tiles:
+   `npm run store:media` (needs `npm run build` and Playwright's Chromium) writes the five 1280x800
+   screenshots and both promo tiles to `extension/store/media/`; upload them as they are.
 
 ## Automated uploads
 

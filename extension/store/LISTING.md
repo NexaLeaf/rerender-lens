@@ -26,6 +26,8 @@ memoized provider value, ...).
 - Elements-panel sidebar for the selected DOM node
 - Toolbar badge with the avoidable count of the current tab
 - Works with any React app: enable injection for the origin and no app code is needed
+- Sessions: record, apply a fix, record again, and compare the two
+- The same panel next to the page (Chrome side panel, Firefox sidebar) or in its own window
 - Export/import reports as JSON, copy a report as Markdown
 
 Everything runs locally in your browser. No data is sent anywhere. No analytics.
@@ -44,5 +46,6 @@ Works with React 16.8 to 19 development builds (production builds are detected a
 
 **Single purpose:** debugging React re-renders in the developer's own applications.
 
-**Screenshots (1280x800):** take from `panel.html?demo` (tree + report), the Commits view, the Fixes
-view, and the Elements sidebar. See PUBLISHING.md.
+**Screenshots and promo tiles:** `npm run store:media` writes them to `extension/store/media/`
+(`1-report`, `2-offenders`, `3-commits`, `4-fixes-dark`, `5-sessions` at 1280x800;
+`promo-small-440x280`, `promo-marquee-1400x560`). See PUBLISHING.md.

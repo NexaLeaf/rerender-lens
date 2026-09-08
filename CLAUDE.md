@@ -8,7 +8,7 @@ React re-render debugger. See README.md for the public API.
 - `npm run build:ext` packages `extension/` into `dist-extension/` (Chrome/Edge/Firefox zips; syncs the manifest version from package.json).
 - `npm run check` runs all of the above and is `prepublishOnly`.
 - `npm run e2e` (Playwright, Chromium with the extension loaded against the example app; needs `npm run build` and `npm --prefix examples/vite-react install` first).
-- `npm run lint:ext` (web-ext lint on the Firefox package), `npm run build:docs`, `npm run docs:media`.
+- `npm run lint:ext` (web-ext lint on the Firefox package), `npm run build:docs`, `npm run docs:media` (docs screenshots), `npm run store:media` (Web Store screenshots + promo tiles into `extension/store/media/`).
 - `npm run test:react18` installs React 18 into `.react18/` (gitignored) and runs the unit suite against it through `test/react-compat.config.ts` (aliases `react`, `react-dom` and the JSX runtimes; `REACT_COMPAT_DIR` points elsewhere). CI runs it as its own job. React 17 cannot load the harness (`react-dom/client`, `React.act`), so it is not covered.
 - `npm run check` runs the tests before `build`; after changing `extension/src/panel.ts` run `npx tsup` first or the jsdom tests read a stale `extension/panel.js`.
 - `npm run dev:example` builds the library and starts `examples/vite-react` on port 5199 (`/` runs the library itself, `/plain.html` does not, for testing injection; `/scale.html?rows=N` is the scale test with a readout of `info().overhead` and `info().truncated`, used by the e2e suite).

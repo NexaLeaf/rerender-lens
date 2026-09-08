@@ -150,6 +150,40 @@ test('the panel page renders its demo data with fixes and commits', async ({ con
   await expect(page.locator('.fixes li').first()).toContainText('in <ProductList>');
 });
 
+test('the panel stays responsive with 20,000 buffered reports (flood mode)', async ({ context, extensionId }) => {
+  const page = await context.newPage();
+  const t0 = Date.now();
+  await page.goto(`chrome-extension://${extensionId}/panel.html?demo&flood=20000`);
+  await expect(page.locator('.summary')).toContainText('renders');
+  const timed = async (label: string, fn: () => Promise<void>, budgetMs: number): Promise<void> => {
+    const start = Date.now();
+    await fn();
+    const took = Date.now() - start;
+    expect(took, `${label} took ${took} ms`).toBeLessThan(budgetMs);
+  };
+  await timed('offenders', async () => {
+    await page.getByRole('button', { name: 'Offenders' }).click();
+    await expect(page.locator('table.grid tbody tr').first()).toBeVisible();
+  }, 4000);
+  await timed('fixes', async () => {
+    await page.getByRole('button', { name: 'Fixes' }).click();
+    await expect(page.locator('.fixes li').first()).toBeVisible();
+  }, 4000);
+  await timed('commits', async () => {
+    await page.getByRole('button', { name: 'Commits' }).click();
+    await expect(page.locator('.commits li').first()).toBeVisible();
+  }, 4000);
+  await timed('search', async () => {
+    await page.getByRole('button', { name: 'Tree' }).click();
+    await page.getByPlaceholder(/Search components/).fill('Item17');
+    await expect(page.locator('.row .name').first()).toBeVisible();
+  }, 4000);
+  // The event loop is not starved: a trivial evaluate returns promptly.
+  await timed('event loop', () => page.evaluate(() => new Promise<void>((r) => setTimeout(r, 0))), 1500);
+  expect(Date.now() - t0).toBeLessThan(40_000);
+  await page.close();
+});
+
 test('the side panel page follows a tab through the relay and chrome.scripting, outside DevTools', async ({ context, worker, extensionId }) => {
   const app = await context.newPage();
   await app.goto('/');
