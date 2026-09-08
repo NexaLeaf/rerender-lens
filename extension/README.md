@@ -23,6 +23,21 @@ Keyboard: `/` focuses search, arrows move in the tree, `f` opens the Fix tab, `E
 highlight. The tree and the stream are virtualized, so tens of thousands of reports stay smooth;
 `panel.html?demo&flood=5000` is the scale test.
 
+## Next to the page, or in a window
+
+You do not have to keep DevTools open. From the toolbar popup (or the *Side panel* / *Window*
+buttons in the DevTools panel):
+
+- **Open side panel** shows the same panel in Chrome's side panel, next to the page, pinned to
+  that tab. Firefox opens it as a sidebar that follows the active tab.
+- **Open in window** shows it in its own window, pinned to the tab, so you can tile it on a second
+  screen.
+
+Outside DevTools the panel talks to the page through the background relay and
+`chrome.scripting` (for settings, highlight and polling), so the origin must be one the extension
+has access to: local hosts, or a site you enabled. Below 720px wide the layout stacks the tree
+above the details and shows icon-only buttons.
+
 ## Two ways to connect a page
 
 **1. The page runs the library** (any host the extension is enabled on):
@@ -96,6 +111,7 @@ and the panel says so; turn injection off for that origin.
 | `background.js` | routing, badge, per-origin script registration (`shared.js` helpers) |
 | `content.js`, `inject.js`, `inject-deferred.js` | relay; in-page bootstrap for injection; flag file for the deferred mode |
 | `devtools.js`, `panel.html/css`, `src/panel.ts` | the panel. `npm run build` compiles `src/panel.ts` to the committed `panel.js` (CI checks it is current); `RerenderLensPanel.analysis` holds the pure ranking code |
+| `sidepanel.html` | the same panel booted standalone (side panel, own window, Firefox sidebar); `?tabId=` pins a tab |
 | `sidebar.html/js` | Elements-panel sidebar |
 | `popup.html/js` | toolbar popup to enable a site |
 | `store/` | listing text, privacy policy, publishing notes |

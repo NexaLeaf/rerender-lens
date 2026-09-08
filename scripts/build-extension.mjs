@@ -41,6 +41,10 @@ const targets = {
     // Firefox MV3 runs the background as an event page, not a service worker.
     f.background = { scripts: ['shared.js', 'background.js'] };
     f.browser_specific_settings = { gecko: { id: 'rerender-lens@nexaleaf.dev', strict_min_version: '128.0' } };
+    // Chrome's side panel becomes Firefox's sidebar (same page; it follows the active tab).
+    delete f.side_panel;
+    f.permissions = (f.permissions || []).filter((p) => p !== 'sidePanel');
+    f.sidebar_action = { default_panel: 'sidepanel.html', default_title: 'rerender-lens', default_icon: f.icons };
     return f;
   },
 };

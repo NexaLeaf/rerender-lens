@@ -30,19 +30,31 @@
     return node;
   }
 
-  async function currentOrigin() {
+  async function currentTab() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    return tab && tab.url ? S.originOf(tab.url) : null;
+    return tab || null;
   }
 
   async function render(error) {
     root.textContent = '';
     root.append(el('h1', { text: 'rerender-lens' }));
-    const origin = await currentOrigin();
+    const tab = await currentTab();
+    const origin = tab && tab.url ? S.originOf(tab.url) : null;
     if (!origin) {
       root.append(el('div', { class: 'hint', text: 'Open an http(s) page to enable rerender-lens on it.' }));
       return;
     }
+    const open = (mode) => () =>
+      S.openPanel(mode, tab.id).then(
+        () => window.close(),
+        (e) => render(String(e.message || e)),
+      );
+    root.append(
+      el('div', { class: 'row open' }, [
+        el('button', { class: 'primary', title: 'Show the Re-renders panel next to this page', onclick: open('sidepanel') }, '⫿ Open side panel'),
+        el('button', { title: 'Show the Re-renders panel in its own window', onclick: open('window') }, '⧉ Open in window'),
+      ]),
+    );
     root.append(el('div', { class: 'origin', text: origin }));
     const st = await send({ type: 'origin:status', origin });
 

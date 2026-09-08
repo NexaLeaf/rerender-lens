@@ -122,6 +122,36 @@ describe('devtools panel', () => {
     expect(banner.hidden).toBe(true);
   });
 
+  it('summary strip shows totals, the top offender and the best fix, and links to them', () => {
+    expect((root.querySelector('.summary') as HTMLElement).hidden).toBe(true);
+    send({ type: 'report', payload: report({ selfDuration: 1.25 }) });
+    send({ type: 'report', payload: report({ renderCount: 2, selfDuration: 0.75 }) });
+    send({ type: 'report', payload: report({ component: 'Other', path: ['App'], avoidable: false, trigger: 'props', propChanges: [] }) });
+    const summary = root.querySelector('.summary') as HTMLElement;
+    expect(summary.hidden).toBe(false);
+    const stats = [...summary.querySelectorAll('.stat')].map((s) => s.textContent);
+    expect(stats).toEqual(['3renders', '2avoidable', '2.0 mswasted', 'top<Row>×2', 'best fixuseMemo(style) in <List>−2']);
+    (summary.querySelectorAll('button.stat')[0] as HTMLElement).click();
+    expect(root.querySelector('.details-header .name')!.textContent).toBe('Row');
+    (summary.querySelectorAll('button.stat')[1] as HTMLElement).click();
+    expect(panel.state.view).toBe('fixes');
+    expect(root.querySelector('.details-header .title')!.textContent).toBe('useMemo(style) in <List>');
+    panel.clearAll();
+    expect(summary.hidden).toBe(true);
+  });
+
+  it('toolbar buttons keep their labels; undock buttons appear only with a transport that supports it', () => {
+    expect([...root.querySelectorAll('.toolbar .ib .label')].map((l) => l.textContent)).toEqual(['Pause', 'Clear', 'Replay', 'Export', 'Import', 'Settings']);
+    const calls: unknown[] = [];
+    panel = factory.createPanel(root, makeTransport({ undock: (mode: string) => (calls.push(mode), Promise.resolve()) }));
+    const labels = [...root.querySelectorAll('.toolbar .ib .label')].map((l) => l.textContent);
+    expect(labels).toContain('Side panel');
+    expect(labels).toContain('Window');
+    button(root, '.toolbar .ib', 'Side panel').click();
+    button(root, '.toolbar .ib', 'Window').click();
+    expect(calls).toEqual(['sidepanel', 'window']);
+  });
+
   it('shows memoization and self/tree time on a report', () => {
     send({ type: 'report', payload: report({ memoized: false, selfDuration: 0.4, treeDuration: 2.5 }) });
     panel.select('Row');

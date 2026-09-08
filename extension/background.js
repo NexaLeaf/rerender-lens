@@ -164,6 +164,8 @@ async function reconcile() {
 
 chrome.runtime.onInstalled.addListener(() => {
   reconcile();
+  // The toolbar icon opens the popup; the side panel is opened from the popup or the DevTools panel.
+  if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
 });
 chrome.runtime.onStartup.addListener(() => {
   reconcile();
@@ -212,6 +214,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       case 'origins:list':
         return S.loadOrigins();
+      case 'window:open': {
+        // The panel in its own window, pinned to a tab (tile it next to the browser).
+        const url = chrome.runtime.getURL('panel.html?tabId=' + encodeURIComponent(message.tabId));
+        const win = await chrome.windows.create({ url, type: 'popup', width: 980, height: 720 });
+        return { windowId: win && win.id };
+      }
       default:
         return null;
     }

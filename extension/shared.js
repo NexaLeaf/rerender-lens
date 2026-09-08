@@ -54,5 +54,27 @@
     await chrome.storage.local.set({ ['settings:' + origin]: settings });
   }
 
-  global.RerenderLensShared = { DEFAULT_ORIGINS, isBuiltInOrigin, originOf, patternFor, loadOrigins, saveOrigins, loadSettings, saveSettings };
+  /** Open the panel next to the page (Chrome side panel, pinned to the tab) or in its own window. */
+  async function openPanel(mode, tabId) {
+    if (mode === 'sidepanel' && chrome.sidePanel) {
+      const path = 'sidepanel.html?tabId=' + encodeURIComponent(tabId);
+      await chrome.sidePanel.setOptions({ tabId, path, enabled: true });
+      await chrome.sidePanel.open({ tabId });
+      return true;
+    }
+    if (mode === 'sidepanel' && chrome.sidebarAction) {
+      // Firefox: one sidebar per window, follows the active tab.
+      await chrome.sidebarAction.open();
+      return true;
+    }
+    return new Promise((resolve, reject) =>
+      chrome.runtime.sendMessage({ type: 'window:open', tabId }, (res) => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else if (!res || !res.ok) reject(new Error((res && res.error) || 'could not open a window'));
+        else resolve(true);
+      }),
+    );
+  }
+
+  global.RerenderLensShared = { DEFAULT_ORIGINS, isBuiltInOrigin, originOf, patternFor, loadOrigins, saveOrigins, loadSettings, saveSettings, openPanel };
 })(typeof self !== 'undefined' ? self : globalThis);

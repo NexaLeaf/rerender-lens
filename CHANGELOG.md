@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The panel outside DevTools: **Open side panel** shows it in Chrome's side panel next to the
+  page, **Open in window** in its own window (toolbar popup, or the new buttons in the DevTools
+  panel). Both use the background relay plus `chrome.scripting` instead of DevTools APIs, follow
+  the active tab unless pinned, and stack the layout when narrower than 720px. Firefox gets the
+  same page as a sidebar.
+- UI refresh: new palette and spacing in light and dark, icon toolbar with labels that collapse
+  in narrow layouts, segmented view switcher, a summary strip (renders, avoidable, wasted time,
+  top offender, best fix, all clickable), clearer selection and banners.
 - `selfDuration` is now the component's own render time; the previous value (the whole subtree)
   moved to `treeDuration`. Children that bailed out contribute nothing, as in the Profiler.
 - `memoized` on every report (`React.memo` / `PureComponent`). Reports of unmemoized components

@@ -169,6 +169,10 @@ export interface Transport {
   badge?(count: number): void;
   copy?(text: string): unknown;
   download?(name: string, text: string): unknown;
+  /** Show this panel outside DevTools: Chrome's side panel next to the page, or its own window. */
+  undock?(mode: 'sidepanel' | 'window'): Promise<unknown>;
+  /** Standalone mode: which tab the panel follows (shown as a chip in the toolbar). */
+  tabLabel?: string | null;
 }
 
 export interface PanelOptions {
@@ -216,6 +220,8 @@ export interface PanelState {
   origin: string | null;
   legacyCommit: number;
   treeWidth?: number;
+  tabLabel: string | null;
+  compact: boolean;
 }
 
 export interface Panel {
@@ -964,6 +970,8 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     settingsOpen: false,
     origin: null,
     legacyCommit: 0,
+    tabLabel: transport.tabLabel ?? null,
+    compact: false,
   };
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let queue: Report[] = [];
@@ -988,39 +996,29 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       persist();
     },
   });
-  const pauseBtn = el(
-    'button',
-    {
-      title: 'Pause / resume',
-      onclick: () => {
-        state.paused = !state.paused;
-        pauseBtn.classList.toggle('active', state.paused);
-        pauseBtn.textContent = state.paused ? '▶ Resume' : '⏸ Pause';
-      },
-    },
-    '⏸ Pause',
-  );
-  const clearBtn = el(
-    'button',
-    {
-      title: 'Clear',
-      onclick: () => {
-        clearAll();
-        transport.clear?.();
-        transport.badge?.(0);
-      },
-    },
-    '⊘ Clear',
-  );
-  const replayBtn = el('button', { title: 'Replay buffered reports from the page', onclick: () => transport.replay?.() }, '↻ Replay');
-  const exportBtn = el('button', { title: 'Export reports as JSON', onclick: exportJson }, '⤓ Export');
+  /** Toolbar button: glyph always visible, label hidden in compact layouts. */
+  const iconButton = (glyph: string, label: string, title: string, onclick: () => void, extra: Attrs = {}): HTMLButtonElement =>
+    el('button', { class: 'ib', title, onclick, 'aria-label': label, ...extra }, [el('span', { class: 'glyph', text: glyph }), el('span', { class: 'label', text: label })]);
+  const pauseBtn = iconButton('⏸', 'Pause', 'Pause / resume (reports keep buffering in the page)', () => {
+    state.paused = !state.paused;
+    pauseBtn.classList.toggle('active', state.paused);
+    pauseBtn.querySelector('.glyph')!.textContent = state.paused ? '▶' : '⏸';
+    pauseBtn.querySelector('.label')!.textContent = state.paused ? 'Resume' : 'Pause';
+  });
+  const clearBtn = iconButton('⊘', 'Clear', 'Clear the panel and the page buffer', () => {
+    clearAll();
+    transport.clear?.();
+    transport.badge?.(0);
+  });
+  const replayBtn = iconButton('↻', 'Replay', 'Replay buffered reports from the page', () => transport.replay?.());
+  const exportBtn = iconButton('⤓', 'Export', 'Export reports as JSON', exportJson);
   const importInput = el('input', { type: 'file', accept: 'application/json,.json', class: 'hidden-file' });
   importInput.addEventListener('change', () => {
     const f = importInput.files && importInput.files[0];
     if (f) importFile(f);
     importInput.value = '';
   });
-  const importBtn = el('button', { title: 'Import a JSON export', onclick: () => importInput.click() }, '⤒ Import');
+  const importBtn = iconButton('⤒', 'Import', 'Import a JSON export', () => importInput.click());
   const avoidCheck = el('input', {
     type: 'checkbox',
     onchange: () => {
@@ -1030,8 +1028,16 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       persist();
     },
   });
-  const settingsBtn = el('button', { title: 'Settings', onclick: () => toggleSettings() }, '⚙ Settings');
+  const settingsBtn = iconButton('⚙', 'Settings', 'Settings', () => toggleSettings());
   const status = el('span', { class: 'status', title: '' }, [el('span', { class: 'dot' }), el('span', { class: 'status-text', text: 'no page' })]);
+  const tabChip = el('span', { class: 'tab-chip', hidden: true, title: 'The tab this panel follows' });
+  const undock = transport.undock
+    ? [
+        el('span', { class: 'sep' }),
+        iconButton('⫿', 'Side panel', 'Show this panel next to the page (Chrome side panel)', () => void transport.undock!('sidepanel').catch((e: Error) => toast(String(e.message || e)))),
+        iconButton('⧉', 'Window', 'Show this panel in its own window', () => void transport.undock!('window').catch((e: Error) => toast(String(e.message || e)))),
+      ]
+    : [];
   const toolbar = el('div', { class: 'toolbar' }, [
     search,
     el('span', { class: 'sep' }),
@@ -1043,11 +1049,14 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     importBtn,
     importInput,
     el('span', { class: 'sep' }),
-    el('label', null, [avoidCheck, 'Avoidable only']),
+    el('label', { class: 'check' }, [avoidCheck, el('span', { class: 'label', text: 'Avoidable only' })]),
+    ...undock,
     el('span', { class: 'spacer' }),
+    tabChip,
     status,
     settingsBtn,
   ]);
+  const summary = el('div', { class: 'summary' });
   const banner = el('div', { class: 'banner', hidden: true });
   const viewsBar = el('div', { class: 'views' });
   const VIEWS: [View, string][] = [
@@ -1087,8 +1096,71 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     streamList,
   ]);
   const toastEl = el('div', { class: 'toast', hidden: true });
-  root.append(toolbar, banner, main, stream, toastEl);
+  root.classList.add('rl');
+  root.append(toolbar, summary, banner, main, stream, toastEl);
   root.addEventListener('keydown', onGlobalKey);
+
+  // Narrow hosts (the side panel) stack the tree above the details and hide button labels.
+  function setCompact(on: boolean): void {
+    if (state.compact === on) return;
+    state.compact = on;
+    root.classList.toggle('compact', on);
+    treeList.render();
+    streamItems.render();
+  }
+  const measure = (): void => setCompact(root.clientWidth > 0 && root.clientWidth < 720);
+  if (typeof ResizeObserver === 'function') new ResizeObserver(measure).observe(root);
+  else window.addEventListener('resize', measure);
+
+  function renderSummary(): void {
+    summary.textContent = '';
+    const total = state.reports.length;
+    if (!total) {
+      summary.hidden = true;
+      return;
+    }
+    summary.hidden = false;
+    let avoidable = 0;
+    let wasted = 0;
+    const perComponent = new Map<string, number>();
+    for (const r of state.reports) {
+      if (!r.avoidable) continue;
+      avoidable++;
+      if (typeof r.selfDuration === 'number') wasted += r.selfDuration;
+      perComponent.set(r.component, (perComponent.get(r.component) || 0) + 1);
+    }
+    const top = [...perComponent].sort((a, b) => b[1] - a[1])[0];
+    const fix = avoidable ? rankFixes(state.reports)[0] : undefined;
+    const stat = (value: string, label: string, cls = ''): HTMLElement => el('span', { class: 'stat ' + cls }, [el('b', { text: value }), el('span', { class: 'label', text: label })]);
+    summary.append(stat(String(total), plural(total, 'render').replace(/^\d+ /, '')), stat(String(avoidable), 'avoidable', avoidable ? 'bad' : 'good'));
+    if (wasted) summary.append(stat(fmtMs(wasted), 'wasted', 'bad'));
+    if (top) {
+      summary.append(
+        el('button', { class: 'stat link', title: 'Select the component with the most avoidable re-renders', onclick: () => panelApi.select(top[0]) }, [
+          el('span', { class: 'label', text: 'top' }),
+          el('b', { class: 'mono', text: `<${top[0]}>` }),
+          el('span', { class: 'label', text: `×${top[1]}` }),
+        ]),
+      );
+    }
+    if (fix) {
+      summary.append(
+        el(
+          'button',
+          {
+            class: 'stat link',
+            title: 'Open the Fixes view',
+            onclick: () => {
+              state.selectedFix = fix.key;
+              state.tab = 'fixlist';
+              setView('fixes');
+            },
+          },
+          [el('span', { class: 'label', text: 'best fix' }), el('b', { class: 'mono', text: fix.label }), el('span', { class: 'label', text: `−${fix.count}` })],
+        ),
+      );
+    }
+  }
 
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   function toast(text: string): void {
@@ -1240,6 +1312,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     }
     renderLeft();
     renderStream(batch);
+    renderSummary();
     if (touchedSelected || state.view === 'commits' || state.view === 'fixes' || state.tab === 'root') renderDetails();
     if (state.polling && avoidableCount) transport.badge?.(state.reports.filter((r) => r.avoidable).length);
   }
@@ -1268,6 +1341,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     renderLeft();
     renderDetails();
     renderStream();
+    renderSummary();
   }
 
   function matchesFilter(name: string): boolean {
@@ -1971,6 +2045,8 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     status.className = 'status ' + cls;
     status.title = title;
     status.querySelector('.status-text')!.textContent = text;
+    tabChip.hidden = !state.tabLabel;
+    tabChip.textContent = state.tabLabel || '';
     banner.textContent = '';
     const warnings: string[] = [];
     if (lib && typeof lib.protocol === 'number' && lib.protocol !== PROTOCOL) {
@@ -2135,6 +2211,8 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   // ---------- transport ----------
   function handle(message: Message): void {
     if (!isRecord(message)) return;
+    // Relay transports learn the origin asynchronously; pick it up with the first message.
+    if (transport.origin && transport.origin !== state.origin) state.origin = transport.origin;
     switch (message.type) {
       case 'connected':
         setRelay(true);
@@ -2144,6 +2222,18 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         break;
       case 'polling':
         state.polling = !!message.on;
+        renderStatus();
+        break;
+      case 'tab-label':
+        state.tabLabel = typeof message.payload === 'string' ? message.payload : null;
+        renderStatus();
+        break;
+      case 'tab':
+        // Standalone mode switched to another tab: start over for it.
+        state.tabLabel = typeof message.payload === 'string' ? message.payload : null;
+        state.origin = transport.origin || null;
+        clearAll();
+        state.library = null;
         renderStatus();
         break;
       case 'hello':
@@ -2166,18 +2256,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     }
   }
 
-  if (options.theme === 'dark') document.documentElement.classList.add('theme-dark');
-  state.origin = transport.origin || null;
-  setView(state.view);
-  renderDetails();
-  renderStream();
-  renderStatus();
-  if (transport.storage) {
-    Promise.resolve(transport.storage.get('panel')).then(restore, () => {});
-  }
-  transport.subscribe(handle);
-
-  return {
+  const panelApi: Panel = {
     state,
     handle,
     flush,
@@ -2189,34 +2268,59 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     setView,
     openSettings: () => toggleSettings(true),
   };
+
+  if (options.theme === 'dark') document.documentElement.classList.add('theme-dark');
+  state.origin = transport.origin || null;
+  setView(state.view);
+  renderDetails();
+  renderStream();
+  renderSummary();
+  renderStatus();
+  measure();
+  if (transport.storage) {
+    Promise.resolve(transport.storage.get('panel')).then(restore, () => {});
+  }
+  transport.subscribe(handle);
+  return panelApi;
 }
 
 // ---------- boot: extension ----------
-interface EvalError {
-  isException?: boolean;
-  isError?: boolean;
-  value?: string;
-  description?: string;
+/** Calls into the page bridge, expressed as commands so both adapters (eval / scripting) can run them. */
+export type BridgeCommand = 'info' | 'pull' | 'replay' | 'clear' | 'configure' | 'highlight' | 'flash';
+
+/** What a host (DevTools panel, side panel, window) must provide for the shared relay transport. */
+export interface TransportIO {
+  tabId(): number | null;
+  /** Origin of the inspected page, or null when unknown (no access). */
+  origin(): Promise<string | null>;
+  bridge<T = unknown>(cmd: BridgeCommand, arg?: unknown): Promise<T | null>;
+  /** Fires after the inspected page navigated (top frame). */
+  onNavigated(cb: () => void): void;
+  /** Standalone only: the followed tab changed (label for the chip). */
+  onTabChange?(cb: (label: string | null) => void): void;
+  openResource?(url: string, line?: number, col?: number): void;
+  undock?(mode: 'sidepanel' | 'window'): Promise<unknown>;
+  tabLabel?: string | null;
 }
 
-function bootExtension(): void {
-  const tabId = chrome.devtools.inspectedWindow.tabId;
+interface PullResult {
+  seq: number;
+  reports: unknown[];
+  dropped: boolean;
+}
+
+/** Background-relay transport with a polling fallback; identical for every host. */
+function createRelayTransport(io: TransportIO): Transport {
   let listener: ((m: Message) => void) | null = null;
   let relayConnected = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let since = 0;
-  const evalIn = <T = unknown>(code: string): Promise<T> =>
-    new Promise((resolve, reject) =>
-      chrome.devtools.inspectedWindow.eval(code, (result: unknown, err?: EvalError) => {
-        if (err && (err.isException || err.isError)) reject(new Error(err.value || err.description || 'eval failed'));
-        else resolve(result as T);
-      }),
-    );
-  const bridge = <T = unknown>(expr: string): Promise<T | null> =>
-    evalIn<T | null | { __error: string }>(`(function(){var b=window.__RERENDER_LENS_DEVTOOLS__;if(!b)return null;try{return (${expr});}catch(e){return {__error:String(e)}}})()`).then((r) => {
-      if (isRecord(r) && typeof r.__error === 'string') throw new Error(r.__error);
-      return r as T | null;
-    });
+  let origin: string | null = null;
+  let panelPort: chrome.runtime.Port | null = null;
+  let currentTab: number | null = io.tabId();
+  const emit = (m: Message): void => {
+    if (listener) listener(m);
+  };
   const send = <T = unknown>(message: unknown): Promise<T> =>
     new Promise((resolve, reject) =>
       chrome.runtime.sendMessage(message, (res: { ok?: boolean; result?: T; error?: string } | undefined) => {
@@ -2225,25 +2329,15 @@ function bootExtension(): void {
         else resolve(res.result as T);
       }),
     );
-  let origin: string | null = null;
-  let panelPort: chrome.runtime.Port | null = null;
-  const emit = (m: Message): void => {
-    if (listener) listener(m);
-  };
 
   async function resolveOrigin(): Promise<void> {
-    try {
-      origin = await evalIn<string>('location.origin');
-    } catch {
-      origin = null;
-    }
+    origin = await io.origin().catch(() => null);
     transport.origin = origin;
   }
 
-  /** Ask the page for its hello and, when the relay is down, poll `pull()` for reports. */
   async function syncWithPage(): Promise<boolean> {
     try {
-      const info = await bridge<HelloPayload>('b.info?b.info():{count:b.size,protocol:b.version}');
+      const info = await io.bridge<HelloPayload>('info');
       if (info) {
         emit({ type: 'hello', version: info.protocol || 1, payload: info });
         return true;
@@ -2254,15 +2348,9 @@ function bootExtension(): void {
     return false;
   }
 
-  interface PullResult {
-    seq: number;
-    reports: unknown[];
-    dropped: boolean;
-  }
-
   async function pollOnce(): Promise<void> {
     try {
-      const res = await bridge<PullResult>(`b.pull?b.pull(${since}):null`);
+      const res = await io.bridge<PullResult>('pull', since);
       if (!res) return;
       if (res.dropped) emit({ type: 'clear' });
       for (const p of res.reports) emit({ type: 'report', payload: p });
@@ -2283,37 +2371,85 @@ function bootExtension(): void {
     }
   }
 
+  /** First contact with a page: replay through the relay, or pull everything and start polling. */
+  async function attachToPage(): Promise<void> {
+    if (!(await syncWithPage())) return;
+    if (relayConnected) io.bridge('replay').catch(() => {});
+    else {
+      const res = await io.bridge<PullResult>('pull', 0).catch(() => null);
+      if (res) {
+        for (const p of res.reports) emit({ type: 'report', payload: p });
+        since = res.seq;
+      } else io.bridge('replay').catch(() => {});
+      setPolling(true);
+    }
+  }
+
+  function connect(): void {
+    if (panelPort) {
+      try {
+        panelPort.disconnect();
+      } catch {
+        /* already gone */
+      }
+      panelPort = null;
+    }
+    if (currentTab === null) return;
+    const port = chrome.runtime.connect({ name: 'rerender-lens-panel' });
+    panelPort = port;
+    port.postMessage({ type: 'init', tabId: currentTab });
+    port.onMessage.addListener((m: Message) => {
+      if (!m || panelPort !== port) return;
+      if (m.type === 'connected') {
+        relayConnected = true;
+        setPolling(false);
+      } else if (m.type === 'disconnected') {
+        relayConnected = false;
+        void syncWithPage().then((ok) => ok && setPolling(true));
+      }
+      emit(m);
+    });
+    port.onDisconnect.addListener(() => {
+      if (panelPort !== port) return;
+      panelPort = null;
+      setTimeout(connect, 1000);
+    });
+  }
+
   const transport: Transport = {
     origin,
+    tabLabel: io.tabLabel ?? null,
     subscribe(fn) {
       listener = fn;
       connect();
-      chrome.devtools.network.onNavigated.addListener(() => {
+      io.onNavigated(() => {
         since = 0;
         fn({ type: 'navigated' });
         void resolveOrigin().then(() => {
-          setTimeout(async () => {
-            if (relayConnected) bridge('b.replay()').catch(() => {});
-            else if (await syncWithPage()) setPolling(true);
-          }, 1200);
+          setTimeout(() => void attachToPage(), 1200);
         });
       });
-      void resolveOrigin().then(async () => {
-        // Late panel: the relay (if any) buffered nothing, so ask the page to replay; otherwise start polling.
-        if (!(await syncWithPage())) return;
-        if (relayConnected) bridge('b.replay()').catch(() => {});
-        else {
-          const res = await bridge<PullResult>('b.pull?b.pull(0):null').catch(() => null);
-          if (res) {
-            for (const p of res.reports) emit({ type: 'report', payload: p });
-            since = res.seq;
-          } else bridge('b.replay()').catch(() => {});
-          setPolling(true);
+      io.onTabChange?.((label) => {
+        transport.tabLabel = label;
+        const next = io.tabId();
+        if (next === currentTab) {
+          fn({ type: 'tab-label', payload: label }); // same tab, new title or URL
+          return;
         }
+        since = 0;
+        relayConnected = false;
+        setPolling(false);
+        currentTab = next;
+        void resolveOrigin().then(() => {
+          fn({ type: 'tab', payload: label });
+          connect();
+          void attachToPage();
+        });
       });
+      void resolveOrigin().then(() => attachToPage());
     },
     replay() {
-      if (relayConnected) bridge('b.replay()').catch(() => {});
+      if (relayConnected) io.bridge('replay').catch(() => {});
       else {
         since = 0;
         emit({ type: 'clear' });
@@ -2321,15 +2457,12 @@ function bootExtension(): void {
       }
     },
     clear() {
-      bridge('b.clear()').catch(() => {});
+      io.bridge('clear').catch(() => {});
       since = 0;
     },
-    configure: (options) => bridge<SerializableOptions>(`b.configure(${JSON.stringify(options)})`).then((r) => r ?? undefined),
-    highlight: (id) => bridge(`b.highlight(${id === null ? 'null' : Number(id)})`).catch(() => {}),
-    flashAvoidable: (on) => bridge(`b.flashAvoidable(${!!on})`).catch(() => {}),
-    openResource(url, line, col) {
-      if (chrome.devtools.panels.openResource) chrome.devtools.panels.openResource(url, Math.max(0, (line || 1) - 1), Math.max(0, (col || 1) - 1), () => {});
-    },
+    configure: (options) => io.bridge<SerializableOptions>('configure', options).then((r) => r ?? undefined),
+    highlight: (id) => io.bridge('highlight', id).catch(() => {}),
+    flashAvoidable: (on) => io.bridge('flash', !!on).catch(() => {}),
     originStatus: () => (origin ? send<OriginStatus>({ type: 'origin:status', origin }) : Promise.resolve(null)),
     setOrigin: (cfg) => send({ type: 'origin:set', origin, enabled: cfg.enabled, inject: cfg.inject, deferHook: cfg.deferHook }),
     requestPermission: () => chrome.permissions.request({ origins: [origin + '/*'] }),
@@ -2342,30 +2475,192 @@ function bootExtension(): void {
     },
     copy: (text) => navigator.clipboard.writeText(text).catch(() => {}),
   };
+  if (io.openResource) transport.openResource = io.openResource;
+  if (io.undock) transport.undock = io.undock;
+  return transport;
+}
 
-  function connect(): void {
-    const port = chrome.runtime.connect({ name: 'rerender-lens-panel' });
-    panelPort = port;
-    port.postMessage({ type: 'init', tabId });
-    port.onMessage.addListener((m: Message) => {
-      if (!m) return;
-      if (m.type === 'connected') {
-        relayConnected = true;
-        setPolling(false);
-      } else if (m.type === 'disconnected') {
-        relayConnected = false;
-        void syncWithPage().then((ok) => ok && setPolling(true));
-      }
-      emit(m);
-    });
-    port.onDisconnect.addListener(() => {
-      panelPort = null;
-      setTimeout(connect, 1000);
-    });
+interface EvalError {
+  isException?: boolean;
+  isError?: boolean;
+  value?: string;
+  description?: string;
+}
+
+/** Adapter for the DevTools panel: `chrome.devtools.inspectedWindow.eval` (no host permission needed). */
+function devtoolsIO(): TransportIO {
+  const tabId = chrome.devtools.inspectedWindow.tabId;
+  const evalIn = <T = unknown>(code: string): Promise<T> =>
+    new Promise((resolve, reject) =>
+      chrome.devtools.inspectedWindow.eval(code, (result: unknown, err?: EvalError) => {
+        if (err && (err.isException || err.isError)) reject(new Error(err.value || err.description || 'eval failed'));
+        else resolve(result as T);
+      }),
+    );
+  const expressions: Record<BridgeCommand, (arg: unknown) => string> = {
+    info: () => 'b.info?b.info():{count:b.size,protocol:b.version}',
+    pull: (since) => `b.pull?b.pull(${Number(since) || 0}):null`,
+    replay: () => 'b.replay()',
+    clear: () => 'b.clear()',
+    configure: (o) => `b.configure(${JSON.stringify(o ?? {})})`,
+    highlight: (id) => `b.highlight(${id === null || id === undefined ? 'null' : Number(id)})`,
+    flash: (on) => `b.flashAvoidable(${!!on})`,
+  };
+  return {
+    tabId: () => tabId,
+    origin: () => evalIn<string>('location.origin'),
+    bridge: <T,>(cmd: BridgeCommand, arg?: unknown) =>
+      evalIn<T | null | { __error: string }>(`(function(){var b=window.__RERENDER_LENS_DEVTOOLS__;if(!b)return null;try{return (${expressions[cmd](arg)});}catch(e){return {__error:String(e)}}})()`).then((r) => {
+        if (isRecord(r) && typeof r.__error === 'string') throw new Error(r.__error);
+        return r as T | null;
+      }),
+    onNavigated: (cb) => chrome.devtools.network.onNavigated.addListener(cb),
+    openResource(url, line, col) {
+      if (chrome.devtools.panels.openResource) chrome.devtools.panels.openResource(url, Math.max(0, (line || 1) - 1), Math.max(0, (col || 1) - 1), () => {});
+    },
+    undock: (mode) => openOutside(mode, tabId),
+  };
+}
+
+/** Runs inside the inspected page (MAIN world) via chrome.scripting; must not close over anything. */
+function pageBridgeCommand(cmd: string, arg: unknown): unknown {
+  const b = (window as unknown as { __RERENDER_LENS_DEVTOOLS__?: Record<string, (...a: unknown[]) => unknown> & { size?: number; version?: number } }).__RERENDER_LENS_DEVTOOLS__;
+  if (!b) return null;
+  try {
+    switch (cmd) {
+      case 'info':
+        return b.info ? b.info() : { count: b.size, protocol: b.version };
+      case 'pull':
+        return b.pull ? b.pull(arg) : null;
+      case 'replay':
+        b.replay?.();
+        return true;
+      case 'clear':
+        b.clear?.();
+        return true;
+      case 'configure':
+        return b.configure ? b.configure(arg) : null;
+      case 'highlight':
+        return b.highlight ? b.highlight(arg) : false;
+      case 'flash':
+        b.flashAvoidable?.(arg);
+        return true;
+    }
+  } catch (e) {
+    return { __error: String(e) };
   }
+  return null;
+}
+
+/** Open the panel outside DevTools. Works from any extension page (popup, DevTools panel). */
+async function openOutside(mode: 'sidepanel' | 'window', tabId: number): Promise<unknown> {
+  if (mode === 'sidepanel') {
+    const sp = (chrome as unknown as { sidePanel?: { setOptions(o: unknown): Promise<void>; open(o: unknown): Promise<void> } }).sidePanel;
+    if (!sp) throw new Error('This browser has no side panel API; use "Window" instead.');
+    await sp.setOptions({ tabId, path: 'sidepanel.html?tabId=' + encodeURIComponent(String(tabId)), enabled: true });
+    await sp.open({ tabId });
+    return true;
+  }
+  return new Promise((resolve, reject) =>
+    chrome.runtime.sendMessage({ type: 'window:open', tabId }, (res: { ok?: boolean; error?: string } | undefined) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else if (!res || !res.ok) reject(new Error((res && res.error) || 'could not open a window'));
+      else resolve(true);
+    }),
+  );
+}
+
+export interface StandaloneOptions {
+  /** Pin to this tab; otherwise follow the active tab of the current window. */
+  tabId?: number | null;
+}
+
+/** Adapter for the side panel / own window: background relay + `chrome.scripting.executeScript`. */
+function standaloneIO(opts: StandaloneOptions = {}): TransportIO {
+  let tabId: number | null = typeof opts.tabId === 'number' ? opts.tabId : null;
+  const pinned = tabId !== null;
+  let label: string | null = null;
+  const labelOf = (tab: { title?: string; url?: string } | undefined): string | null => {
+    if (!tab) return null;
+    const o = tab.url ? tab.url.replace(/^https?:\/\//, '').replace(/\/.*$/, '') : '';
+    return tab.title ? `${tab.title}${o ? ' · ' + o : ''}` : o || null;
+  };
+  const exec = <T,>(target: number, world: 'MAIN' | 'ISOLATED', func: (...a: never[]) => unknown, args: unknown[] = []): Promise<T> =>
+    chrome.scripting
+      .executeScript({ target: { tabId: target }, world, func: func as () => unknown, args } as chrome.scripting.ScriptInjection<unknown[], unknown>)
+      .then((results) => (results && results[0] ? (results[0].result as T) : (null as T)));
+  const io: TransportIO = {
+    tabId: () => tabId,
+    tabLabel: label,
+    async origin() {
+      if (tabId === null) return null;
+      try {
+        return await exec<string>(tabId, 'ISOLATED', () => location.origin);
+      } catch {
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          return tab && tab.url ? new URL(tab.url).origin : null;
+        } catch {
+          return null;
+        }
+      }
+    },
+    bridge: <T,>(cmd: BridgeCommand, arg?: unknown) => {
+      if (tabId === null) return Promise.resolve(null);
+      return exec<T | null | { __error: string }>(tabId, 'MAIN', pageBridgeCommand as (...a: never[]) => unknown, [cmd, arg ?? null]).then((r) => {
+        if (isRecord(r) && typeof r.__error === 'string') throw new Error(r.__error);
+        return r as T | null;
+      });
+    },
+    onNavigated(cb) {
+      chrome.tabs.onUpdated.addListener((id, info) => {
+        if (id === tabId && info.status === 'loading') cb();
+      });
+    },
+    onTabChange(cb) {
+      const announce = async (): Promise<void> => {
+        try {
+          const tab = tabId === null ? undefined : await chrome.tabs.get(tabId);
+          label = labelOf(tab);
+        } catch {
+          label = null;
+        }
+        cb(label);
+      };
+      if (pinned) {
+        chrome.tabs.onUpdated.addListener((id, info) => {
+          if (id === tabId && (info.title || info.url)) void announce();
+        });
+        void announce();
+        return;
+      }
+      chrome.tabs.onActivated.addListener(({ tabId: active }) => {
+        tabId = active;
+        void announce();
+      });
+      void chrome.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
+        const t = tabs && tabs[0];
+        if (t && typeof t.id === 'number') {
+          tabId = t.id;
+          void announce();
+        }
+      });
+    },
+    openResource: (url) => void chrome.tabs.create({ url }),
+    undock: (mode) => (tabId === null ? Promise.reject(new Error('no tab')) : openOutside(mode, tabId)),
+  };
+  return io;
+}
+
+function bootExtension(): void {
   const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
   const theme = chrome.devtools.panels.themeName === 'dark' || prefersDark ? 'dark' : 'light';
-  createPanel(document.getElementById('root')!, transport, { theme });
+  createPanel(document.getElementById('root')!, createRelayTransport(devtoolsIO()), { theme });
+}
+
+function bootStandalone(opts: StandaloneOptions = {}): Panel {
+  const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
+  return createPanel(document.getElementById('root')!, createRelayTransport(standaloneIO(opts)), { theme: prefersDark ? 'dark' : 'light' });
 }
 
 // ---------- boot: demo ----------
@@ -2486,10 +2781,16 @@ const api = {
   reportToMarkdown,
   sampleReports,
   floodReports,
+  bootStandalone,
+  createRelayTransport,
   analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary },
 };
 window.RerenderLensPanel = api;
 
-const hasDevtools = typeof chrome !== 'undefined' && !!chrome && !!chrome.devtools && !!chrome.devtools.inspectedWindow;
-if (hasDevtools && /panel\.html/.test(String(location && location.pathname))) bootExtension();
-else if (typeof location !== 'undefined' && /[?&]demo/.test(location.search)) bootDemo();
+const hasChrome = typeof chrome !== 'undefined' && !!chrome && !!chrome.runtime && !!chrome.runtime.id;
+const hasDevtools = hasChrome && !!chrome.devtools && !!chrome.devtools.inspectedWindow;
+const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
+const pathname = typeof location !== 'undefined' ? String(location.pathname) : '';
+if (hasDevtools && /panel\.html/.test(pathname) && !params.has('tabId')) bootExtension();
+else if (hasChrome && (/sidepanel\.html/.test(pathname) || params.has('tabId'))) bootStandalone({ tabId: params.has('tabId') ? Number(params.get('tabId')) : null });
+else if (params.has('demo')) bootDemo();

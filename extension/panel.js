@@ -650,7 +650,9 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       flashOn: false,
       settingsOpen: false,
       origin: null,
-      legacyCommit: 0
+      legacyCommit: 0,
+      tabLabel: transport.tabLabel ?? null,
+      compact: false
     };
     let persistTimer = null;
     let queue = [];
@@ -673,39 +675,27 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         persist();
       }
     });
-    const pauseBtn = el(
-      "button",
-      {
-        title: "Pause / resume",
-        onclick: () => {
-          state.paused = !state.paused;
-          pauseBtn.classList.toggle("active", state.paused);
-          pauseBtn.textContent = state.paused ? "\u25B6 Resume" : "\u23F8 Pause";
-        }
-      },
-      "\u23F8 Pause"
-    );
-    const clearBtn = el(
-      "button",
-      {
-        title: "Clear",
-        onclick: () => {
-          clearAll();
-          transport.clear?.();
-          transport.badge?.(0);
-        }
-      },
-      "\u2298 Clear"
-    );
-    const replayBtn = el("button", { title: "Replay buffered reports from the page", onclick: () => transport.replay?.() }, "\u21BB Replay");
-    const exportBtn = el("button", { title: "Export reports as JSON", onclick: exportJson }, "\u2913 Export");
+    const iconButton = (glyph, label, title, onclick, extra = {}) => el("button", { class: "ib", title, onclick, "aria-label": label, ...extra }, [el("span", { class: "glyph", text: glyph }), el("span", { class: "label", text: label })]);
+    const pauseBtn = iconButton("\u23F8", "Pause", "Pause / resume (reports keep buffering in the page)", () => {
+      state.paused = !state.paused;
+      pauseBtn.classList.toggle("active", state.paused);
+      pauseBtn.querySelector(".glyph").textContent = state.paused ? "\u25B6" : "\u23F8";
+      pauseBtn.querySelector(".label").textContent = state.paused ? "Resume" : "Pause";
+    });
+    const clearBtn = iconButton("\u2298", "Clear", "Clear the panel and the page buffer", () => {
+      clearAll();
+      transport.clear?.();
+      transport.badge?.(0);
+    });
+    const replayBtn = iconButton("\u21BB", "Replay", "Replay buffered reports from the page", () => transport.replay?.());
+    const exportBtn = iconButton("\u2913", "Export", "Export reports as JSON", exportJson);
     const importInput = el("input", { type: "file", accept: "application/json,.json", class: "hidden-file" });
     importInput.addEventListener("change", () => {
       const f = importInput.files && importInput.files[0];
       if (f) importFile(f);
       importInput.value = "";
     });
-    const importBtn = el("button", { title: "Import a JSON export", onclick: () => importInput.click() }, "\u2912 Import");
+    const importBtn = iconButton("\u2912", "Import", "Import a JSON export", () => importInput.click());
     const avoidCheck = el("input", {
       type: "checkbox",
       onchange: () => {
@@ -715,8 +705,14 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         persist();
       }
     });
-    const settingsBtn = el("button", { title: "Settings", onclick: () => toggleSettings() }, "\u2699 Settings");
+    const settingsBtn = iconButton("\u2699", "Settings", "Settings", () => toggleSettings());
     const status = el("span", { class: "status", title: "" }, [el("span", { class: "dot" }), el("span", { class: "status-text", text: "no page" })]);
+    const tabChip = el("span", { class: "tab-chip", hidden: true, title: "The tab this panel follows" });
+    const undock = transport.undock ? [
+      el("span", { class: "sep" }),
+      iconButton("\u2AFF", "Side panel", "Show this panel next to the page (Chrome side panel)", () => void transport.undock("sidepanel").catch((e) => toast(String(e.message || e)))),
+      iconButton("\u29C9", "Window", "Show this panel in its own window", () => void transport.undock("window").catch((e) => toast(String(e.message || e))))
+    ] : [];
     const toolbar = el("div", { class: "toolbar" }, [
       search,
       el("span", { class: "sep" }),
@@ -728,11 +724,14 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       importBtn,
       importInput,
       el("span", { class: "sep" }),
-      el("label", null, [avoidCheck, "Avoidable only"]),
+      el("label", { class: "check" }, [avoidCheck, el("span", { class: "label", text: "Avoidable only" })]),
+      ...undock,
       el("span", { class: "spacer" }),
+      tabChip,
       status,
       settingsBtn
     ]);
+    const summary = el("div", { class: "summary" });
     const banner = el("div", { class: "banner", hidden: true });
     const viewsBar = el("div", { class: "views" });
     const VIEWS = [
@@ -772,8 +771,68 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       streamList
     ]);
     const toastEl = el("div", { class: "toast", hidden: true });
-    root.append(toolbar, banner, main, stream, toastEl);
+    root.classList.add("rl");
+    root.append(toolbar, summary, banner, main, stream, toastEl);
     root.addEventListener("keydown", onGlobalKey);
+    function setCompact(on) {
+      if (state.compact === on) return;
+      state.compact = on;
+      root.classList.toggle("compact", on);
+      treeList.render();
+      streamItems.render();
+    }
+    const measure = () => setCompact(root.clientWidth > 0 && root.clientWidth < 720);
+    if (typeof ResizeObserver === "function") new ResizeObserver(measure).observe(root);
+    else window.addEventListener("resize", measure);
+    function renderSummary() {
+      summary.textContent = "";
+      const total = state.reports.length;
+      if (!total) {
+        summary.hidden = true;
+        return;
+      }
+      summary.hidden = false;
+      let avoidable = 0;
+      let wasted = 0;
+      const perComponent = /* @__PURE__ */ new Map();
+      for (const r of state.reports) {
+        if (!r.avoidable) continue;
+        avoidable++;
+        if (typeof r.selfDuration === "number") wasted += r.selfDuration;
+        perComponent.set(r.component, (perComponent.get(r.component) || 0) + 1);
+      }
+      const top = [...perComponent].sort((a, b) => b[1] - a[1])[0];
+      const fix = avoidable ? rankFixes(state.reports)[0] : void 0;
+      const stat = (value, label, cls = "") => el("span", { class: "stat " + cls }, [el("b", { text: value }), el("span", { class: "label", text: label })]);
+      summary.append(stat(String(total), plural(total, "render").replace(/^\d+ /, "")), stat(String(avoidable), "avoidable", avoidable ? "bad" : "good"));
+      if (wasted) summary.append(stat(fmtMs(wasted), "wasted", "bad"));
+      if (top) {
+        summary.append(
+          el("button", { class: "stat link", title: "Select the component with the most avoidable re-renders", onclick: () => panelApi.select(top[0]) }, [
+            el("span", { class: "label", text: "top" }),
+            el("b", { class: "mono", text: `<${top[0]}>` }),
+            el("span", { class: "label", text: `\xD7${top[1]}` })
+          ])
+        );
+      }
+      if (fix) {
+        summary.append(
+          el(
+            "button",
+            {
+              class: "stat link",
+              title: "Open the Fixes view",
+              onclick: () => {
+                state.selectedFix = fix.key;
+                state.tab = "fixlist";
+                setView("fixes");
+              }
+            },
+            [el("span", { class: "label", text: "best fix" }), el("b", { class: "mono", text: fix.label }), el("span", { class: "label", text: `\u2212${fix.count}` })]
+          )
+        );
+      }
+    }
     let toastTimer = null;
     function toast(text) {
       toastEl.textContent = text;
@@ -910,6 +969,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       }
       renderLeft();
       renderStream(batch);
+      renderSummary();
       if (touchedSelected || state.view === "commits" || state.view === "fixes" || state.tab === "root") renderDetails();
       if (state.polling && avoidableCount) transport.badge?.(state.reports.filter((r) => r.avoidable).length);
     }
@@ -936,6 +996,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       renderLeft();
       renderDetails();
       renderStream();
+      renderSummary();
     }
     function matchesFilter(name) {
       if (!state.filter) return true;
@@ -1582,6 +1643,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       status.className = "status " + cls;
       status.title = title;
       status.querySelector(".status-text").textContent = text;
+      tabChip.hidden = !state.tabLabel;
+      tabChip.textContent = state.tabLabel || "";
       banner.textContent = "";
       const warnings = [];
       if (lib && typeof lib.protocol === "number" && lib.protocol !== PROTOCOL) {
@@ -1731,6 +1794,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     }
     function handle(message) {
       if (!isRecord(message)) return;
+      if (transport.origin && transport.origin !== state.origin) state.origin = transport.origin;
       switch (message.type) {
         case "connected":
           setRelay(true);
@@ -1740,6 +1804,17 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           break;
         case "polling":
           state.polling = !!message.on;
+          renderStatus();
+          break;
+        case "tab-label":
+          state.tabLabel = typeof message.payload === "string" ? message.payload : null;
+          renderStatus();
+          break;
+        case "tab":
+          state.tabLabel = typeof message.payload === "string" ? message.payload : null;
+          state.origin = transport.origin || null;
+          clearAll();
+          state.library = null;
           renderStatus();
           break;
         case "hello":
@@ -1761,18 +1836,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         }
       }
     }
-    if (options.theme === "dark") document.documentElement.classList.add("theme-dark");
-    state.origin = transport.origin || null;
-    setView(state.view);
-    renderDetails();
-    renderStream();
-    renderStatus();
-    if (transport.storage) {
-      Promise.resolve(transport.storage.get("panel")).then(restore, () => {
-      });
-    }
-    transport.subscribe(handle);
-    return {
+    const panelApi = {
       state,
       handle,
       flush,
@@ -1784,23 +1848,32 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       setView,
       openSettings: () => toggleSettings(true)
     };
+    if (options.theme === "dark") document.documentElement.classList.add("theme-dark");
+    state.origin = transport.origin || null;
+    setView(state.view);
+    renderDetails();
+    renderStream();
+    renderSummary();
+    renderStatus();
+    measure();
+    if (transport.storage) {
+      Promise.resolve(transport.storage.get("panel")).then(restore, () => {
+      });
+    }
+    transport.subscribe(handle);
+    return panelApi;
   }
-  function bootExtension() {
-    const tabId = chrome.devtools.inspectedWindow.tabId;
+  function createRelayTransport(io) {
     let listener = null;
     let relayConnected = false;
     let pollTimer = null;
     let since = 0;
-    const evalIn = (code) => new Promise(
-      (resolve, reject) => chrome.devtools.inspectedWindow.eval(code, (result, err) => {
-        if (err && (err.isException || err.isError)) reject(new Error(err.value || err.description || "eval failed"));
-        else resolve(result);
-      })
-    );
-    const bridge = (expr) => evalIn(`(function(){var b=window.__RERENDER_LENS_DEVTOOLS__;if(!b)return null;try{return (${expr});}catch(e){return {__error:String(e)}}})()`).then((r) => {
-      if (isRecord(r) && typeof r.__error === "string") throw new Error(r.__error);
-      return r;
-    });
+    let origin = null;
+    let panelPort = null;
+    let currentTab = io.tabId();
+    const emit = (m) => {
+      if (listener) listener(m);
+    };
     const send = (message) => new Promise(
       (resolve, reject) => chrome.runtime.sendMessage(message, (res) => {
         if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
@@ -1808,22 +1881,13 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         else resolve(res.result);
       })
     );
-    let origin = null;
-    let panelPort = null;
-    const emit = (m) => {
-      if (listener) listener(m);
-    };
     async function resolveOrigin() {
-      try {
-        origin = await evalIn("location.origin");
-      } catch {
-        origin = null;
-      }
+      origin = await io.origin().catch(() => null);
       transport.origin = origin;
     }
     async function syncWithPage() {
       try {
-        const info = await bridge("b.info?b.info():{count:b.size,protocol:b.version}");
+        const info = await io.bridge("info");
         if (info) {
           emit({ type: "hello", version: info.protocol || 1, payload: info });
           return true;
@@ -1834,7 +1898,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     }
     async function pollOnce() {
       try {
-        const res = await bridge(`b.pull?b.pull(${since}):null`);
+        const res = await io.bridge("pull", since);
         if (!res) return;
         if (res.dropped) emit({ type: "clear" });
         for (const p of res.reports) emit({ type: "report", payload: p });
@@ -1852,39 +1916,83 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         emit({ type: "polling", on: false });
       }
     }
+    async function attachToPage() {
+      if (!await syncWithPage()) return;
+      if (relayConnected) io.bridge("replay").catch(() => {
+      });
+      else {
+        const res = await io.bridge("pull", 0).catch(() => null);
+        if (res) {
+          for (const p of res.reports) emit({ type: "report", payload: p });
+          since = res.seq;
+        } else io.bridge("replay").catch(() => {
+        });
+        setPolling(true);
+      }
+    }
+    function connect() {
+      if (panelPort) {
+        try {
+          panelPort.disconnect();
+        } catch {
+        }
+        panelPort = null;
+      }
+      if (currentTab === null) return;
+      const port = chrome.runtime.connect({ name: "rerender-lens-panel" });
+      panelPort = port;
+      port.postMessage({ type: "init", tabId: currentTab });
+      port.onMessage.addListener((m) => {
+        if (!m || panelPort !== port) return;
+        if (m.type === "connected") {
+          relayConnected = true;
+          setPolling(false);
+        } else if (m.type === "disconnected") {
+          relayConnected = false;
+          void syncWithPage().then((ok) => ok && setPolling(true));
+        }
+        emit(m);
+      });
+      port.onDisconnect.addListener(() => {
+        if (panelPort !== port) return;
+        panelPort = null;
+        setTimeout(connect, 1e3);
+      });
+    }
     const transport = {
       origin,
+      tabLabel: io.tabLabel ?? null,
       subscribe(fn) {
         listener = fn;
         connect();
-        chrome.devtools.network.onNavigated.addListener(() => {
+        io.onNavigated(() => {
           since = 0;
           fn({ type: "navigated" });
           void resolveOrigin().then(() => {
-            setTimeout(async () => {
-              if (relayConnected) bridge("b.replay()").catch(() => {
-              });
-              else if (await syncWithPage()) setPolling(true);
-            }, 1200);
+            setTimeout(() => void attachToPage(), 1200);
           });
         });
-        void resolveOrigin().then(async () => {
-          if (!await syncWithPage()) return;
-          if (relayConnected) bridge("b.replay()").catch(() => {
-          });
-          else {
-            const res = await bridge("b.pull?b.pull(0):null").catch(() => null);
-            if (res) {
-              for (const p of res.reports) emit({ type: "report", payload: p });
-              since = res.seq;
-            } else bridge("b.replay()").catch(() => {
-            });
-            setPolling(true);
+        io.onTabChange?.((label) => {
+          transport.tabLabel = label;
+          const next = io.tabId();
+          if (next === currentTab) {
+            fn({ type: "tab-label", payload: label });
+            return;
           }
+          since = 0;
+          relayConnected = false;
+          setPolling(false);
+          currentTab = next;
+          void resolveOrigin().then(() => {
+            fn({ type: "tab", payload: label });
+            connect();
+            void attachToPage();
+          });
         });
+        void resolveOrigin().then(() => attachToPage());
       },
       replay() {
-        if (relayConnected) bridge("b.replay()").catch(() => {
+        if (relayConnected) io.bridge("replay").catch(() => {
         });
         else {
           since = 0;
@@ -1893,19 +2001,15 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         }
       },
       clear() {
-        bridge("b.clear()").catch(() => {
+        io.bridge("clear").catch(() => {
         });
         since = 0;
       },
-      configure: (options) => bridge(`b.configure(${JSON.stringify(options)})`).then((r) => r ?? void 0),
-      highlight: (id) => bridge(`b.highlight(${id === null ? "null" : Number(id)})`).catch(() => {
+      configure: (options) => io.bridge("configure", options).then((r) => r ?? void 0),
+      highlight: (id) => io.bridge("highlight", id).catch(() => {
       }),
-      flashAvoidable: (on) => bridge(`b.flashAvoidable(${!!on})`).catch(() => {
+      flashAvoidable: (on) => io.bridge("flash", !!on).catch(() => {
       }),
-      openResource(url, line, col) {
-        if (chrome.devtools.panels.openResource) chrome.devtools.panels.openResource(url, Math.max(0, (line || 1) - 1), Math.max(0, (col || 1) - 1), () => {
-        });
-      },
       originStatus: () => origin ? send({ type: "origin:status", origin }) : Promise.resolve(null),
       setOrigin: (cfg) => send({ type: "origin:set", origin, enabled: cfg.enabled, inject: cfg.inject, deferHook: cfg.deferHook }),
       requestPermission: () => chrome.permissions.request({ origins: [origin + "/*"] }),
@@ -1919,29 +2023,166 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       copy: (text) => navigator.clipboard.writeText(text).catch(() => {
       })
     };
-    function connect() {
-      const port = chrome.runtime.connect({ name: "rerender-lens-panel" });
-      panelPort = port;
-      port.postMessage({ type: "init", tabId });
-      port.onMessage.addListener((m) => {
-        if (!m) return;
-        if (m.type === "connected") {
-          relayConnected = true;
-          setPolling(false);
-        } else if (m.type === "disconnected") {
-          relayConnected = false;
-          void syncWithPage().then((ok) => ok && setPolling(true));
-        }
-        emit(m);
-      });
-      port.onDisconnect.addListener(() => {
-        panelPort = null;
-        setTimeout(connect, 1e3);
-      });
+    if (io.openResource) transport.openResource = io.openResource;
+    if (io.undock) transport.undock = io.undock;
+    return transport;
+  }
+  function devtoolsIO() {
+    const tabId = chrome.devtools.inspectedWindow.tabId;
+    const evalIn = (code) => new Promise(
+      (resolve, reject) => chrome.devtools.inspectedWindow.eval(code, (result, err) => {
+        if (err && (err.isException || err.isError)) reject(new Error(err.value || err.description || "eval failed"));
+        else resolve(result);
+      })
+    );
+    const expressions = {
+      info: () => "b.info?b.info():{count:b.size,protocol:b.version}",
+      pull: (since) => `b.pull?b.pull(${Number(since) || 0}):null`,
+      replay: () => "b.replay()",
+      clear: () => "b.clear()",
+      configure: (o) => `b.configure(${JSON.stringify(o ?? {})})`,
+      highlight: (id) => `b.highlight(${id === null || id === void 0 ? "null" : Number(id)})`,
+      flash: (on) => `b.flashAvoidable(${!!on})`
+    };
+    return {
+      tabId: () => tabId,
+      origin: () => evalIn("location.origin"),
+      bridge: (cmd, arg) => evalIn(`(function(){var b=window.__RERENDER_LENS_DEVTOOLS__;if(!b)return null;try{return (${expressions[cmd](arg)});}catch(e){return {__error:String(e)}}})()`).then((r) => {
+        if (isRecord(r) && typeof r.__error === "string") throw new Error(r.__error);
+        return r;
+      }),
+      onNavigated: (cb) => chrome.devtools.network.onNavigated.addListener(cb),
+      openResource(url, line, col) {
+        if (chrome.devtools.panels.openResource) chrome.devtools.panels.openResource(url, Math.max(0, (line || 1) - 1), Math.max(0, (col || 1) - 1), () => {
+        });
+      },
+      undock: (mode) => openOutside(mode, tabId)
+    };
+  }
+  function pageBridgeCommand(cmd, arg) {
+    const b = window.__RERENDER_LENS_DEVTOOLS__;
+    if (!b) return null;
+    try {
+      switch (cmd) {
+        case "info":
+          return b.info ? b.info() : { count: b.size, protocol: b.version };
+        case "pull":
+          return b.pull ? b.pull(arg) : null;
+        case "replay":
+          b.replay?.();
+          return true;
+        case "clear":
+          b.clear?.();
+          return true;
+        case "configure":
+          return b.configure ? b.configure(arg) : null;
+        case "highlight":
+          return b.highlight ? b.highlight(arg) : false;
+        case "flash":
+          b.flashAvoidable?.(arg);
+          return true;
+      }
+    } catch (e) {
+      return { __error: String(e) };
     }
+    return null;
+  }
+  async function openOutside(mode, tabId) {
+    if (mode === "sidepanel") {
+      const sp = chrome.sidePanel;
+      if (!sp) throw new Error('This browser has no side panel API; use "Window" instead.');
+      await sp.setOptions({ tabId, path: "sidepanel.html?tabId=" + encodeURIComponent(String(tabId)), enabled: true });
+      await sp.open({ tabId });
+      return true;
+    }
+    return new Promise(
+      (resolve, reject) => chrome.runtime.sendMessage({ type: "window:open", tabId }, (res) => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else if (!res || !res.ok) reject(new Error(res && res.error || "could not open a window"));
+        else resolve(true);
+      })
+    );
+  }
+  function standaloneIO(opts = {}) {
+    let tabId = typeof opts.tabId === "number" ? opts.tabId : null;
+    const pinned = tabId !== null;
+    let label = null;
+    const labelOf = (tab) => {
+      if (!tab) return null;
+      const o = tab.url ? tab.url.replace(/^https?:\/\//, "").replace(/\/.*$/, "") : "";
+      return tab.title ? `${tab.title}${o ? " \xB7 " + o : ""}` : o || null;
+    };
+    const exec = (target, world, func, args = []) => chrome.scripting.executeScript({ target: { tabId: target }, world, func, args }).then((results) => results && results[0] ? results[0].result : null);
+    const io = {
+      tabId: () => tabId,
+      tabLabel: label,
+      async origin() {
+        if (tabId === null) return null;
+        try {
+          return await exec(tabId, "ISOLATED", () => location.origin);
+        } catch {
+          try {
+            const tab = await chrome.tabs.get(tabId);
+            return tab && tab.url ? new URL(tab.url).origin : null;
+          } catch {
+            return null;
+          }
+        }
+      },
+      bridge: (cmd, arg) => {
+        if (tabId === null) return Promise.resolve(null);
+        return exec(tabId, "MAIN", pageBridgeCommand, [cmd, arg ?? null]).then((r) => {
+          if (isRecord(r) && typeof r.__error === "string") throw new Error(r.__error);
+          return r;
+        });
+      },
+      onNavigated(cb) {
+        chrome.tabs.onUpdated.addListener((id, info) => {
+          if (id === tabId && info.status === "loading") cb();
+        });
+      },
+      onTabChange(cb) {
+        const announce = async () => {
+          try {
+            const tab = tabId === null ? void 0 : await chrome.tabs.get(tabId);
+            label = labelOf(tab);
+          } catch {
+            label = null;
+          }
+          cb(label);
+        };
+        if (pinned) {
+          chrome.tabs.onUpdated.addListener((id, info) => {
+            if (id === tabId && (info.title || info.url)) void announce();
+          });
+          void announce();
+          return;
+        }
+        chrome.tabs.onActivated.addListener(({ tabId: active }) => {
+          tabId = active;
+          void announce();
+        });
+        void chrome.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
+          const t = tabs && tabs[0];
+          if (t && typeof t.id === "number") {
+            tabId = t.id;
+            void announce();
+          }
+        });
+      },
+      openResource: (url) => void chrome.tabs.create({ url }),
+      undock: (mode) => tabId === null ? Promise.reject(new Error("no tab")) : openOutside(mode, tabId)
+    };
+    return io;
+  }
+  function bootExtension() {
     const prefersDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
     const theme = chrome.devtools.panels.themeName === "dark" || prefersDark ? "dark" : "light";
-    createPanel(document.getElementById("root"), transport, { theme });
+    createPanel(document.getElementById("root"), createRelayTransport(devtoolsIO()), { theme });
+  }
+  function bootStandalone(opts = {}) {
+    const prefersDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
+    return createPanel(document.getElementById("root"), createRelayTransport(standaloneIO(opts)), { theme: prefersDark ? "dark" : "light" });
   }
   function sampleReports() {
     const fn = (name) => FN_PREFIX + name;
@@ -2061,8 +2302,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     return out;
   }
   function bootDemo() {
-    const params = new URLSearchParams(location.search);
-    const flood = Number(params.get("flood") || 0);
+    const params2 = new URLSearchParams(location.search);
+    const flood = Number(params2.get("flood") || 0);
     const sample = sampleReports();
     let i = 0;
     let commit = 0;
@@ -2116,10 +2357,16 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     reportToMarkdown,
     sampleReports,
     floodReports,
+    bootStandalone,
+    createRelayTransport,
     analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary }
   };
   window.RerenderLensPanel = api;
-  var hasDevtools = typeof chrome !== "undefined" && !!chrome && !!chrome.devtools && !!chrome.devtools.inspectedWindow;
-  if (hasDevtools && /panel\.html/.test(String(location && location.pathname))) bootExtension();
-  else if (typeof location !== "undefined" && /[?&]demo/.test(location.search)) bootDemo();
+  var hasChrome = typeof chrome !== "undefined" && !!chrome && !!chrome.runtime && !!chrome.runtime.id;
+  var hasDevtools = hasChrome && !!chrome.devtools && !!chrome.devtools.inspectedWindow;
+  var params = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
+  var pathname = typeof location !== "undefined" ? String(location.pathname) : "";
+  if (hasDevtools && /panel\.html/.test(pathname) && !params.has("tabId")) bootExtension();
+  else if (hasChrome && (/sidepanel\.html/.test(pathname) || params.has("tabId"))) bootStandalone({ tabId: params.has("tabId") ? Number(params.get("tabId")) : null });
+  else if (params.has("demo")) bootDemo();
 })();

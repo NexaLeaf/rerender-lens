@@ -13,6 +13,8 @@ function load(chrome: FakeChrome) {
   document.body.innerHTML = '<div id="root"></div>';
   const w = window as unknown as Record<string, unknown>;
   delete w.RerenderLensShared;
+  // The popup closes itself after opening the panel; jsdom's close() would dispose the document.
+  w.close = () => {};
   new Function('chrome', 'window', shared)(chrome, window);
   new Function('chrome', 'window', 'document', popup)(chrome, window, document);
 }
@@ -30,6 +32,24 @@ describe('popup', () => {
     load(chrome);
     await settle();
     expect(document.body.textContent).toContain('Open an http(s) page');
+  });
+
+  it('opens the panel next to the page or in a window', async () => {
+    chrome = makeChrome({ activeUrl: 'http://localhost:5199/app' });
+    load(chrome);
+    await settle();
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('.row.open button')];
+    expect(buttons.map((b) => b.textContent)).toEqual(['⫿ Open side panel', '⧉ Open in window']);
+    buttons[0]!.click();
+    await settle();
+    expect(chrome._sidePanel).toEqual([
+      ['setOptions', { tabId: 7, path: 'sidepanel.html?tabId=7', enabled: true }],
+      ['open', { tabId: 7 }],
+    ]);
+    buttons[1]!.click();
+    await settle();
+    await settle();
+    expect(chrome._windows).toEqual([{ url: 'chrome-extension://fake-extension-id/panel.html?tabId=7', type: 'popup', width: 980, height: 720 }]);
   });
 
   it('local hosts are enabled and read-only; injection can be toggled and needs a reload', async () => {

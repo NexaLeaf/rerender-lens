@@ -150,6 +150,27 @@ test('the panel page renders its demo data with fixes and commits', async ({ con
   await expect(page.locator('.fixes li').first()).toContainText('in <ProductList>');
 });
 
+test('the side panel page follows a tab through the relay and chrome.scripting, outside DevTools', async ({ context, worker, extensionId }) => {
+  const app = await context.newPage();
+  await app.goto('/');
+  await expect(app.getByRole('heading', { name: 'rerender-lens example' })).toBeVisible();
+  const [tab] = await worker.evaluate(() => chrome.tabs.query({ url: 'http://localhost:5199/*' }));
+  const side = await context.newPage();
+  await side.setViewportSize({ width: 380, height: 800 }); // side-panel width
+  await side.goto(`chrome-extension://${extensionId}/sidepanel.html?tabId=${tab!.id}`);
+  await expect(side.locator('.status-text')).toHaveText(/connected · lib 0\.2\.0 · React 19/);
+  await expect(side.locator('.tab-chip')).toContainText('localhost:5199');
+  await expect(side.locator('#root')).toHaveClass(/compact/);
+  await app.getByRole('button', { name: /Re-render App/ }).click();
+  await expect(side.locator('.row .name', { hasText: 'Toolbar' }).first()).toBeVisible();
+  await expect(side.locator('.summary .stat.bad b').first()).not.toHaveText('0');
+  // hovering a row highlights the component in the app page
+  await side.locator('.row .name', { hasText: 'Toolbar' }).first().hover();
+  await expect.poll(() => app.evaluate(() => document.querySelectorAll('#rerender-lens-overlay > div').length)).toBeGreaterThan(0);
+  await side.close();
+  await app.close();
+});
+
 declare const contentByTab: Map<number, unknown>;
 declare function reconcile(): Promise<void>;
 declare function removeOrigin(origin: string): Promise<void>;
