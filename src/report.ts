@@ -1,4 +1,4 @@
-import type { Change, HookChange, Options, ParentInfo, RenderReport, RenderTrigger } from './types';
+import type { Change, HookChange, Options, ParentInfo, RenderReport, RenderTrigger, SourceLocation } from './types';
 
 const now = (): number =>
   typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
@@ -16,6 +16,8 @@ export interface BuildInput {
   owner?: string | null;
   path?: string[];
   selfDuration?: number;
+  commitId?: number;
+  source?: SourceLocation;
 }
 
 const isGenuine = (c: Change): boolean => c.kind === 'different' || c.kind === 'added' || c.kind === 'removed';
@@ -93,6 +95,7 @@ export function buildReport(input: BuildInput): RenderReport {
   const report: RenderReport = {
     component: input.component,
     instanceId: input.instanceId ?? 0,
+    commitId: input.commitId ?? 0,
     renderCount: input.renderCount,
     trigger,
     avoidable,
@@ -107,6 +110,7 @@ export function buildReport(input: BuildInput): RenderReport {
     time: now(),
   };
   if (input.selfDuration !== undefined) report.selfDuration = input.selfDuration;
+  if (input.source) report.source = input.source;
   return report;
 }
 

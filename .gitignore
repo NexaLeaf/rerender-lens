@@ -5,3 +5,10 @@ dist
 *.tgz
 coverage
 .DS_Store
+
+# built by `npm run build` (tsup iife target)
+extension/vendor
+dist-extension
+e2e/.results
+playwright-report
+test-results

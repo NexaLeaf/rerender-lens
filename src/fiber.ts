@@ -3,7 +3,7 @@
  * hook, exactly like React DevTools itself. Element types are never touched, so
  * Fast Refresh, memo comparators and component identity all stay intact.
  */
-import type { Change, HookChange, ParentInfo, RenderTrigger } from './types';
+import type { Change, HookChange, ParentInfo, RenderTrigger, SourceLocation } from './types';
 import { classify, diffRecords } from './diff';
 import { buildReport } from './report';
 import { dispatch, getState, warnOnce } from './state';
@@ -13,6 +13,7 @@ import { getDisplayName, shouldTrack } from './tracker';
 const FunctionComponent = 0;
 const ClassComponent = 1;
 const HostRoot = 3;
+const HostComponent = 5;
 const ForwardRef = 11;
 const MemoComponent = 14;
 const SimpleMemoComponent = 15;
@@ -48,11 +49,23 @@ export interface Fiber {
   dependencies?: { firstContext: ContextDependency | null } | null;
   _debugOwner?: { type?: unknown; name?: string } | null;
   _debugHookTypes?: string[] | null;
+  /** React <= 18 with the JSX dev transform. */
+  _debugSource?: { fileName?: string; lineNumber?: number; columnNumber?: number } | null;
+  /** React 19: an Error captured where the element was created. */
+  _debugStack?: { stack?: string } | string | null;
   actualDuration?: number;
 }
 
 export interface FiberRoot {
   current: Fiber;
+}
+
+/** What `react-dom` passes to `hook.inject`. */
+export interface RendererInfo {
+  version?: string;
+  /** 1 = development build, 0 = production build. */
+  bundleType?: number;
+  rendererPackageName?: string;
 }
 
 export interface DevtoolsHook {
@@ -97,9 +110,34 @@ export function ensureDevtoolsHook(): DevtoolsHook {
   return hook;
 }
 
+/**
+ * Renderers seen through `hook.inject`. Hooks created by react-refresh (Vite's preamble) never
+ * fill `hook.renderers`, so `attach` wraps `inject` and records what react-dom registers.
+ */
+const capturedRenderers = new Map<number, RendererInfo>();
+const INJECT_WRAPPED = Symbol.for('rerender-lens.injectWrapped');
+
+function pickRenderer(r: unknown): RendererInfo {
+  const info = (r ?? {}) as RendererInfo;
+  return { version: info.version, bundleType: info.bundleType, rendererPackageName: info.rendererPackageName };
+}
+
+function wrapInject(hook: DevtoolsHook): void {
+  const h = hook as DevtoolsHook & { [INJECT_WRAPPED]?: boolean };
+  if (h[INJECT_WRAPPED] || typeof hook.inject !== 'function') return;
+  const original = hook.inject;
+  hook.inject = function (this: unknown, renderer: unknown) {
+    const id = original.call(this, renderer);
+    capturedRenderers.set(typeof id === 'number' ? id : capturedRenderers.size + 1, pickRenderer(renderer));
+    return id;
+  };
+  h[INJECT_WRAPPED] = true;
+}
+
 /** Start observing commits. Returns a function that stops observing. */
 export function attach(): () => void {
   const hook = ensureDevtoolsHook();
+  wrapInject(hook);
   const previous = hook.onCommitFiberRoot;
   const patched: DevtoolsHook['onCommitFiberRoot'] = function (this: unknown, id, root, priority, didError) {
     try {
@@ -113,6 +151,25 @@ export function attach(): () => void {
   return () => {
     if (hook.onCommitFiberRoot === patched) hook.onCommitFiberRoot = previous;
   };
+}
+
+/** The renderers React registered on the hook (version and dev/prod bundle type). */
+export function getRenderers(): RendererInfo[] {
+  const g = globalThis as unknown as Record<string, DevtoolsHook | undefined>;
+  const hook = g[HOOK];
+  const byId = new Map<number, RendererInfo>(capturedRenderers);
+  if (hook && hook.renderers && typeof hook.renderers.forEach === 'function') {
+    hook.renderers.forEach((r, id) => {
+      if (!byId.has(id)) byId.set(id, pickRenderer(r));
+    });
+  }
+  return [...byId.values()];
+}
+
+/** True when every registered React renderer is a production build (names minified, no hook labels). */
+export function isProductionReact(): boolean {
+  const renderers = getRenderers();
+  return renderers.length > 0 && renderers.every((r) => r.bundleType === 0);
 }
 
 const flagsOf = (f: Fiber): number => f.flags ?? f.effectTag ?? 0;
@@ -142,17 +199,103 @@ function isHotSwapped(fiber: Fiber, alt: Fiber): boolean {
 // Per-fiber bookkeeping. Fibers alternate between two objects, so look up both.
 const counts = new WeakMap<Fiber, number>();
 const ids = new WeakMap<Fiber, number>();
+/** Reverse lookup for the DevTools bridge (highlight, inspect). Weak so unmounted fibers can be collected. */
+const fibersById = new Map<number, WeakRef<Fiber>>();
+const hasWeakRef = typeof WeakRef === 'function';
+
+function remember(id: number, fiber: Fiber): void {
+  if (!hasWeakRef) return;
+  fibersById.set(id, new WeakRef(fiber));
+  if (fibersById.size > 5000) {
+    for (const [k, ref] of fibersById) if (!ref.deref()) fibersById.delete(k);
+  }
+}
+
+/** Instance id of a fiber if it has already been reported, without assigning one. */
+export function instanceIdOf(fiber: Fiber): number | undefined {
+  return ids.get(fiber) ?? (fiber.alternate ? ids.get(fiber.alternate) : undefined);
+}
+
+/** The most recent fiber object known for an instance id, or null when it was unmounted or never reported. */
+export function fiberById(id: number): Fiber | null {
+  const f = fibersById.get(id)?.deref() ?? null;
+  if (!f) return null;
+  // Prefer the alternate when it is newer (React swaps the pair on every render).
+  const alt = f.alternate;
+  if (alt && counts.get(alt) !== undefined && (counts.get(alt) ?? 0) > (counts.get(f) ?? 0)) return alt;
+  return f;
+}
 
 function instanceId(fiber: Fiber): number {
-  const existing = ids.get(fiber) ?? (fiber.alternate ? ids.get(fiber.alternate) : undefined);
+  const existing = instanceIdOf(fiber);
   if (existing !== undefined) {
     ids.set(fiber, existing);
+    remember(existing, fiber);
     return existing;
   }
   const s = getState();
   const id = s.nextInstanceId++;
   ids.set(fiber, id);
+  remember(id, fiber);
   return id;
+}
+
+/** DOM nodes rendered directly by a component fiber (stops at the first host node on every branch). */
+export function hostNodesOf(fiber: Fiber, limit = 50): Element[] {
+  const out: Element[] = [];
+  const stack: Fiber[] = [];
+  for (let c = fiber.child; c; c = c.sibling) stack.push(c);
+  while (stack.length && out.length < limit) {
+    const f = stack.pop()!;
+    if (f.tag === HostComponent) {
+      if (typeof Element !== 'undefined' && f.stateNode instanceof Element) out.push(f.stateNode);
+      continue;
+    }
+    for (let c = f.child; c; c = c.sibling) stack.push(c);
+  }
+  return out;
+}
+
+/** The fiber React attached to a DOM node, if any. */
+export function fiberForNode(node: unknown): Fiber | null {
+  if (!node || typeof node !== 'object') return null;
+  const key = Object.keys(node).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+  return key ? ((node as Record<string, Fiber | null>)[key] ?? null) : null;
+}
+
+/** Nearest component fiber at or above `fiber`. */
+export function nearestComponent(fiber: Fiber | null): Fiber | null {
+  let f: Fiber | null = fiber;
+  while (f && f.tag !== HostRoot) {
+    if (isComponentTag(f.tag)) return f;
+    f = f.return;
+  }
+  return null;
+}
+
+const INTERNAL_FRAME = /react-dom|react_jsx|jsx-(dev-)?runtime|\/react\/|node_modules\/react|react-stack-bottom-frame|react_stack_bottom_frame|scheduler/;
+
+/** Parse the first application frame out of a stack string (React 19 `_debugStack`). */
+export function parseStackLocation(stack: string): SourceLocation | undefined {
+  for (const line of stack.split('\n')) {
+    const m = /(?:at\s+(?:.*?\s+)?\(?|@)?((?:https?|file|webpack|vite|blob):[^\s()]+?):(\d+):(\d+)\)?\s*$/.exec(line.trim());
+    if (!m || !m[1] || INTERNAL_FRAME.test(m[1])) continue;
+    return { fileName: m[1], lineNumber: Number(m[2]), columnNumber: Number(m[3]) };
+  }
+  return undefined;
+}
+
+export function sourceOf(fiber: Fiber): SourceLocation | undefined {
+  const src = fiber._debugSource;
+  if (src && typeof src.fileName === 'string') {
+    const out: SourceLocation = { fileName: src.fileName };
+    if (typeof src.lineNumber === 'number') out.lineNumber = src.lineNumber;
+    if (typeof src.columnNumber === 'number') out.columnNumber = src.columnNumber;
+    return out;
+  }
+  const st = fiber._debugStack;
+  const text = typeof st === 'string' ? st : st && typeof st.stack === 'string' ? st.stack : null;
+  return text ? parseStackLocation(text) : undefined;
 }
 
 function bumpCount(fiber: Fiber): number {
@@ -329,6 +472,8 @@ export function onCommit(root: FiberRoot): void {
 
   // Depth-first pop order is reversed; restore document order for readable output.
   rendered.reverse();
+  if (rendered.length === 0) return;
+  const commitId = s.nextCommitId++;
   const parentCache = new Map<Fiber, ParentInfo | null>();
   for (const fiber of rendered) {
     const alt = fiber.alternate!;
@@ -346,6 +491,8 @@ export function onCommit(root: FiberRoot): void {
       owner: ownerName(fiber),
       path: componentPath(fiber),
       selfDuration: typeof fiber.actualDuration === 'number' ? fiber.actualDuration : undefined,
+      commitId,
+      source: sourceOf(fiber),
     });
     dispatch(report);
   }

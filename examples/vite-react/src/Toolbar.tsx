@@ -7,3 +7,5 @@ export const Toolbar = memo(function Toolbar(props: { style: CSSProperties; titl
     </div>
   );
 });
+// The dev transform renames the inner function (Toolbar2); give the memo a stable name.
+Toolbar.displayName = 'Toolbar';

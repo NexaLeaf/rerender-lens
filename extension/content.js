@@ -1,5 +1,9 @@
-// Relays rerender-lens messages posted on window to the extension (isolated world -> background).
+// Relays rerender-lens messages posted on window to the extension (isolated world -> background),
+// and hands the page the options saved for this origin (for the injected library).
 (function () {
+  if (window.__rerenderLensRelay) return; // registered twice (static + dynamic) for the same page
+  window.__rerenderLensRelay = true;
+
   let port = null;
   let queue = [];
 
@@ -37,6 +41,16 @@
     if (!data || data.__rerenderLens !== true) return;
     send({ type: data.type, version: data.version, payload: data.payload });
   });
+
+  // Saved options for this origin -> injected library (inject.js listens for this).
+  try {
+    chrome.storage.local.get('settings:' + location.origin, (got) => {
+      const settings = got && got['settings:' + location.origin];
+      if (settings) window.postMessage({ __rerenderLensConfig: true, options: settings }, '*');
+    });
+  } catch {
+    /* storage unavailable */
+  }
 
   connect();
 })();

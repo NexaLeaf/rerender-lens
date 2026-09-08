@@ -1,6 +1,6 @@
 {
   "name": "rerender-lens",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Find avoidable React re-renders and what caused them. Reads the fiber tree like React DevTools, so nothing is patched: works with Fast Refresh, memo, forwardRef and classes. Structured reports, test assertions, and a DevTools bridge.",
   "keywords": [
     "react",
@@ -44,7 +44,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint:pkg": "publint && attw --pack . --profile node16",
-    "check": "npm run typecheck && npm test && npm run build && npm run lint:pkg",
+    "build:ext": "node scripts/build-extension.mjs",
+    "e2e": "playwright test -c e2e/playwright.config.ts",
+    "version": "node scripts/sync-version.mjs && git add extension/manifest.json",
+    "check": "npm run typecheck && npm test && npm run build && npm run lint:pkg && npm run build:ext",
     "prepublishOnly": "npm run check",
     "dev:example": "npm run build && npm --prefix examples/vite-react run dev"
   },
@@ -53,6 +56,8 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
+    "@playwright/test": "^1.63.0",
+    "@types/chrome": "^0.2.9",
     "@types/node": "^26.4.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",

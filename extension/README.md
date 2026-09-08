@@ -1,24 +1,61 @@
 # rerender-lens DevTools extension
 
-A Chrome DevTools panel ("Re-renders") that shows avoidable React re-renders live, laid out like
-React DevTools' Components tab: component tree on the left with avoidable counts, details on the
-right (why it rendered, which ancestor triggered it, props with the changed ones highlighted,
-state and hooks), plus a live stream at the bottom.
+A Chrome / Edge / Firefox DevTools panel ("Re-renders") that shows avoidable React re-renders
+live, laid out like React DevTools' Components tab: component tree on the left with avoidable
+counts, details on the right (why it rendered, which ancestor triggered it, props with the changed
+ones highlighted, state and hooks, the fix as a code snippet), plus a live stream at the bottom.
 
-## Page setup
+Other views in the left pane:
+
+- **Offenders**: every component ranked by avoidable re-renders, total renders and wasted time.
+- **Commits**: one row per React commit with its root cause; the details show the render cascade
+  (who caused whom), the contexts that changed, and the fixes for that commit.
+- **Fixes**: every suggested fix ranked by how many avoidable re-renders it removes
+  ("useCallback(onSelect) in <ProductPage>: 12"), with a snippet to copy.
+
+Also: an **Elements-panel sidebar** ("Re-renders") for the selected DOM node, a toolbar **badge**
+with the avoidable count of the current tab, hover-to-highlight of a component's DOM in the page,
+"open source" links into the Sources panel, JSON export/import, Markdown copy of a report, and a
+Settings drawer that changes the library's options live (persisted per origin).
+
+## Two ways to connect a page
+
+**1. The page runs the library** (any host the extension is enabled on):
 
 ```ts
 import { init, createDevtoolsNotifier } from 'rerender-lens';
 init({ trackAllMemoized: true, silent: true, notifier: createDevtoolsNotifier() });
 ```
 
-## Install (unpacked)
+**2. Injection, no app code**: open the toolbar popup (or Settings in the panel), enable the site
+and tick *Inject the library*. The extension then loads rerender-lens into the page before React,
+with `trackAllMemoized` on. Reload the page. Options you change in Settings are saved per origin
+and applied on the next load.
 
-1. Open `chrome://extensions`, enable *Developer mode*, click *Load unpacked*, pick this `extension/` folder.
-2. Open your dev server (localhost by default), open DevTools, pick the **Re-renders** tab.
+If the page already runs the library, injection steps aside.
 
-The content script only runs on `localhost`, `127.0.0.1`, `*.localhost` and `*.local`. Add your dev
-host to `matches` in `manifest.json` if it is different.
+Local development hosts (`localhost`, `127.0.0.1`, `*.localhost`, `*.local`) are always enabled.
+Any other origin needs a one-time host permission, requested when you enable it (optional host
+permissions; nothing is granted until you ask).
+
+Production React builds are detected and flagged: names may be minified and hooks unlabeled.
+
+## Install
+
+From a release: download `rerender-lens-chrome-<version>.zip` (Edge uses the same file,
+Firefox has its own) from the GitHub release, unzip, `chrome://extensions` → *Developer mode* →
+*Load unpacked*. Or the Chrome Web Store once the listing is live (see `store/PUBLISHING.md`).
+
+From source:
+
+```sh
+npm install
+npm run build        # also writes extension/vendor/rerender-lens.js (the injectable bundle)
+npm run build:ext    # dist-extension/{chrome,edge,firefox}/ and .zip files
+```
+
+then load `extension/` (or `dist-extension/chrome/`) unpacked. Open your app, open DevTools, pick
+the **Re-renders** tab.
 
 ## Preview without installing
 
@@ -27,12 +64,34 @@ with sample data.
 
 ## How it talks to the page
 
-`content.js` forwards `window` messages carrying `__rerenderLens: true` to `background.js`, which
-routes them to the panel(s) inspecting that tab. The panel asks the page to replay its buffer with
-`chrome.devtools.inspectedWindow.eval('window.__RERENDER_LENS_DEVTOOLS__.replay()')` when it opens
-and after navigation. Nothing is injected into the page.
+- `content.js` (isolated world) forwards `window` messages carrying `__rerenderLens: true` to
+  `background.js`, which routes them to the panel(s) inspecting that tab and updates the badge.
+- When no content script is present (a host you did not enable), the panel polls the page's bridge
+  with `chrome.devtools.inspectedWindow.eval('...pull(since)')` every 500 ms instead. Same data,
+  slightly later.
+- `inject.js` + `vendor/rerender-lens.js` run in the page's main world at `document_start` on
+  origins with injection enabled (registered with `chrome.scripting.registerContentScripts`).
+- Settings, highlight and source links go through the bridge (`window.__RERENDER_LENS_DEVTOOLS__`),
+  never through the app.
+
+If React DevTools is also installed, both hooks coexist: whichever installs the global hook first
+owns it, the other wraps it. If React DevTools' Components tab ever comes up empty with injection
+on, turn injection off for that origin and add the `init` call to the app instead.
+
+## Files
+
+| | |
+| --- | --- |
+| `manifest.json` | MV3; `scripts/build-extension.mjs` derives the Firefox manifest from it |
+| `background.js` | routing, badge, per-origin script registration (`shared.js` helpers) |
+| `content.js`, `inject.js` | relay; in-page bootstrap for injection |
+| `devtools.js`, `panel.html/js/css` | the panel; `panel.js` also exports `RerenderLensPanel.analysis` (pure ranking code) |
+| `sidebar.html/js` | Elements-panel sidebar |
+| `popup.html/js` | toolbar popup to enable a site |
+| `store/` | listing text, privacy policy, publishing notes |
+| `test/panel.test.ts` | jsdom tests (`npm test`); `e2e/` has the Playwright suite (`npm run e2e`) |
 
 ## Tests
 
-`npm test` at the repo root also runs `extension/test/panel.test.ts`, which loads `panel.js` in
-jsdom with a fake transport.
+`npm test` runs `test/panel.test.ts` in jsdom with a fake transport. `npm run e2e` starts the
+example app and drives Chromium with the extension loaded: relay, badge, injection, and the panel.

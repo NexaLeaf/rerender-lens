@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>rerender-lens</title>
+    <link rel="stylesheet" href="panel.css" />
+    <style>
+      body { width: 300px; overflow: auto; }
+      #root { height: auto; display: block; padding: 10px 12px; }
+      h1 { font-size: 13px; margin: 0 0 8px; }
+      .origin { font-family: var(--mono); font-size: 11px; color: var(--text-dim); word-break: break-all; margin-bottom: 8px; }
+      .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+      .row label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+      .hint { color: var(--text-dim); margin-top: 8px; }
+      .err { color: var(--danger); }
+      button.primary { border: 1px solid var(--accent); color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="shared.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

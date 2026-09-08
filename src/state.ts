@@ -9,6 +9,7 @@ export interface LensState {
   /** Restores the previous `onCommitFiberRoot`. */
   detach: (() => void) | null;
   nextInstanceId: number;
+  nextCommitId: number;
   warnedOnce: Set<string>;
 }
 
@@ -19,7 +20,7 @@ export function getState(): LensState {
   const g = globalThis as unknown as Record<symbol, LensState | undefined>;
   let s = g[KEY];
   if (!s) {
-    s = { options: {}, enabled: false, printed: new Map(), detach: null, nextInstanceId: 1, warnedOnce: new Set() };
+    s = { options: {}, enabled: false, printed: new Map(), detach: null, nextInstanceId: 1, nextCommitId: 1, warnedOnce: new Set() };
     g[KEY] = s;
   }
   return s;

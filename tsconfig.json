@@ -13,7 +13,7 @@
     "isolatedModules": true,
     "declaration": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node", "chrome"]
   },
-  "include": ["src", "test", "extension/test", "tsup.config.ts", "vitest.config.ts"]
+  "include": ["src", "test", "extension/test", "e2e", "tsup.config.ts", "vitest.config.ts"]
 }

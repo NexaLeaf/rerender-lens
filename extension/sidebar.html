@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>rerender-lens</title>
+    <link rel="stylesheet" href="panel.css" />
+    <style>
+      body { overflow: auto; }
+      #root { height: auto; display: block; padding: 6px 8px; }
+      .sb-title { font-family: var(--mono); font-size: 12px; margin-bottom: 4px; }
+      .sb-title .name { color: var(--key); font-weight: 600; }
+      .sb-row { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+      .sb-actions { display: flex; gap: 4px; margin: 6px 0; }
+      .sb-actions button { border: 1px solid var(--border); }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="panel.js"></script>
+    <script src="sidebar.js"></script>
+  </body>
+</html>

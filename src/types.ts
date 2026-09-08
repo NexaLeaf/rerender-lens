@@ -48,11 +48,20 @@ export interface ParentInfo {
   trigger: RenderTrigger;
 }
 
+/** Where a component's element was created (React <= 18: `_debugSource`; React 19: parsed from `_debugStack`). */
+export interface SourceLocation {
+  fileName: string;
+  lineNumber?: number;
+  columnNumber?: number;
+}
+
 export interface RenderReport {
   /** Display name of the tracked component. */
   component: string;
   /** Stable id of this component instance (fiber) across its lifetime. */
   instanceId: number;
+  /** Monotonic id of the React commit that produced this report. Reports from one commit share it. 0 for `useWhyRerender`. */
+  commitId: number;
   /** Monotonic per-instance update count (1 = first update; mount is never reported). */
   renderCount: number;
   trigger: RenderTrigger;
@@ -72,6 +81,8 @@ export interface RenderReport {
   path: string[];
   /** Render time of this component in ms, when React exposes it (dev/profiling builds). */
   selfDuration?: number;
+  /** Source location of the element that rendered this component, when React exposes it (dev builds). */
+  source?: SourceLocation;
   /** Human-readable explanations and suggested fixes. */
   reasons: string[];
   /** `performance.now()` (or `Date.now()`) when the report was produced. */

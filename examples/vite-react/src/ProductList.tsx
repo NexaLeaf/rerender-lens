@@ -29,3 +29,4 @@ export const ProductList = memo(function ProductList(props: { products: Product[
     </div>
   );
 });
+ProductList.displayName = 'ProductList';

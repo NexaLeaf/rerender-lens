@@ -86,6 +86,8 @@ Every update of a tracked component produces a `RenderReport`:
 | `owner` | component that created the element (dev builds) |
 | `path` | component ancestry from the root |
 | `instanceId`, `renderCount` | stable per mounted instance |
+| `commitId` | shared by every report of one React commit |
+| `source` | file, line and column where the element was created (dev builds) |
 | `reasons` | human-readable explanations with the fix |
 
 Change kinds:
@@ -150,9 +152,24 @@ init({ trackAllMemoized: true, silent: true, notifier: createDevtoolsNotifier() 
 ```
 
 Each report is serialized (functions become `ƒ name`, elements `<Type>`, cycles cut) and posted
-on `window` as `{ __rerenderLens: true, version: 1, type: 'report', payload }`. The last 300
-reports are buffered; `window.__RERENDER_LENS_DEVTOOLS__.replay()` re-posts them and `.clear()`
-drops them. The Chrome extension in `extension/` consumes this.
+on `window` as `{ __rerenderLens: true, version: 2, type: 'report', payload }`. The last 300
+reports are buffered. The bridge at `window.__RERENDER_LENS_DEVTOOLS__` exposes:
+
+| Method | |
+| --- | --- |
+| `replay()` / `clear()` | re-post or drop the buffer |
+| `pull(since)` | reports newer than a sequence number, for panels that poll instead of listening |
+| `info()` | library version, protocol, React renderers (version, dev/prod), current options |
+| `configure(options)` / `getOptions()` | change options at runtime; matchers as strings (`"/^Grid/"`) |
+| `highlight(instanceId)` / `flashAvoidable(on)` | outline a component's DOM in the page, or flash avoidable renders |
+| `inspect(node)` | component, instance id and recent reports for a DOM node (DevTools `$0`) |
+
+The Chrome extension in `extension/` consumes this. With the extension you do not even need the
+`init` call: enable *Inject the library* for an origin and the extension loads rerender-lens into
+the page before React (see `extension/README.md`).
+
+Every report also carries `commitId` (shared by all reports of one React commit) and, in dev
+builds, `source` (where the element was created).
 
 ## API
 
@@ -166,7 +183,10 @@ ensureDevtoolsHook(): hook              // create the global hook early (test se
 useWhyRerender(name, values, options?)
 createCollector(): { reports, avoidable, notifier, clear, assertNoAvoidable }
 combineNotifiers(...notifiers): Notifier
-createDevtoolsNotifier({ bufferSize?, target?, maxDepth? }): Notifier
+createDevtoolsNotifier({ bufferSize?, target?, maxDepth?, flashAvoidable? }): Notifier
+getRenderers(), isProductionReact()       // what react-dom registered on the DevTools hook
+serializeOptions(o), deserializeOptions(o) // Options <-> JSON-safe form used by the bridge
+VERSION
 deepEqual(a, b), diffRecords(prev, next), classify(prev, next)
 ```
 

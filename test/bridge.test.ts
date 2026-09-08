@@ -1,0 +1,196 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import React from 'react';
+import {
+  combineNotifiers,
+  createCollector,
+  createDevtoolsNotifier,
+  deserializeOptions,
+  disable,
+  getRenderers,
+  init,
+  isProductionReact,
+  serializeOptions,
+  track,
+  PROTOCOL_VERSION,
+  VERSION,
+  type HelloPayload,
+} from '../src/index';
+import { ensureDevtoolsHook, parseStackLocation, sourceOf, type Fiber } from '../src/fiber';
+import { h, mount } from './helpers';
+
+afterEach(() => {
+  disable();
+  document.getElementById('rerender-lens-overlay')?.remove();
+});
+
+function makeParent(child: (n: number) => React.ReactElement) {
+  let bump: () => void = () => {};
+  function Parent() {
+    const [n, setN] = React.useState(0);
+    bump = () => setN((x) => x + 1);
+    return child(n);
+  }
+  return { Parent, rerender: () => React.act(bump) };
+}
+
+describe('commit ids and source', () => {
+  it('stamps every report of one commit with the same commitId and increments per commit', () => {
+    const collector = createCollector();
+    init({ notifier: collector.notifier, silent: true });
+    const A = track((p: { n: number }) => h('span', null, p.n), 'A');
+    const B = track((p: { n: number }) => h('span', null, p.n), 'B');
+    const { Parent, rerender } = makeParent(() => h('div', null, h(A, { n: 1 }), h(B, { n: 1 })));
+    const hn = mount(h(Parent));
+    rerender();
+    rerender();
+    const ids = collector.reports.map((r) => r.commitId);
+    expect(ids).toHaveLength(4);
+    expect(ids[0]).toBe(ids[1]);
+    expect(ids[2]).toBe(ids[3]);
+    expect(ids[2]).toBe(ids[0]! + 1);
+    hn.unmount();
+  });
+
+  it('parses React 19 debug stacks and reads React 18 _debugSource', () => {
+    const stack = [
+      'Error',
+      '    at exports.jsxDEV (http://localhost:5199/node_modules/.vite/deps/react_jsx-dev-runtime.js:200:20)',
+      '    at App (http://localhost:5199/src/App.tsx?t=1:52:36)',
+      '    at renderWithHooks (http://localhost:5199/node_modules/.vite/deps/react-dom_client.js:4200:11)',
+    ].join('\n');
+    expect(parseStackLocation(stack)).toEqual({ fileName: 'http://localhost:5199/src/App.tsx?t=1', lineNumber: 52, columnNumber: 36 });
+    // Firefox-style frames
+    expect(parseStackLocation('App@http://localhost:5199/src/App.tsx:10:5')).toEqual({ fileName: 'http://localhost:5199/src/App.tsx', lineNumber: 10, columnNumber: 5 });
+    expect(parseStackLocation('no frames here')).toBeUndefined();
+    const f18 = { _debugSource: { fileName: '/src/Row.tsx', lineNumber: 7, columnNumber: 3 } } as unknown as Fiber;
+    expect(sourceOf(f18)).toEqual({ fileName: '/src/Row.tsx', lineNumber: 7, columnNumber: 3 });
+    const f19 = { _debugStack: { stack } } as unknown as Fiber;
+    expect(sourceOf(f19)?.lineNumber).toBe(52);
+  });
+
+  it('exposes the renderers react-dom injected', () => {
+    ensureDevtoolsHook();
+    const renderers = getRenderers();
+    expect(renderers.length).toBeGreaterThan(0);
+    expect(renderers[0]!.version).toMatch(/^\d+\./);
+    expect(renderers[0]!.bundleType).toBe(1); // dev build in tests
+    expect(isProductionReact()).toBe(false);
+  });
+
+  it('captures renderers through hook.inject when the hook does not store them (react-refresh style)', () => {
+    const hook = ensureDevtoolsHook();
+    const before = getRenderers().length;
+    init({ silent: true }); // wraps inject
+    // A refresh-style hook returns an id without touching `renderers`.
+    const stub = { renderers: new Map(), inject: () => 42 };
+    const wrapped = hook.inject;
+    wrapped.call(stub, { version: '18.3.1', bundleType: 0, rendererPackageName: 'react-dom' });
+    const renderers = getRenderers();
+    expect(renderers.length).toBe(before + 1);
+    expect(renderers.some((r) => r.version === '18.3.1' && r.bundleType === 0)).toBe(true);
+  });
+});
+
+describe('options round-trip', () => {
+  it('serializes matchers as strings and back', () => {
+    const s = serializeOptions({ trackAllMemoized: true, include: [/^Grid/i, 'Sidebar', () => true], maxReportsPerComponent: 3 });
+    expect(s).toEqual({ trackAllMemoized: true, include: ['/^Grid/i', 'Sidebar'], maxReportsPerComponent: 3 });
+    const o = deserializeOptions(s);
+    expect(o.include![0]).toBeInstanceOf(RegExp);
+    expect((o.include![0] as RegExp).flags).toBe('i');
+    expect(o.include![1]).toBe('Sidebar');
+    expect(deserializeOptions({ include: ['/(/'] }).include).toEqual(['/(/']);
+  });
+});
+
+describe('bridge v2', () => {
+  it('hello carries library, protocol, react and options; pull() is cursor based', () => {
+    const postMessage = vi.fn();
+    init({ silent: true, trackAllMemoized: true, notifier: createDevtoolsNotifier({ target: { postMessage } as unknown as Window, bufferSize: 3 }) });
+    const hello = postMessage.mock.calls[0]![0] as { version: number; payload: HelloPayload };
+    expect(hello.version).toBe(PROTOCOL_VERSION);
+    expect(hello.payload.library).toBe(VERSION);
+    expect(hello.payload.protocol).toBe(PROTOCOL_VERSION);
+    expect(hello.payload.production).toBe(false);
+
+    const bridge = window.__RERENDER_LENS_DEVTOOLS__!;
+    // hello is posted while the notifier is created, before init() stores the options; info() sees them.
+    expect(bridge.info().options).toEqual({ trackAllMemoized: true, silent: true });
+    expect(bridge.info().enabled).toBe(true);
+    const Child = track((p: { n: number }) => h('span', null, p.n), 'Child');
+    const { Parent, rerender } = makeParent(() => h(Child, { n: 1 }));
+    const hn = mount(h(Parent));
+    rerender();
+    rerender();
+    let pulled = bridge.pull();
+    expect(pulled.reports).toHaveLength(2);
+    expect(pulled.dropped).toBe(false);
+    const cursor = pulled.seq;
+    rerender();
+    pulled = bridge.pull(cursor);
+    expect(pulled.reports).toHaveLength(1);
+    expect(bridge.pull(pulled.seq).reports).toHaveLength(0);
+    // overflow: buffer keeps 3, so a stale cursor reports dropped
+    rerender();
+    rerender();
+    rerender();
+    expect(bridge.pull(1).dropped).toBe(true);
+    expect(bridge.info().count).toBe(3);
+    hn.unmount();
+  });
+
+  it('configure() applies serialized options live and getOptions reflects them', () => {
+    const collector = createCollector();
+    init({ silent: true, notifier: combineNotifiers(collector.notifier, createDevtoolsNotifier({ target: { postMessage() {} } as unknown as Window })) });
+    const bridge = window.__RERENDER_LENS_DEVTOOLS__!;
+    const Plain = (p: { n: number }) => h('span', null, p.n);
+    const { Parent, rerender } = makeParent(() => h(Plain, { n: 1 }));
+    const hn = mount(h(Parent));
+    rerender();
+    expect(collector.reports).toHaveLength(0);
+    expect(bridge.configure({ include: ['/^Pla/'] })).toEqual({ silent: true, include: ['/^Pla/'] });
+    rerender();
+    expect(collector.reports).toHaveLength(1);
+    expect(bridge.getOptions().include).toEqual(['/^Pla/']);
+    hn.unmount();
+  });
+
+  it('highlight() outlines the DOM of an instance and inspect() resolves a DOM node', () => {
+    init({ silent: true, notifier: createDevtoolsNotifier({ target: { postMessage() {} } as unknown as Window }) });
+    const bridge = window.__RERENDER_LENS_DEVTOOLS__!;
+    const Child = track((p: { n: number }) => h('span', { className: 'child' }, p.n), 'Child');
+    const { Parent, rerender } = makeParent(() => h('div', null, h(Child, { n: 1 })));
+    const hn = mount(h(Parent));
+    const span = hn.container.querySelector('.child')!;
+    // Not reported yet: nearest component is known, instance id is not.
+    let info = bridge.inspect(span)!;
+    expect(info.component).toBe('Child');
+    expect(info.instanceId).toBeNull();
+    expect(info.tracked).toBe(true);
+    expect(info.path).toEqual(['Parent']);
+    rerender();
+    info = bridge.inspect(span)!;
+    const id = (bridge.pull().reports[0] as { instanceId: number }).instanceId;
+    expect(info.instanceId).toBe(id);
+    expect(info.reports).toHaveLength(1);
+    expect(bridge.inspect(document.body)).toBeNull();
+
+    // jsdom has no layout; make the node report a size
+    span.getBoundingClientRect = () => ({ left: 5, top: 5, width: 40, height: 20, right: 45, bottom: 25, x: 5, y: 5, toJSON() {} }) as DOMRect;
+    expect(bridge.highlight(id)).toBe(true);
+    const overlay = document.getElementById('rerender-lens-overlay')!;
+    expect(overlay.children).toHaveLength(1);
+    expect(overlay.textContent).toBe('Child');
+    expect(bridge.highlight(999999)).toBe(false);
+    expect(overlay.children).toHaveLength(0);
+    bridge.highlight(id);
+    bridge.highlight(null);
+    expect(overlay.children).toHaveLength(0);
+
+    // flash on avoidable render
+    bridge.flashAvoidable(true);
+    rerender();
+    expect(overlay.children.length).toBe(1);
+    hn.unmount();
+  });
+});
