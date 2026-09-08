@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { createServer as createHttpServer } from 'node:http';
 import { createServer, type ViteDevServer } from 'vite';
-import { renderSetupModule, rerenderLens, VIRTUAL_URL } from '../src/vite';
+import { panelDir, panelMiddleware, renderSetupModule, rerenderLens, VIRTUAL_URL } from '../src/vite';
 
 const example = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'examples', 'vite-react');
 
@@ -23,6 +24,36 @@ describe('vite plugin', () => {
       ].join('\n'),
     );
     expect(renderSetupModule({ devtools: false })).toBe("import { init } from 'rerender-lens';\ninit({  });\n");
+    expect(renderSetupModule({ panel: true, channel: 'x' })).toContain("notifier: createDevtoolsNotifier({ channel: \"x\" })");
+  });
+
+  it('pages filters which html gets the script; panel serves the page files and redirects the mount', async () => {
+    const plugin = rerenderLens({ panel: true, pages: ['/'] });
+    expect(plugin.transformIndexHtml.handler('', { path: '/' })).toHaveLength(1);
+    expect(plugin.transformIndexHtml.handler('', { path: '/index.html' })).toHaveLength(1);
+    expect(plugin.transformIndexHtml.handler('', { path: '/plain.html' })).toEqual([]);
+    expect(rerenderLens({ pages: (p) => p.startsWith('/admin') }).transformIndexHtml.handler('', { path: '/admin.html' })).toHaveLength(1);
+    expect(panelDir()).not.toBeNull();
+    const http = createHttpServer((req, res) => panelMiddleware('/__rerender-lens/', 'chan', panelDir())(req, res, () => {
+      res.statusCode = 404;
+      res.end('next');
+    }));
+    await new Promise<void>((r) => http.listen(0, r));
+    const port = (http.address() as { port: number }).port;
+    try {
+      const redirect = await fetch(`http://127.0.0.1:${port}/__rerender-lens/`, { redirect: 'manual' });
+      expect(redirect.status).toBe(302);
+      expect(redirect.headers.get('location')).toBe('/__rerender-lens/panel.html?channel=chan');
+      const js = await fetch(`http://127.0.0.1:${port}/__rerender-lens/panel.js`);
+      expect(js.headers.get('content-type')).toContain('javascript');
+      expect(await js.text()).toContain('RerenderLensPanel');
+      const html = await fetch(`http://127.0.0.1:${port}/__rerender-lens/panel.html`);
+      expect(await html.text()).toContain('panel.js');
+      expect((await fetch(`http://127.0.0.1:${port}/__rerender-lens/secret.txt`)).status).toBe(404);
+      expect((await fetch(`http://127.0.0.1:${port}/other`)).status).toBe(404);
+    } finally {
+      http.close();
+    }
   });
 
   it('is dev-only by default and injects the virtual module first in <head>', async () => {
@@ -32,7 +63,7 @@ describe('vite plugin', () => {
     expect(plugin.resolveId('virtual:rerender-lens')).toBe('\0virtual:rerender-lens');
     expect(plugin.resolveId('other')).toBeUndefined();
     expect(plugin.load('\0virtual:rerender-lens')).toContain('include: ["Row"]');
-    expect(plugin.transformIndexHtml.handler()).toEqual([{ tag: 'script', attrs: { type: 'module', src: VIRTUAL_URL }, injectTo: 'head-prepend' }]);
+    expect(plugin.transformIndexHtml.handler('')).toEqual([{ tag: 'script', attrs: { type: 'module', src: VIRTUAL_URL }, injectTo: 'head-prepend' }]);
   }, 20_000);
 
   it('works inside a real Vite dev server: the html gets the script and the module resolves to library code', async () => {

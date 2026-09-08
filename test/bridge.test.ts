@@ -267,6 +267,57 @@ describe('context providers, children and commit priority', () => {
   });
 });
 
+describe('broadcast channel', () => {
+  it('publishes reports on the channel and answers commands; info() carries the overhead', async () => {
+    const collector = createCollector();
+    // listen before init: the notifier says hello as soon as it is created
+    const listener = new BroadcastChannel('rl-test');
+    const received: { type: string; payload?: unknown }[] = [];
+    listener.onmessage = (e: MessageEvent) => {
+      if (e.data && e.data.__rerenderLens) received.push({ type: e.data.type, payload: e.data.payload });
+    };
+    init({ notifier: combineNotifiers(collector.notifier, createDevtoolsNotifier({ target: { postMessage() {} } as unknown as Window, channel: 'rl-test' })), silent: true });
+    const Child = track((p: { n: number }) => h('span', null, p.n), 'Child');
+    const { Parent, rerender } = makeParent(() => h(Child, { n: 1 }));
+    const hn = mount(h(Parent));
+    rerender();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(received.map((m) => m.type)).toEqual(['hello', 'report']);
+    expect((received[1]!.payload as { component: string }).component).toBe('Child');
+
+    const ask = (cmd: string, arg?: unknown): Promise<unknown> =>
+      new Promise((resolve) => {
+        const id = Math.random().toString(36).slice(2);
+        const onReply = (e: MessageEvent): void => {
+          if (e.data && e.data.__rerenderLensReply && e.data.id === id) {
+            listener.removeEventListener('message', onReply);
+            resolve(e.data.error ? new Error(e.data.error) : e.data.result);
+          }
+        };
+        listener.addEventListener('message', onReply);
+        listener.postMessage({ __rerenderLensCmd: true, id, cmd, arg });
+      });
+    const info = (await ask('info')) as HelloPayload;
+    expect(info.count).toBe(1);
+    expect(info.overhead.totalMs).toBeGreaterThanOrEqual(0);
+    expect(info.overhead.maxCommitMs).toBeGreaterThanOrEqual(0);
+    expect(info.commits).toBeGreaterThan(0);
+    const pulled = (await ask('pull', 0)) as { reports: unknown[] };
+    expect(pulled.reports).toHaveLength(1);
+    expect(await ask('configure', { include: ['X'] })).toMatchObject({ include: ['X'] });
+    expect(await ask('nope')).toBeInstanceOf(Error);
+    received.length = 0;
+    expect(await ask('replay')).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(received.map((m) => m.type)).toEqual(['hello', 'report']);
+    expect(await ask('clear')).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(received.at(-1)!.type).toBe('clear');
+    listener.close();
+    hn.unmount();
+  });
+});
+
 describe('options round-trip', () => {
   it('serializes matchers as strings and back', () => {
     const s = serializeOptions({ trackAllMemoized: true, include: [/^Grid/i, 'Sidebar', () => true], maxReportsPerComponent: 3 });

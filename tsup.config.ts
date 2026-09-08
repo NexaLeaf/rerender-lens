@@ -16,6 +16,8 @@ export default defineConfig([
     target: 'es2020',
     external: ['react'],
     define,
+    shims: true, // import.meta.url in the CJS build (vite.ts locates panel/)
+    onSuccess: 'node scripts/copy-panel.mjs',
   },
   // Self-contained bundle the Chrome extension injects into pages (`window.RerenderLens`).
   {

@@ -1,7 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
+Highlights: the panel without the extension (Vite plugin `panel: true`), the `rerender-lens/vite`
+plugin and `rerender-lens/setup` entry, sessions with before/after comparison, custom hook names,
+updaters and effect-loop detection, full hook/context/state snapshots, CI budgets and a CLI, the
+side panel and window modes, and a UI refresh. Details, newest first:
+
+- **Panel without the extension.** `rerenderLens({ panel: true })` serves the panel from the Vite
+  dev server at `/__rerender-lens/`; the app publishes on a same-origin `BroadcastChannel`
+  (`createDevtoolsNotifier({ channel })`) and the panel sends commands back over it. The `panel/`
+  directory ships in the package. `pages` limits which HTML pages get the setup script.
+- **Overhead readout.** `info().overhead` reports the time the library spent inspecting commits
+  (total and worst commit); the panel shows it in the status tooltip.
 - **Panel polish.** Offenders and Fixes are windowed above 200 rows (sticky header, sortable);
   an Offenders column chooser adds *Places* and *Last seen*; the search box takes `~text` to
   search prop, hook, context and state values; per-component notes and a *Mute* toggle (muted

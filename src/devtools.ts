@@ -37,7 +37,27 @@ export interface HelloPayload {
   /** Roots React scheduled (dev builds) and commits observed since `init`; the gap is work that never committed. */
   scheduled: number;
   commits: number;
+  /** The library's own cost: total and worst-case time spent inspecting commits, in ms. */
+  overhead: { totalMs: number; maxCommitMs: number };
 }
+
+/** Command sent by a panel over the BroadcastChannel; answered with a `ChannelReply` of the same id. */
+export interface ChannelCommand {
+  __rerenderLensCmd: true;
+  id: string;
+  cmd: 'info' | 'pull' | 'replay' | 'clear' | 'configure' | 'highlight' | 'flash';
+  arg?: unknown;
+}
+
+export interface ChannelReply {
+  __rerenderLensReply: true;
+  id: string;
+  result?: unknown;
+  error?: string;
+}
+
+/** Default channel name for `createDevtoolsNotifier({ channel: true })` and the panel served by the Vite plugin. */
+export const DEFAULT_CHANNEL = 'rerender-lens';
 
 declare global {
   interface Window {
@@ -73,6 +93,12 @@ export interface DevtoolsNotifierOptions {
   flashAvoidable?: boolean;
   /** Reported in `info()`. The extension's inject script passes `'extension'`. Default `'page'`. */
   source?: 'page' | 'extension';
+  /**
+   * Also publish on a `BroadcastChannel`, so a panel in another same-origin tab (the one the Vite plugin
+   * serves at `/__rerender-lens/`) receives reports and can send commands. `true` uses `DEFAULT_CHANNEL`.
+   * Off by default.
+   */
+  channel?: boolean | string;
 }
 
 export interface InspectResult {
@@ -233,6 +259,7 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     injected: typeof window !== 'undefined' && typeof window.__RERENDER_LENS_INJECTED__ === 'string',
     scheduled: getState().scheduled,
     commits: getState().commits,
+    overhead: { totalMs: getState().overheadMs, maxCommitMs: getState().maxCommitMs },
   });
 
   const bridge: DevtoolsBridge = {
@@ -298,13 +325,86 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     },
   };
   if (typeof window !== 'undefined') window.__RERENDER_LENS_DEVTOOLS__ = bridge;
-  post('hello', info());
+
+  // Optional cross-tab channel: same messages as `window`, plus a command/reply pair for panels.
+  let channel: BroadcastChannel | null = null;
+  if (options.channel && typeof BroadcastChannel === 'function') {
+    const name = typeof options.channel === 'string' ? options.channel : DEFAULT_CHANNEL;
+    try {
+      channel = new BroadcastChannel(name);
+      channel.onmessage = (event: MessageEvent) => {
+        const data = event.data as ChannelCommand | null;
+        if (!data || data.__rerenderLensCmd !== true || typeof data.id !== 'string') return;
+        const reply: ChannelReply = { __rerenderLensReply: true, id: data.id };
+        try {
+          switch (data.cmd) {
+            case 'info':
+              reply.result = info();
+              break;
+            case 'pull':
+              reply.result = bridge.pull(typeof data.arg === 'number' ? data.arg : 0);
+              break;
+            case 'replay':
+              bridge.replay();
+              reply.result = true;
+              break;
+            case 'clear':
+              bridge.clear();
+              reply.result = true;
+              break;
+            case 'configure':
+              reply.result = bridge.configure((data.arg ?? {}) as SerializableOptions);
+              break;
+            case 'highlight':
+              reply.result = bridge.highlight(typeof data.arg === 'number' ? data.arg : null);
+              break;
+            case 'flash':
+              bridge.flashAvoidable(!!data.arg);
+              reply.result = true;
+              break;
+            default:
+              reply.error = `unknown command ${String((data as { cmd?: unknown }).cmd)}`;
+          }
+        } catch (e) {
+          reply.error = String((e as Error).message || e);
+        }
+        channel?.postMessage(reply);
+      };
+    } catch {
+      channel = null;
+    }
+  }
+  const postAll = (type: DevtoolsMessage['type'], payload?: unknown): void => {
+    post(type, payload);
+    if (channel) {
+      try {
+        channel.postMessage({ [DEVTOOLS_MARKER]: true, version: PROTOCOL_VERSION, type, payload } as DevtoolsMessage);
+      } catch {
+        /* payload not cloneable; the window path already carried it */
+      }
+    }
+  };
+  if (channel) {
+    // Route replay/clear through the channel too, so a channel panel sees them.
+    const replay = bridge.replay;
+    const clear = bridge.clear;
+    bridge.replay = () => {
+      channel?.postMessage({ [DEVTOOLS_MARKER]: true, version: PROTOCOL_VERSION, type: 'hello', payload: info() } as DevtoolsMessage);
+      for (const e of buffer) channel?.postMessage({ [DEVTOOLS_MARKER]: true, version: PROTOCOL_VERSION, type: 'report', payload: e.payload } as DevtoolsMessage);
+      replay();
+    };
+    bridge.clear = () => {
+      clear();
+      channel?.postMessage({ [DEVTOOLS_MARKER]: true, version: PROTOCOL_VERSION, type: 'clear' } as DevtoolsMessage);
+    };
+  }
+  postAll('hello', info());
 
   return (report: RenderReport) => {
     const payload = serialize(report, maxDepth);
     buffer.push({ seq: ++seq, instanceId: report.instanceId, payload });
     if (buffer.length > bufferSize) buffer.splice(0, buffer.length - bufferSize);
-    post('report', payload);
+    postAll('report', payload);
     if (flashOn && report.avoidable && report.instanceId) {
       const fiber = fiberById(report.instanceId);
       if (fiber) flash({ nodes: hostNodesOf(fiber), label: report.component });

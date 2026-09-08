@@ -2332,6 +2332,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         text = `connected \xB7 lib ${lib.library || "?"}${react && react.version ? ` \xB7 React ${react.version}` : ""}${lib.production ? " (prod)" : ""}`;
         cls = "connected";
         title = state.relay ? "live via content script" : "polling the page";
+        if (lib.overhead) title += ` \xB7 library overhead ${lib.overhead.totalMs.toFixed(1)} ms over ${plural(lib.commits ?? 0, "commit")}, worst ${lib.overhead.maxCommitMs.toFixed(1)} ms`;
       } else if (state.relay || state.polling) {
         text = "no library in page";
         cls = "partial";
@@ -3032,6 +3033,95 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     }
     return out;
   }
+  function createBroadcastTransport(name) {
+    let listener = null;
+    let channel = null;
+    const pending = /* @__PURE__ */ new Map();
+    const emit = (m) => {
+      if (listener) listener(m);
+    };
+    const open = () => {
+      if (channel) return channel;
+      channel = new BroadcastChannel(name);
+      channel.onmessage = (event) => {
+        const data = event.data;
+        if (!data) return;
+        if (data.__rerenderLensReply === true && typeof data.id === "string") {
+          const p = pending.get(data.id);
+          if (!p) return;
+          pending.delete(data.id);
+          clearTimeout(p.timer);
+          p.resolve(typeof data.error === "string" ? new Error(data.error) : data.result);
+          return;
+        }
+        if (data.__rerenderLens === true && typeof data.type === "string") emit({ type: data.type, version: typeof data.version === "number" ? data.version : void 0, payload: data.payload });
+      };
+      return channel;
+    };
+    const bridge = (cmd, arg) => new Promise((resolve, reject) => {
+      const id = Math.random().toString(36).slice(2);
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        resolve(null);
+      }, 1500);
+      pending.set(id, {
+        resolve: (v) => v instanceof Error ? reject(v) : resolve(v),
+        timer
+      });
+      open().postMessage({ __rerenderLensCmd: true, id, cmd, arg });
+    });
+    const mem = (key) => `rerender-lens:${name}:${key}`;
+    const transport = {
+      origin: location.origin,
+      tabLabel: `channel "${name}"`,
+      panelUrl: location.origin + location.pathname,
+      subscribe(fn) {
+        listener = fn;
+        open();
+        fn({ type: "connected" });
+        void bridge("info").then(async (info) => {
+          if (!info) {
+            fn({ type: "disconnected" });
+            return;
+          }
+          fn({ type: "hello", version: info.protocol || 1, payload: info });
+          const res = await bridge("pull", 0);
+          if (res) for (const p of res.reports) fn({ type: "report", payload: p });
+        });
+      },
+      replay: () => void bridge("replay"),
+      clear: () => void bridge("clear"),
+      configure: (options) => bridge("configure", options).then((r) => r ?? void 0),
+      highlight: (id) => bridge("highlight", id).catch(() => {
+      }),
+      flashAvoidable: (on) => bridge("flash", !!on).catch(() => {
+      }),
+      storage: {
+        get: (key) => {
+          try {
+            const raw = localStorage.getItem(mem(key));
+            return raw ? JSON.parse(raw) : void 0;
+          } catch {
+            return void 0;
+          }
+        },
+        set: (key, value) => {
+          try {
+            localStorage.setItem(mem(key), JSON.stringify(value));
+          } catch {
+          }
+        }
+      },
+      readSource: (url) => fetch(url).then((res) => res.ok ? res.text() : null).catch(() => null),
+      copy: (text) => navigator.clipboard.writeText(text).catch(() => {
+      })
+    };
+    return transport;
+  }
+  function bootBroadcast(name) {
+    const prefersDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
+    return createPanel(document.getElementById("root"), createBroadcastTransport(name), { theme: prefersDark ? "dark" : "light" });
+  }
   async function bootShared(code) {
     const report = await decodeShare(code);
     const transport = { subscribe() {
@@ -3103,7 +3193,9 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     sampleReports,
     floodReports,
     bootStandalone,
+    bootBroadcast,
     createRelayTransport,
+    createBroadcastTransport,
     encodeShare,
     decodeShare,
     sourceContext,
@@ -3115,6 +3207,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
   var params = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
   var pathname = typeof location !== "undefined" ? String(location.pathname) : "";
   if (params.has("report")) void bootShared(params.get("report") || "");
+  else if (params.has("channel") && typeof BroadcastChannel === "function") bootBroadcast(params.get("channel") || "rerender-lens");
   else if (hasDevtools && /panel\.html/.test(pathname) && !params.has("tabId")) bootExtension();
   else if (hasChrome && (/sidepanel\.html/.test(pathname) || params.has("tabId"))) bootStandalone({ tabId: params.has("tabId") ? Number(params.get("tabId")) : null });
   else if (params.has("demo")) bootDemo();

@@ -30,6 +30,6 @@ export type { Budget, BudgetResult, BudgetViolation } from './budget';
 export type { DispatcherRef } from './hookNames';
 export { createCollector, combineNotifiers } from './notifiers';
 export type { Collector } from './notifiers';
-export { createDevtoolsNotifier, serialize, serializeOptions, deserializeOptions, DEVTOOLS_MARKER, PROTOCOL_VERSION } from './devtools';
-export type { DevtoolsBridge, DevtoolsMessage, DevtoolsNotifierOptions, HelloPayload, InspectResult, PullResult, SerializableOptions } from './devtools';
+export { createDevtoolsNotifier, serialize, serializeOptions, deserializeOptions, DEVTOOLS_MARKER, PROTOCOL_VERSION, DEFAULT_CHANNEL } from './devtools';
+export type { DevtoolsBridge, DevtoolsMessage, DevtoolsNotifierOptions, HelloPayload, InspectResult, PullResult, SerializableOptions, ChannelCommand, ChannelReply } from './devtools';
 export { VERSION } from './version';

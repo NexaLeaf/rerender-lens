@@ -158,7 +158,7 @@ test('the side panel page follows a tab through the relay and chrome.scripting, 
   const side = await context.newPage();
   await side.setViewportSize({ width: 380, height: 800 }); // side-panel width
   await side.goto(`chrome-extension://${extensionId}/sidepanel.html?tabId=${tab!.id}`);
-  await expect(side.locator('.status-text')).toHaveText(/connected · lib 0\.2\.0 · React 19/);
+  await expect(side.locator('.status-text')).toHaveText(/connected · lib 0\.\d+\.\d+ · React 19/);
   await expect(side.locator('.tab-chip')).toContainText('localhost:5199');
   await expect(side.locator('#root')).toHaveClass(/compact/);
   await app.getByRole('button', { name: /Re-render App/ }).click();
@@ -168,6 +168,29 @@ test('the side panel page follows a tab through the relay and chrome.scripting, 
   await side.locator('.row .name', { hasText: 'Toolbar' }).first().hover();
   await expect.poll(() => app.evaluate(() => document.querySelectorAll('#rerender-lens-overlay > div').length)).toBeGreaterThan(0);
   await side.close();
+  await app.close();
+});
+
+test('the panel served by the Vite plugin works without the extension, over a BroadcastChannel', async ({ context }) => {
+  const app = await context.newPage();
+  await app.goto('/');
+  await expect(app.getByRole('heading', { name: 'rerender-lens example' })).toBeVisible();
+  const panel = await context.newPage();
+  const res = await panel.goto('/__rerender-lens/');
+  expect(res?.url()).toContain('/__rerender-lens/panel.html?channel=rerender-lens');
+  await expect(panel.locator('.status-text')).toHaveText(/connected · lib 0\.\d+\.\d+ · React 19/);
+  await expect(panel.locator('.tab-chip')).toHaveText('channel "rerender-lens"');
+  await app.getByRole('button', { name: /Re-render App/ }).click();
+  await expect(panel.locator('.row .name', { hasText: 'Toolbar' }).first()).toBeVisible();
+  // commands travel back: hovering highlights in the app tab
+  await panel.locator('.row .name', { hasText: 'Toolbar' }).first().hover();
+  await expect.poll(() => app.evaluate(() => document.querySelectorAll('#rerender-lens-overlay > div').length)).toBeGreaterThan(0);
+  // settings go through the channel too
+  await panel.getByRole('button', { name: 'Settings' }).click();
+  const all = panel.locator('label.opt', { hasText: 'Track every component' }).locator('input');
+  await all.check();
+  await expect(panel.locator('.toast')).toHaveText('Applied');
+  await panel.close();
   await app.close();
 });
 

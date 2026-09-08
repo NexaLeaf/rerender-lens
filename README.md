@@ -92,7 +92,14 @@ export default defineConfig({
 
 The plugin injects a module before your entry in dev (`vite build` is untouched) that calls
 `init` with your options plus the DevTools notifier. Matchers can be strings or RegExps;
-`devtools: false` skips the bridge, `applyInBuild: true` keeps it in builds.
+`devtools: false` skips the bridge, `applyInBuild: true` keeps it in builds, `pages: ['/']`
+limits which HTML pages get it.
+
+**No extension at all**: add `panel: true` and open `http://localhost:5173/__rerender-lens/` in a
+second tab. The dev server serves the same panel the extension uses; the app publishes reports on
+a same-origin `BroadcastChannel` and the panel sends settings and highlight commands back over it.
+Panel state lives in `localStorage`. (`channel` renames the channel, `panel: '/some/path/'` moves
+the mount.)
 
 **Next.js** (App or Pages router): run it before React from the client instrumentation file:
 
@@ -303,7 +310,7 @@ rankFixes(reports), formatFixes(reports)          // ranked fixes
 summarizeReports(reports), compareSummaries(a, b), formatComparison(c), parseExport(json)
 checkBudget(reports, budget), toBudget(reports), assertWithinBudget(reports, budget)
 combineNotifiers(...notifiers): Notifier
-createDevtoolsNotifier({ bufferSize?, target?, maxDepth?, flashAvoidable? }): Notifier
+createDevtoolsNotifier({ bufferSize?, target?, maxDepth?, flashAvoidable?, channel? }): Notifier
 getRenderers(), isProductionReact()       // what react-dom registered on the DevTools hook
 serializeOptions(o), deserializeOptions(o) // Options <-> JSON-safe form used by the bridge
 VERSION
@@ -357,9 +364,10 @@ npm --prefix examples/vite-react install
 npm run dev:example
 ```
 
-`http://localhost:5199/` runs the library itself and reports to the console and the extension.
-`http://localhost:5199/plain.html` is the same app without the library, for trying the
-extension's *Inject the library* mode.
+`http://localhost:5199/` runs the library through the Vite plugin (console, extension, and the
+built-in panel at `http://localhost:5199/__rerender-lens/`). `http://localhost:5199/plain.html`
+is the same app without the library, for trying the extension's *Inject the library* mode.
+`src/rerender-lens.ts` shows the manual setup for apps without the plugin.
 
 ## Migrating from why-did-you-render
 

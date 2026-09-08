@@ -872,6 +872,42 @@ describe('sessions and deeper analysis', () => {
     expect((root.querySelector('.drawer') as HTMLElement).hidden).toBe(true);
   });
 
+  it('broadcast transport: hello and reports over a BroadcastChannel, commands answered by the app side', async () => {
+    const appSide = new BroadcastChannel('rl-panel-test');
+    const cmds: string[] = [];
+    appSide.onmessage = (e: MessageEvent) => {
+      const d = e.data;
+      if (!d || !d.__rerenderLensCmd) return;
+      cmds.push(d.cmd);
+      const result = d.cmd === 'info' ? { count: 1, library: '0.3.0', protocol: 2, react: [{ version: '19.2.0' }], enabled: true, options: {}, overhead: { totalMs: 1.25, maxCommitMs: 0.5 }, commits: 3 } : d.cmd === 'pull' ? { seq: 1, reports: [report()], dropped: false } : d.cmd === 'configure' ? { trackAllComponents: true } : true;
+      appSide.postMessage({ __rerenderLensReply: true, id: d.id, result });
+    };
+    const w = window as unknown as { RerenderLensPanel: { createBroadcastTransport(name: string): Transport } };
+    const transport = w.RerenderLensPanel.createBroadcastTransport('rl-panel-test');
+    panel = factory.createPanel(root, transport);
+    for (let i = 0; i < 50 && panel.state.reports.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      panel.flush();
+    }
+    expect(cmds.slice(0, 2)).toEqual(['info', 'pull']);
+    expect(root.querySelector('.status-text')!.textContent).toBe('connected · lib 0.3.0 · React 19.2.0');
+    expect(root.querySelector('.status')!.getAttribute('title')).toContain('library overhead 1.3 ms over 3 commits, worst 0.5 ms');
+    expect(root.querySelector('.tab-chip')!.textContent).toBe('channel "rl-panel-test"');
+    expect(panel.state.reports).toHaveLength(1);
+    // a live report published by the app side
+    appSide.postMessage({ __rerenderLens: true, version: 2, type: 'report', payload: report({ component: 'Live', path: ['App'] }) });
+    for (let i = 0; i < 50 && panel.state.reports.length < 2; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      panel.flush();
+    }
+    expect(panel.state.reports).toHaveLength(2);
+    // storage lives in localStorage under the channel name
+    panel.setView('offenders');
+    await new Promise((r) => setTimeout(r, 200));
+    expect(JSON.parse(localStorage.getItem('rerender-lens:rl-panel-test:panel') || '{}').view).toBe('offenders');
+    appSide.close();
+  });
+
   it('labels commit priority on the report and in the commits list', () => {
     send({ type: 'report', payload: report({ commitPriority: 'immediate' }) });
     send({ type: 'report', payload: report({ commitId: 2, commitPriority: 'normal', renderCount: 2 }) });

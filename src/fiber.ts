@@ -86,6 +86,8 @@ export interface DevtoolsHook {
 
 const HOOK = '__REACT_DEVTOOLS_GLOBAL_HOOK__';
 
+const nowMs = (): number => (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now());
+
 /**
  * Make sure `window.__REACT_DEVTOOLS_GLOBAL_HOOK__` exists. React DOM only looks
  * for it once, when the `react-dom` module is evaluated, so this must run before
@@ -164,10 +166,16 @@ export function attach(): () => void {
   wrapInject(hook);
   const previous = hook.onCommitFiberRoot;
   const patched: DevtoolsHook['onCommitFiberRoot'] = function (this: unknown, id, root, priority, didError) {
+    const started = nowMs();
     try {
       onCommit(root, priorityLabel(priority));
     } catch (err) {
       warnOnce('commit', `failed to inspect a commit: ${String(err)}`);
+    } finally {
+      const spent = nowMs() - started;
+      const s = getState();
+      s.overheadMs += spent;
+      if (spent > s.maxCommitMs) s.maxCommitMs = spent;
     }
     if (typeof previous === 'function') return previous.call(this, id, root, priority, didError);
   };
@@ -593,8 +601,6 @@ function updatersOf(root: FiberRoot): string[] {
 /** The previous commit, to spot effect → setState loops. */
 let lastCommit: { id: number; at: number; rendered: Set<string> } | null = null;
 const EFFECT_LOOP_WINDOW_MS = 50;
-
-const nowMs = (): number => (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now());
 
 /** Inspect one committed root. */
 export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void {

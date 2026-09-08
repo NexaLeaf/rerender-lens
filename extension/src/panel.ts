@@ -179,6 +179,9 @@ export interface HelloPayload {
   options?: SerializableOptions;
   source?: 'page' | 'extension';
   injected?: boolean;
+  commits?: number;
+  scheduled?: number;
+  overhead?: { totalMs: number; maxCommitMs: number };
 }
 
 export interface SerializableOptions {
@@ -2882,6 +2885,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       text = `connected · lib ${lib.library || '?'}${react && react.version ? ` · React ${react.version}` : ''}${lib.production ? ' (prod)' : ''}`;
       cls = 'connected';
       title = state.relay ? 'live via content script' : 'polling the page';
+      if (lib.overhead) title += ` · library overhead ${lib.overhead.totalMs.toFixed(1)} ms over ${plural(lib.commits ?? 0, 'commit')}, worst ${lib.overhead.maxCommitMs.toFixed(1)} ms`;
     } else if (state.relay || state.polling) {
       text = 'no library in page';
       cls = 'partial';
@@ -3605,6 +3609,101 @@ function floodReports(n: number): Record<string, unknown>[] {
   return out;
 }
 
+// ---------- boot: BroadcastChannel (panel served by the Vite plugin, no extension) ----------
+/**
+ * Same-origin transport over a `BroadcastChannel`: the app's `createDevtoolsNotifier({ channel })`
+ * publishes reports on it and answers commands. Storage is `localStorage`, the origin is ours.
+ */
+function createBroadcastTransport(name: string): Transport {
+  let listener: ((m: Message) => void) | null = null;
+  let channel: BroadcastChannel | null = null;
+  const pending = new Map<string, { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
+  const emit = (m: Message): void => {
+    if (listener) listener(m);
+  };
+  const open = (): BroadcastChannel => {
+    if (channel) return channel;
+    channel = new BroadcastChannel(name);
+    channel.onmessage = (event: MessageEvent) => {
+      const data = event.data as Record<string, unknown> | null;
+      if (!data) return;
+      if (data.__rerenderLensReply === true && typeof data.id === 'string') {
+        const p = pending.get(data.id);
+        if (!p) return;
+        pending.delete(data.id);
+        clearTimeout(p.timer);
+        p.resolve(typeof data.error === 'string' ? new Error(data.error) : data.result);
+        return;
+      }
+      if (data.__rerenderLens === true && typeof data.type === 'string') emit({ type: data.type, version: typeof data.version === 'number' ? data.version : undefined, payload: data.payload });
+    };
+    return channel;
+  };
+  const bridge = <T = unknown,>(cmd: string, arg?: unknown): Promise<T | null> =>
+    new Promise((resolve, reject) => {
+      const id = Math.random().toString(36).slice(2);
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        resolve(null); // nobody answered: no app tab with the library on this channel
+      }, 1500);
+      pending.set(id, {
+        resolve: (v) => (v instanceof Error ? reject(v) : resolve(v as T)),
+        timer,
+      });
+      open().postMessage({ __rerenderLensCmd: true, id, cmd, arg });
+    });
+  const mem = (key: string): string => `rerender-lens:${name}:${key}`;
+  const transport: Transport = {
+    origin: location.origin,
+    tabLabel: `channel "${name}"`,
+    panelUrl: location.origin + location.pathname,
+    subscribe(fn) {
+      listener = fn;
+      open();
+      fn({ type: 'connected' });
+      void bridge<HelloPayload>('info').then(async (info) => {
+        if (!info) {
+          fn({ type: 'disconnected' });
+          return;
+        }
+        fn({ type: 'hello', version: info.protocol || 1, payload: info });
+        const res = await bridge<{ reports: unknown[] }>('pull', 0);
+        if (res) for (const p of res.reports) fn({ type: 'report', payload: p });
+      });
+    },
+    replay: () => void bridge('replay'),
+    clear: () => void bridge('clear'),
+    configure: (options) => bridge<SerializableOptions>('configure', options).then((r) => r ?? undefined),
+    highlight: (id) => bridge('highlight', id).catch(() => {}),
+    flashAvoidable: (on) => bridge('flash', !!on).catch(() => {}),
+    storage: {
+      get: (key) => {
+        try {
+          const raw = localStorage.getItem(mem(key));
+          return raw ? JSON.parse(raw) : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+      set: (key, value) => {
+        try {
+          localStorage.setItem(mem(key), JSON.stringify(value));
+        } catch {
+          /* quota or private mode */
+        }
+      },
+    },
+    readSource: (url) => fetch(url).then((res) => (res.ok ? res.text() : null)).catch(() => null),
+    copy: (text) => navigator.clipboard.writeText(text).catch(() => {}),
+  };
+  return transport;
+}
+
+function bootBroadcast(name: string): Panel {
+  const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
+  return createPanel(document.getElementById('root')!, createBroadcastTransport(name), { theme: prefersDark ? 'dark' : 'light' });
+}
+
 /** `panel.html?report=…`: a single shared report, no page. */
 async function bootShared(code: string): Promise<void> {
   const report = await decodeShare(code);
@@ -3674,7 +3773,9 @@ const api = {
   sampleReports,
   floodReports,
   bootStandalone,
+  bootBroadcast,
   createRelayTransport,
+  createBroadcastTransport,
   encodeShare,
   decodeShare,
   sourceContext,
@@ -3687,6 +3788,7 @@ const hasDevtools = hasChrome && !!chrome.devtools && !!chrome.devtools.inspecte
 const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
 const pathname = typeof location !== 'undefined' ? String(location.pathname) : '';
 if (params.has('report')) void bootShared(params.get('report') || '');
+else if (params.has('channel') && typeof BroadcastChannel === 'function') bootBroadcast(params.get('channel') || 'rerender-lens');
 else if (hasDevtools && /panel\.html/.test(pathname) && !params.has('tabId')) bootExtension();
 else if (hasChrome && (/sidepanel\.html/.test(pathname) || params.has('tabId'))) bootStandalone({ tabId: params.has('tabId') ? Number(params.get('tabId')) : null });
 else if (params.has('demo')) bootDemo();
