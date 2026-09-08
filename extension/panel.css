@@ -148,11 +148,12 @@ button.ib.active .glyph { color: var(--accent); }
 .table-wrap { flex: 1; overflow: auto; }
 .virtual-inner { position: relative; width: 100%; }
 
-/* ---------- tree rows ---------- */
+/* ---------- tree rows (scoped to the virtual list so other pages can use plain class names) ---------- */
 .row {
   display: flex; align-items: center; height: 22px; padding-right: 8px; white-space: nowrap;
-  cursor: default; position: absolute; left: 0; right: 0; user-select: none; box-sizing: border-box;
+  cursor: default; user-select: none; box-sizing: border-box;
 }
+.virtual-inner > .row { position: absolute; left: 0; right: 0; }
 .row:hover { background: var(--hover); }
 .row.selected { background: var(--selected); color: var(--selected-text); box-shadow: inset 2px 0 0 var(--accent); }
 .row .indent { display: inline-flex; height: 100%; flex: none; margin-left: 6px; }
