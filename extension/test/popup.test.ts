@@ -38,7 +38,7 @@ describe('popup', () => {
     chrome = makeChrome({ activeUrl: 'http://localhost:5199/app' });
     load(chrome);
     await settle();
-    const buttons = [...document.querySelectorAll<HTMLButtonElement>('.row.open button')];
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('.field.open button')];
     expect(buttons.map((b) => b.textContent)).toEqual(['⫿ Open side panel', '⧉ Open in window']);
     buttons[0]!.click();
     await settle();
