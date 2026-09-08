@@ -3,6 +3,7 @@
  * rerender-lens CLI: work with panel exports and session files from a terminal or CI.
  *
  *   rerender-lens fixes <export.json>                 ranked fixes for the reports in an export
+ *   rerender-lens causes <export.json>                root causes: which component started each commit's cascade
  *   rerender-lens summary <export.json> [--out s.json] session summary of an export (commit it as a baseline)
  *   rerender-lens compare <before.json> <after.json>   before/after table; exit 1 on regressions
  *   rerender-lens budget <export.json> <budget.json>   check avoidable re-renders per component; exit 1 on violations
@@ -11,6 +12,7 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { formatFixes } from './fixes';
+import { formatRootCauses } from './causes';
 import { compareSummaries, formatComparison, parseExport, summarizeReports, type SessionSummary } from './sessions';
 import { checkBudget, toBudget, type Budget } from './budget';
 import { createRelayServer } from './relay';
@@ -59,6 +61,13 @@ export function main(argv: string[]): number | Promise<number> {
         console.log(formatFixes(reports, Number(flag('--limit') || 20)));
         return 0;
       }
+      case 'causes': {
+        const file = positional[0];
+        if (!file) throw new Error('usage: rerender-lens causes <export.json> [--limit N]');
+        const { reports } = parseExport(read(file));
+        console.log(formatRootCauses(reports, Number(flag('--limit') || 10)) || 'No root causes: no avoidable re-renders, or the reports carry no commit ids.');
+        return 0;
+      }
       case 'summary': {
         const file = positional[0];
         if (!file) throw new Error('usage: rerender-lens summary <export.json> [--out summary.json]');
@@ -101,7 +110,7 @@ export function main(argv: string[]): number | Promise<number> {
         return 1;
       }
       default:
-        console.error('usage: rerender-lens <panel|fixes|summary|compare|budget> ...');
+        console.error('usage: rerender-lens <panel|fixes|causes|summary|compare|budget> ...');
         return cmd ? 1 : 0;
     }
   } catch (e) {

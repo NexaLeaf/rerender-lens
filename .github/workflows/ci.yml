@@ -34,6 +34,17 @@ jobs:
         with:
           name: extension
           path: dist-extension/*.zip
+  react18:
+    # The README says "tested with React 18 and 19"; the default suite runs on 19.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:react18
   e2e:
     runs-on: ubuntu-latest
     steps:

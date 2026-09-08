@@ -3,8 +3,9 @@
  * Exposes window.RerenderLensPanel.createPanel(root, transport, options) for tests, demo mode and the
  * Elements sidebar. Everything under `analysis` is pure and unit-tested on its own. */
 
-// The analysis (fixes, ranking, session summaries, diff paths) is the library's own, bundled in by
+// The analysis (fixes, ranking, root causes, session summaries, diff paths) is the library's own, bundled in by
 // tsup: the panel's serialized `Report` satisfies `ReportLike`, so the same code serves both.
+import { analyzeCommit as analyzeCommitReports, cascadeTree, contextAttribution, rootCauseOf, rootCauseSummary as summarizeRootCause, type CascadeNode as LibCascadeNode, type CommitAnalysis as LibCommitAnalysis, type ContextStat, type RootCause, type RootSummary as LibRootSummary } from '../../src/causes';
 import { diffLeaves, firstDifferentPath } from '../../src/diff';
 import { AVOIDABLE_KINDS, fixesFor, rankFixes, shortValue, type Fix, type RankedFix as LibRankedFix } from '../../src/fixes';
 import { KIND_LABEL, summarize } from '../../src/report';
@@ -91,47 +92,13 @@ export interface TreeNode {
   flashAt?: number;
 }
 
-export interface RootCause {
-  name: string;
-  trigger: string;
-  count: number;
-  components: Map<string, number>;
-}
-
-export interface ContextStat {
-  name: string;
-  consumers: number;
-  avoidable: number;
-  components: Map<string, number>;
-  commits: Set<number>;
-  /** Components rendering the Provider (usually one). */
-  providers: Map<string, number>;
-  /** Keys that changed in object values, and the largest key count seen. */
-  changedKeys: Set<string>;
-  totalKeys: number;
-}
-
-export interface CommitAnalysis {
-  id: number;
+/** The library's commit analysis over the panel's serialized reports, plus what only the panel knows. */
+export interface CommitAnalysis extends LibCommitAnalysis<Report> {
   receivedAt: number;
-  total: number;
-  avoidable: number;
-  wasted: number;
-  roots: RootCause[];
-  /** Root cause name of every avoidable report (what `roots` was aggregated from). */
-  rootByReport: Map<Report, string>;
-  contexts: ContextStat[];
   fixes: RankedFix[];
-  reports: Report[];
 }
-
-interface CascadeNode {
-  name: string;
-  children: Map<string, CascadeNode>;
-  report: Report | null;
-  count?: number;
-  avoidable?: number;
-}
+export type { RootCause, ContextStat };
+type CascadeNode = LibCascadeNode<Report>;
 
 export interface HelloPayload {
   library?: string;
@@ -308,6 +275,7 @@ const SYNC_RETRY_MIN = 500;
 const SYNC_RETRY_MAX = 5000;
 const SYNC_RETRIES = 20;
 const NAVIGATION_SETTLE = 1200; // ms after a navigation before the first `info` (the old document may still answer)
+const INFO_REFRESH_MS = 3000; // while connected, `info()` is re-read this often (overhead, truncated count, enabled)
 const ROW_H = 22; // tree row height (px), must match panel.css
 const ITEM_H = 20; // stream item height (px), must match panel.css
 const OVERSCAN = 8;
@@ -445,147 +413,21 @@ function objectDetails(label: string, obj: unknown): HTMLElement {
 }
 
 // ---------- analysis (pure) ----------
-const isAncestorReport = (anc: Report, r: Report): boolean =>
-  anc.path.length < r.path.length && r.path[anc.path.length] === anc.component && anc.path.every((p, i) => r.path[i] === p);
-
-/** One commit's reports grouped by component name, so a parent lookup is O(same-named reports) instead of O(commit). */
-function indexByComponent(reports: Report[]): Map<string, Report[]> {
-  const index = new Map<string, Report[]>();
-  for (const r of reports) {
-    const list = index.get(r.component);
-    if (list) list.push(r);
-    else index.set(r.component, [r]);
-  }
-  return index;
-}
-
-/** Walk `parent` links inside one commit up to the component whose own change started the cascade. */
-function rootCauseOf(r: Report, commitReports: Report[], index: Map<string, Report[]> = indexByComponent(commitReports)): { name: string; trigger: string; report: Report | null } | null {
-  let cur = r;
-  const seen = new Set<Report>([r]);
-  while (cur.trigger === 'parent' && cur.parent) {
-    const parent = cur.parent;
-    const candidates = index.get(parent.name);
-    const p = candidates && candidates.find((x) => isAncestorReport(x, cur));
-    if (!p || seen.has(p)) return { name: parent.name, trigger: parent.trigger, report: null };
-    seen.add(p);
-    cur = p;
-  }
-  return cur === r ? null : { name: cur.component, trigger: cur.trigger, report: cur };
-}
-
-/** Group reports by commit and rank what started each cascade. */
+// `rootCauseOf`, `contextAttribution`, `cascadeTree` and the commit walk come from src/causes.ts; the
+// wrappers below add what only the panel has: `receivedAt` and the ranked fixes per commit / root.
 function analyzeCommit(reports: Report[]): CommitAnalysis {
-  const roots = new Map<string, RootCause>();
-  const rootByReport = new Map<Report, string>();
-  const index = indexByComponent(reports);
-  let avoidable = 0;
-  let wasted = 0;
-  for (const r of reports) {
-    if (!r.avoidable) continue;
-    avoidable++;
-    if (typeof r.selfDuration === 'number') wasted += r.selfDuration;
-    const root = rootCauseOf(r, reports, index);
-    const name = root ? root.name : (r.parent && r.parent.name) || '(unknown)';
-    const trigger = root ? root.trigger : (r.parent && r.parent.trigger) || 'parent';
-    rootByReport.set(r, name);
-    let agg = roots.get(name);
-    if (!agg) {
-      agg = { name, trigger, count: 0, components: new Map() };
-      roots.set(name, agg);
-    }
-    agg.count++;
-    agg.components.set(r.component, (agg.components.get(r.component) || 0) + 1);
-  }
   const first = reports[0];
-  return {
-    id: first ? first.commitId : 0,
-    receivedAt: first ? first.receivedAt : 0,
-    total: reports.length,
-    avoidable,
-    wasted,
-    roots: [...roots.values()].sort((a, b) => b.count - a.count),
-    rootByReport,
-    contexts: contextAttribution(reports),
-    fixes: rankFixes(reports),
-    reports,
-  };
+  return { ...analyzeCommitReports(reports), receivedAt: first ? first.receivedAt : 0, fixes: rankFixes(reports) };
 }
 
-/** Which contexts changed and how many consumers re-rendered because of them. */
-function contextAttribution(reports: Report[]): ContextStat[] {
-  const byCtx = new Map<string, ContextStat>();
-  for (const r of reports) {
-    for (const c of r.hookChanges || []) {
-      if (c.hook !== 'useContext' && !/^useContext/.test(c.path)) continue;
-      const m = /useContext\((.*)\)/.exec(c.path);
-      const name = m && m[1] ? m[1] : c.path;
-      let agg = byCtx.get(name);
-      if (!agg) {
-        agg = { name, consumers: 0, avoidable: 0, components: new Map(), commits: new Set(), providers: new Map(), changedKeys: new Set(), totalKeys: 0 };
-        byCtx.set(name, agg);
-      }
-      agg.consumers++;
-      if (AVOIDABLE_KINDS.has(c.kind)) agg.avoidable++;
-      agg.components.set(r.component, (agg.components.get(r.component) || 0) + 1);
-      agg.commits.add(r.commitId);
-      if (c.provider && c.provider.component) agg.providers.set(c.provider.component, (agg.providers.get(c.provider.component) || 0) + 1);
-      if (c.changedKeys) for (const k of c.changedKeys) agg.changedKeys.add(k);
-      if (typeof c.totalKeys === 'number') agg.totalKeys = Math.max(agg.totalKeys, c.totalKeys);
-    }
-  }
-  return [...byCtx.values()].sort((a, b) => b.consumers - a.consumers);
-}
-
-/** Nested cascade for one commit: every report placed under its ancestors (untracked ancestors appear as plain names). */
-function cascadeTree(reports: Report[]): CascadeNode {
-  const root: CascadeNode = { name: '', children: new Map(), report: null };
-  for (const r of reports) {
-    let node = root;
-    for (const seg of r.path.concat([r.component])) {
-      let next = node.children.get(seg);
-      if (!next) {
-        next = { name: seg, children: new Map(), report: null };
-        node.children.set(seg, next);
-      }
-      node = next;
-    }
-    if (!node.report || r.avoidable) node.report = r;
-    node.count = (node.count || 0) + 1;
-    if (r.avoidable) node.avoidable = (node.avoidable || 0) + 1;
-  }
-  return root;
-}
-
-export interface RootSummary {
-  name: string;
-  trigger: string;
-  commits: { key: number; analysis: CommitAnalysis; count: number; components: Map<string, number> }[];
-  total: number;
-  components: Map<string, number>;
+export interface RootSummary extends LibRootSummary<Report, CommitAnalysis> {
   fixes: RankedFix[];
 }
 
-/**
- * Every commit a component started (as the root cause), across the whole session.
- * `analyze` lets the panel pass its per-commit memoized analysis.
- */
+/** Every commit a component started, across the session; `analyze` is the panel's memoized per-commit analysis. */
 function rootCauseSummary(name: string, commits: Iterable<[number, Report[]]>, analyze: (key: number, reports: Report[]) => CommitAnalysis = (_, reports) => analyzeCommit(reports)): RootSummary {
-  const out: RootSummary = { name, trigger: 'parent', commits: [], total: 0, components: new Map(), fixes: [] };
-  const affected: Report[] = [];
-  for (const [key, reports] of commits) {
-    const analysis = analyze(key, reports);
-    const root = analysis.roots.find((x) => x.name === name);
-    if (!root) continue;
-    out.trigger = root.trigger;
-    out.commits.push({ key, analysis, count: root.count, components: root.components });
-    out.total += root.count;
-    for (const [c, n] of root.components) out.components.set(c, (out.components.get(c) || 0) + n);
-    for (const r of reports) if (r.avoidable && analysis.rootByReport.get(r) === name) affected.push(r);
-  }
-  out.commits.reverse();
-  out.fixes = rankFixes(affected);
-  return out;
+  const s = summarizeRootCause(name, commits, analyze);
+  return { ...s, fixes: rankFixes(s.affected) };
 }
 
 const PRIORITY_LABEL: Record<string, string> = { immediate: 'discrete input', 'user-blocking': 'continuous input', normal: 'transition / async', low: 'low', idle: 'idle' };
@@ -2856,12 +2698,33 @@ function createRelayTransport(io: TransportIO): Transport {
       const info = await io.bridge<HelloPayload>('info');
       if (info) {
         emit({ type: 'hello', version: info.protocol, payload: info });
+        startInfoRefresh();
         return true;
       }
     } catch {
       /* page not ready */
     }
     return false;
+  }
+
+  // The status tooltip (overhead, commits) and the truncation banner come from `info()`, which otherwise
+  // only runs at attach time; refresh it while connected so they stay current.
+  let infoTimer: ReturnType<typeof setInterval> | null = null;
+  function startInfoRefresh(): void {
+    if (infoTimer) return;
+    infoTimer = setInterval(() => {
+      if (disposed) return stopInfoRefresh();
+      io.bridge<HelloPayload>('info')
+        .then((info) => {
+          if (info) emit({ type: 'hello', version: info.protocol, payload: info });
+          else stopInfoRefresh(); // the page went away; the disconnect / navigation paths re-attach
+        })
+        .catch(() => stopInfoRefresh());
+    }, INFO_REFRESH_MS);
+  }
+  function stopInfoRefresh(): void {
+    if (infoTimer) clearInterval(infoTimer);
+    infoTimer = null;
   }
 
   // Handshake retries: a page answers `info` only once the library has loaded, which can be well after the
@@ -2874,6 +2737,7 @@ function createRelayTransport(io: TransportIO): Transport {
     syncGen++;
     if (syncTimer) clearTimeout(syncTimer);
     syncTimer = null;
+    stopInfoRefresh();
   }
   /** `syncWithPage` until it succeeds (then `onReady`), with backoff; supersedes any earlier attempt. */
   function syncWithRetry(onReady: () => void, initialDelay = 0): void {

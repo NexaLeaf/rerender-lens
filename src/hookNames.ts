@@ -34,6 +34,9 @@ const NODE_COUNT: Record<string, number> = {
   useCacheRefresh: 1,
 };
 
+/** Every React primitive: frames with these names are React's own wrappers, never a custom hook. */
+const BUILTIN_HOOKS = new Set([...Object.keys(NODE_COUNT), 'useContext', 'useDebugValue', 'use']);
+
 const noop = (): void => {};
 
 /** Function names in the frames between our dispatcher and the component (innermost first). */
@@ -49,7 +52,9 @@ export function customHooksFromStack(stack: string, componentName: string, marke
       continue;
     }
     if (name === componentName || name.endsWith('.' + componentName)) break;
-    if (/^use[A-Z0-9_]/.test(name)) names.push(name);
+    // React 18's `react` entry wraps each primitive in a named function (`useState` -> dispatcher.useState),
+    // which puts a frame with the primitive's own name between our dispatcher and the custom hook.
+    if (/^use[A-Z0-9_]/.test(name) && !BUILTIN_HOOKS.has(name)) names.push(name);
     if (names.length > 8) break;
   }
   return names;

@@ -137,7 +137,7 @@ export interface RenderReport {
 }
 
 /**
- * The fields the analysis helpers (`fixesFor`, `rankFixes`, `summarizeReports`, `summarize`) read,
+ * The fields the analysis helpers (`fixesFor`, `rankFixes`, `analyzeCommit`, `rankRootCauses`, `summarizeReports`, `summarize`) read,
  * as a structural type: both a live `RenderReport` and the DevTools panel's serialized report satisfy
  * it, so the panel and the library share one implementation without casts.
  */
@@ -167,6 +167,12 @@ export interface ReportLike {
   path: string[];
   selfDuration?: number;
   time: number;
+  /** Shared by every report of one React commit; the root-cause analysis groups by it. 0/absent = unknown. */
+  commitId?: number;
+  updaters?: string[];
+  commitCause?: string;
+  afterCommit?: number;
+  contexts?: { name: string; value: unknown }[];
 }
 
 export type Notifier = (report: RenderReport) => void;

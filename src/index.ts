@@ -26,6 +26,8 @@ export { buildReport, summarize, printReport, hookLabel, storeAdvice, KIND_LABEL
 export { resolveHookNames, customHooksFromStack } from './hookNames';
 export { fixesFor, rankFixes, formatFixes, fixKey, shortValue, AVOIDABLE_KINDS } from './fixes';
 export type { Fix, FixKind, RankedFix } from './fixes';
+export { analyzeCommit, rootCauseOf, indexByComponent, contextAttribution, cascadeTree, rootCauseSummary, groupByCommit, rankRootCauses, formatRootCauses } from './causes';
+export type { CommitAnalysis, RootCause, ContextStat, CascadeNode, RootSummary, RankedRootCause } from './causes';
 export { summarizeReports, compareSummaries, summarizeSession, compareSessions, formatComparison, parseExport } from './sessions';
 export type { SessionSummary, Comparison, CompareRow } from './sessions';
 export { checkBudget, toBudget, assertWithinBudget, avoidableCounts } from './budget';

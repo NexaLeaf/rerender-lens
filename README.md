@@ -76,7 +76,7 @@ Edge packaging, and the store listing.
 npm i -D rerender-lens
 ```
 
-Peer dependency: `react >= 16.8`. Tested with React 18 and 19.
+Peer dependency: `react >= 16.8`. The test suite runs on React 19 and React 18 in CI.
 
 ## One-line setup per bundler
 
@@ -307,7 +307,8 @@ collector.summary('after');   // a session summary, comparable with compareSumma
 The `rerender-lens` CLI does the same with files from the extension (Export) or from `summary()`:
 
 ```sh
-npx rerender-lens fixes export.json                 # ranked fixes
+npx rerender-lens fixes export.json                 # ranked fixes, then the root causes
+npx rerender-lens causes export.json                # root causes only: which component started each commit's cascade
 npx rerender-lens summary export.json --out before.json
 npx rerender-lens compare before.json after.json    # per-component deltas; exit 1 on regressions
 npx rerender-lens budget export.json --init > rerender-budget.json

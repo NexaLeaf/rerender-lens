@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Root causes outside the panel. The commit analysis the DevTools panel had (`analyzeCommit`,
+  `rootCauseOf`, `contextAttribution`, `cascadeTree`, `rootCauseSummary`) moved into the library
+  (`src/causes.ts`, exported from `rerender-lens`) with `groupByCommit`, `rankRootCauses` and
+  `formatRootCauses` on top; the panel imports it. `formatFixes` (the CLI `fixes` command, the
+  Vitest reporter, `collector.assertNoAvoidable`, budget failures) now ends with a "Root causes"
+  section when the reports carry `commitId` (`<Page> (state) started 3 commits, 12 avoidable
+  re-renders`), and `rerender-lens causes export.json` prints that table alone.
 - The DevTools panel and the library now share one implementation of fixes (`fixesFor`,
   `rankFixes`), session summaries (`summarizeReports`/`summarizeSession`,
   `compareSummaries`/`compareSessions`) and diff paths (`firstDifferentPath`, `diffLeaves`), typed
@@ -14,6 +21,12 @@
   production builds; and a panel that opened after the app had connected to the relay never
   attached (the relay now greets each panel with the current app count, and the panel sends its
   first command only after that greeting, so no reply is lost to the connection race).
+- **React 18 in CI.** `npm run test:react18` runs the whole unit suite against React 18 (CI job
+  `react18`). It found one bug: with React 18 the custom hook name replay listed React's own
+  `useState` wrapper as if it were a custom hook (`useState › useCounter › useCart`); frames named
+  like a React primitive are now skipped.
+- The panel re-reads `info()` every 3 s while connected, so the overhead readout, the enabled
+  flag and the "reports skipped" banner stay current instead of reflecting the moment it attached.
 - `npm run test:built` (in `check` and CI) loads the three built vendor scripts in order and drives
   a React re-render through them; before, that test always skipped in CI because tests ran
   before the build.

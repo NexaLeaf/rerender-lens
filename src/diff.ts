@@ -158,6 +158,9 @@ function deepEqualObjects(a: object, b: object, seen: Seen): boolean {
   return false;
 }
 
+/** Change kinds that mean "new reference, same contents": the ones a fix removes. */
+export const AVOIDABLE_KINDS: ReadonlySet<string> = new Set<ChangeKind>(['deep-equal', 'function', 'element']);
+
 /** Classify why two values differ. Assumes `!Object.is(prev, next)`. */
 export function classify(prev: unknown, next: unknown): ChangeKind {
   if (typeof prev === 'function' && typeof next === 'function') {

@@ -3,7 +3,7 @@ import React from 'react';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkBudget, compareSummaries, createCollector, disable, formatComparison, formatFixes, init, parseExport, rankFixes, summarizeReports, toBudget, track } from '../src/index';
+import { analyzeCommit, checkBudget, compareSummaries, createCollector, disable, formatComparison, formatFixes, formatRootCauses, groupByCommit, init, parseExport, rankFixes, rankRootCauses, rootCauseOf, rootCauseSummary, summarizeReports, toBudget, track } from '../src/index';
 import { main } from '../src/cli';
 import { h, mount } from './helpers';
 
@@ -50,6 +50,49 @@ describe('fixes, budgets and sessions in the library', () => {
     expect(formatFixes(collector.reports)).toContain(' 1. useCallback(onSelect) in <Parent>  (removes 2: <Row> x2)');
     expect(formatFixes(collector.reports)).toContain(' 3. Wrap <Plain> in React.memo  (removes 2: <Plain> x2)');
     expect(() => collector.assertNoAvoidable()).toThrow(/Fixes, most impact first:\n 1\. /);
+  });
+
+  it('root causes: commits group by commitId and trace back to the component whose state changed', () => {
+    const collector = collectSample(2);
+    const commits = groupByCommit(collector.reports);
+    expect([...commits.values()].map((c) => c.map((r) => r.component))).toEqual([
+      ['Row', 'Plain'],
+      ['Row', 'Plain'],
+    ]);
+    const [first] = [...commits.values()];
+    // <Parent> is not tracked, so the walk stops at the parent link itself
+    expect(rootCauseOf(first![0]!, first!)).toEqual({ name: 'Parent', trigger: 'state', report: null });
+    const a = analyzeCommit(first!);
+    expect(a.id).toBe(first![0]!.commitId);
+    expect(a.avoidable).toBe(2);
+    expect(a.roots).toEqual([{ name: 'Parent', trigger: 'state', count: 2, components: new Map([['Row', 1], ['Plain', 1]]) }]);
+    expect(a.rootByReport.get(first![1]!)).toBe('Parent');
+    const s = rootCauseSummary('Parent', commits);
+    expect(s.total).toBe(4);
+    expect(s.commits.map((c) => c.key)).toEqual([...commits.keys()].reverse());
+    expect(s.affected).toHaveLength(4);
+    expect(rankRootCauses(collector.reports)).toEqual([{ name: 'Parent', trigger: 'state', commits: 2, count: 4, components: new Map([['Row', 2], ['Plain', 2]]) }]);
+    expect(formatRootCauses(collector.reports)).toBe(' 1. <Parent> (state) started 2 commits, 4 avoidable re-renders  (<Row> x2, <Plain> x2)');
+    // a tracked ancestor in the same commit becomes the root; the walk follows parent links through it
+    const page = { ...first![0]!, component: 'Page', path: ['App'], trigger: 'state' as const, avoidable: false, parent: null };
+    const list = { ...first![0]!, component: 'List', path: ['App', 'Page'], parent: { name: 'Page', trigger: 'state' as const } };
+    const row = { ...first![1]!, component: 'Row', path: ['App', 'Page', 'List'], parent: { name: 'List', trigger: 'parent' as const } };
+    expect(rootCauseOf(row, [page, list, row])).toMatchObject({ name: 'Page', trigger: 'state', report: page });
+    expect(rootCauseOf(page, [page, list, row])).toBeNull();
+    // no commit ids (useWhyRerender reports): nothing to rank
+    expect(rankRootCauses(collector.reports.map((r) => ({ ...r, commitId: 0 })))).toEqual([]);
+    expect(formatRootCauses([])).toBe('');
+  });
+
+  it('formatFixes appends the root causes after the fixes when reports carry commit ids', () => {
+    const collector = collectSample(3);
+    const text = formatFixes(collector.reports);
+    const [fixes, roots] = text.split('\n\nRoot causes:\n');
+    expect(fixes).toMatch(/^ 1\. useCallback\(onSelect\) in <Parent>  \(removes 3: <Row> x3\)\n 2\. /);
+    expect(fixes).not.toContain('Root causes');
+    expect(roots).toBe(' 1. <Parent> (state) started 3 commits, 6 avoidable re-renders  (<Row> x3, <Plain> x3)');
+    expect(formatFixes(collector.reports.map((r) => ({ ...r, commitId: 0 })))).not.toContain('Root causes');
+    expect(() => collector.assertNoAvoidable()).toThrow(/Root causes:\n 1\. <Parent> \(state\) started 3 commits/);
   });
 
   it('budgets: check, init and assert', () => {
@@ -99,7 +142,17 @@ describe('fixes, budgets and sessions in the library', () => {
     try {
       expect(main(['fixes', before])).toBe(0);
       expect(out.join('\n')).toContain('1. useCallback(onSelect) in <Parent>');
+      expect(out.join('\n')).toContain('Root causes:\n 1. <Parent> (state) started 3 commits, 6 avoidable re-renders');
       out.length = 0;
+      expect(main(['causes', before])).toBe(0);
+      expect(out.join('\n')).toBe(' 1. <Parent> (state) started 3 commits, 6 avoidable re-renders  (<Row> x3, <Plain> x3)');
+      out.length = 0;
+      expect(main(['causes', before, '--limit', '0'])).toBe(0);
+      expect(out.join('\n')).toBe('    … 1 more');
+      out.length = 0;
+      expect(main(['causes'])).toBe(1);
+      expect(err.join('\n')).toContain('usage: rerender-lens causes');
+      err.length = 0;
       const summaryFile = join(dir, 'summary.json');
       expect(main(['summary', before, '--out', summaryFile])).toBe(0);
       expect(JSON.parse(readFileSync(summaryFile, 'utf8')).avoidable).toBe(6);

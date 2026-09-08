@@ -119,29 +119,31 @@ describe('standalone panel (side panel / window)', () => {
     expect(infos()).toBe(7);
     expect(got.some((m) => m.type === 'hello')).toBe(true);
     expect(got.some((m) => m.type === 'polling' && m.on === true)).toBe(true);
+    // while connected, `info` is re-read every 3 s (overhead, truncated count): three more in 10 s
     await vi.advanceTimersByTimeAsync(10000);
-    expect(infos()).toBe(7);
+    expect(infos()).toBe(10);
+    expect(got.filter((m) => m.type === 'hello').length).toBeGreaterThanOrEqual(4);
     expect(calls.filter((c) => c === 'pull').length).toBeGreaterThan(1);
 
-    // navigation: the first `info` waits 1.2 s; a second navigation before that cancels it and starts over
+    // navigation: the refresh stops; the first `info` waits 1.2 s; a second navigation before that cancels it and starts over
     answer = false;
     const polls = calls.filter((c) => c === 'pull').length;
     navigate();
     expect(got.at(-1)).toEqual({ type: 'navigated' });
     await vi.advanceTimersByTimeAsync(1100);
-    expect(infos()).toBe(7);
+    expect(infos()).toBe(10);
     navigate();
     await vi.advanceTimersByTimeAsync(1100);
-    expect(infos()).toBe(7);
+    expect(infos()).toBe(10);
     await vi.advanceTimersByTimeAsync(100);
-    expect(infos()).toBe(8);
+    expect(infos()).toBe(11);
     await vi.advanceTimersByTimeAsync(500);
-    expect(infos()).toBe(9);
+    expect(infos()).toBe(12);
     expect(calls.filter((c) => c === 'pull').length).toBe(polls); // polling stayed off
 
     transport.dispose();
     await vi.advanceTimersByTimeAsync(120000);
-    expect(infos()).toBe(9);
+    expect(infos()).toBe(12);
     expect(vi.getTimerCount()).toBe(0);
   });
 

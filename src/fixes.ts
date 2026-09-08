@@ -4,6 +4,10 @@
  * DevTools panel (serialized reports): everything here reads only `ReportLike`. Pure.
  */
 import type { ChangeLike, RenderReport, ReportLike } from './types';
+import { AVOIDABLE_KINDS } from './diff';
+import { formatRootCauses } from './causes';
+
+export { AVOIDABLE_KINDS };
 
 export type FixKind = 'memo' | 'useCallback' | 'useMemo' | 'useMemoElement' | 'children' | 'contextValue' | 'splitContext' | 'storeSnapshot' | 'bailout';
 
@@ -29,8 +33,6 @@ export interface RankedFix<R extends ReportLike = RenderReport> extends Fix {
   reports: R[];
 }
 
-/** Change kinds that mean "new reference, same contents": the ones a fix removes. */
-export const AVOIDABLE_KINDS: ReadonlySet<string> = new Set<string>(['deep-equal', 'function', 'element']);
 const MAX_FIX_REPORTS = 50;
 const rootOf = (path: string): string => path.split(/[.[]/)[0] || path;
 const identifier = (name: string): string => (/^[A-Za-z_$][\w$]*$/.test(name) ? name : 'value');
@@ -210,11 +212,16 @@ export function rankFixes<R extends ReportLike>(reports: readonly R[]): RankedFi
   return [...byKey.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
 }
 
-/** Multi-line text for a test failure or a CI log. */
+/**
+ * Multi-line text for a test failure or a CI log: the ranked fixes, then (when the reports carry
+ * `commitId`) a "Root causes" section naming the components whose own changes started the cascades.
+ */
 export function formatFixes(reports: readonly ReportLike[], limit = 10): string {
   const ranked = rankFixes(reports);
   if (!ranked.length) return 'No avoidable re-renders.';
   const lines = ranked.slice(0, limit).map((f, i) => `${String(i + 1).padStart(2)}. ${f.label}  (removes ${f.count}: ${Object.entries(f.components).map(([c, n]) => `<${c}>${n > 1 ? ' x' + n : ''}`).join(', ')})`);
   if (ranked.length > limit) lines.push(`    … ${ranked.length - limit} more`);
+  const roots = formatRootCauses(reports, 5);
+  if (roots) lines.push('', 'Root causes:', roots);
   return lines.join('\n');
 }

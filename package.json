@@ -123,7 +123,8 @@
     "prepublishOnly": "npm run check",
     "dev:example": "npm run build && npm --prefix examples/vite-react run dev",
     "test:built": "vitest run test/vendor.test.ts",
-    "e2e:next": "playwright test -c e2e/next.config.ts"
+    "e2e:next": "playwright test -c e2e/next.config.ts",
+    "test:react18": "npm install --prefix .react18 --no-save --no-package-lock --no-audit --no-fund react@18 react-dom@18 && vitest run --config test/react-compat.config.ts"
   },
   "peerDependencies": {
     "react": ">=16.8.0",

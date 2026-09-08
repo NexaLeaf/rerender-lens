@@ -120,6 +120,7 @@
     }
     return false;
   }
+  var AVOIDABLE_KINDS = /* @__PURE__ */ new Set(["deep-equal", "function", "element"]);
   function joinPath(base, key) {
     if (typeof key === "number") return `${base}[${key}]`;
     if (base === "") return key;
@@ -161,8 +162,124 @@
     return out;
   }
 
+  // src/causes.ts
+  var isAncestorReport = (anc, r) => anc.path.length < r.path.length && r.path[anc.path.length] === anc.component && anc.path.every((p, i) => r.path[i] === p);
+  var bump = (m, key, n = 1) => void m.set(key, (m.get(key) || 0) + n);
+  function indexByComponent(reports) {
+    const index = /* @__PURE__ */ new Map();
+    for (const r of reports) {
+      const list = index.get(r.component);
+      if (list) list.push(r);
+      else index.set(r.component, [r]);
+    }
+    return index;
+  }
+  function rootCauseOf(r, commitReports, index = indexByComponent(commitReports)) {
+    let cur = r;
+    const seen = /* @__PURE__ */ new Set([r]);
+    while (cur.trigger === "parent" && cur.parent) {
+      const parent = cur.parent;
+      const candidates = index.get(parent.name);
+      const p = candidates && candidates.find((x) => isAncestorReport(x, cur));
+      if (!p || seen.has(p)) return { name: parent.name, trigger: parent.trigger, report: null };
+      seen.add(p);
+      cur = p;
+    }
+    return cur === r ? null : { name: cur.component, trigger: cur.trigger, report: cur };
+  }
+  function rootCausesOf(reports) {
+    const roots = /* @__PURE__ */ new Map();
+    const rootByReport = /* @__PURE__ */ new Map();
+    const index = indexByComponent(reports);
+    let avoidable = 0;
+    let wasted = 0;
+    for (const r of reports) {
+      if (!r.avoidable) continue;
+      avoidable++;
+      if (typeof r.selfDuration === "number") wasted += r.selfDuration;
+      const root = rootCauseOf(r, reports, index);
+      const name = root ? root.name : r.parent && r.parent.name || "(unknown)";
+      const trigger = root ? root.trigger : r.parent && r.parent.trigger || "parent";
+      rootByReport.set(r, name);
+      let agg = roots.get(name);
+      if (!agg) {
+        agg = { name, trigger, count: 0, components: /* @__PURE__ */ new Map() };
+        roots.set(name, agg);
+      }
+      agg.count++;
+      bump(agg.components, r.component);
+    }
+    return { roots: [...roots.values()].sort((a, b) => b.count - a.count), rootByReport, avoidable, wasted };
+  }
+  function analyzeCommit(reports) {
+    const first = reports[0];
+    return {
+      id: first && typeof first.commitId === "number" ? first.commitId : 0,
+      total: reports.length,
+      ...rootCausesOf(reports),
+      contexts: contextAttribution(reports),
+      reports
+    };
+  }
+  function contextAttribution(reports) {
+    const byCtx = /* @__PURE__ */ new Map();
+    for (const r of reports) {
+      for (const c of r.hookChanges || []) {
+        if (c.hook !== "useContext" && !/^useContext/.test(c.path)) continue;
+        const m = /useContext\((.*)\)/.exec(c.path);
+        const name = m && m[1] ? m[1] : c.path;
+        let agg = byCtx.get(name);
+        if (!agg) {
+          agg = { name, consumers: 0, avoidable: 0, components: /* @__PURE__ */ new Map(), commits: /* @__PURE__ */ new Set(), providers: /* @__PURE__ */ new Map(), changedKeys: /* @__PURE__ */ new Set(), totalKeys: 0 };
+          byCtx.set(name, agg);
+        }
+        agg.consumers++;
+        if (AVOIDABLE_KINDS.has(c.kind)) agg.avoidable++;
+        bump(agg.components, r.component);
+        agg.commits.add(typeof r.commitId === "number" ? r.commitId : 0);
+        if (c.provider && c.provider.component) bump(agg.providers, c.provider.component);
+        if (c.changedKeys) for (const k of c.changedKeys) agg.changedKeys.add(k);
+        if (typeof c.totalKeys === "number") agg.totalKeys = Math.max(agg.totalKeys, c.totalKeys);
+      }
+    }
+    return [...byCtx.values()].sort((a, b) => b.consumers - a.consumers);
+  }
+  function cascadeTree(reports) {
+    const root = { name: "", children: /* @__PURE__ */ new Map(), report: null };
+    for (const r of reports) {
+      let node = root;
+      for (const seg of r.path.concat([r.component])) {
+        let next = node.children.get(seg);
+        if (!next) {
+          next = { name: seg, children: /* @__PURE__ */ new Map(), report: null };
+          node.children.set(seg, next);
+        }
+        node = next;
+      }
+      if (!node.report || r.avoidable) node.report = r;
+      node.count = (node.count || 0) + 1;
+      if (r.avoidable) node.avoidable = (node.avoidable || 0) + 1;
+    }
+    return root;
+  }
+  function rootCauseSummary(name, commits, analyze) {
+    const analyzeFn = analyze || ((_, reports) => analyzeCommit(reports));
+    const out = { name, trigger: "parent", commits: [], total: 0, components: /* @__PURE__ */ new Map(), affected: [] };
+    for (const [key, reports] of commits) {
+      const analysis = analyzeFn(key, reports);
+      const root = analysis.roots.find((x) => x.name === name);
+      if (!root) continue;
+      out.trigger = root.trigger;
+      out.commits.push({ key, analysis, count: root.count, components: root.components });
+      out.total += root.count;
+      for (const [c, n] of root.components) bump(out.components, c, n);
+      for (const r of reports) if (r.avoidable && analysis.rootByReport.get(r) === name) out.affected.push(r);
+    }
+    out.commits.reverse();
+    return out;
+  }
+
   // src/fixes.ts
-  var AVOIDABLE_KINDS = /* @__PURE__ */ new Set(["deep-equal", "function", "element"]);
   var MAX_FIX_REPORTS = 50;
   var rootOf = (path) => path.split(/[.[]/)[0] || path;
   var identifier = (name) => /^[A-Za-z_$][\w$]*$/.test(name) ? name : "value";
@@ -455,6 +572,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
   var SYNC_RETRY_MAX = 5e3;
   var SYNC_RETRIES = 20;
   var NAVIGATION_SETTLE = 1200;
+  var INFO_REFRESH_MS = 3e3;
   var ROW_H = 22;
   var ITEM_H = 20;
   var OVERSCAN = 8;
@@ -574,122 +692,13 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     );
     return d;
   }
-  var isAncestorReport = (anc, r) => anc.path.length < r.path.length && r.path[anc.path.length] === anc.component && anc.path.every((p, i) => r.path[i] === p);
-  function indexByComponent(reports) {
-    const index = /* @__PURE__ */ new Map();
-    for (const r of reports) {
-      const list = index.get(r.component);
-      if (list) list.push(r);
-      else index.set(r.component, [r]);
-    }
-    return index;
-  }
-  function rootCauseOf(r, commitReports, index = indexByComponent(commitReports)) {
-    let cur = r;
-    const seen = /* @__PURE__ */ new Set([r]);
-    while (cur.trigger === "parent" && cur.parent) {
-      const parent = cur.parent;
-      const candidates = index.get(parent.name);
-      const p = candidates && candidates.find((x) => isAncestorReport(x, cur));
-      if (!p || seen.has(p)) return { name: parent.name, trigger: parent.trigger, report: null };
-      seen.add(p);
-      cur = p;
-    }
-    return cur === r ? null : { name: cur.component, trigger: cur.trigger, report: cur };
-  }
-  function analyzeCommit(reports) {
-    const roots = /* @__PURE__ */ new Map();
-    const rootByReport = /* @__PURE__ */ new Map();
-    const index = indexByComponent(reports);
-    let avoidable = 0;
-    let wasted = 0;
-    for (const r of reports) {
-      if (!r.avoidable) continue;
-      avoidable++;
-      if (typeof r.selfDuration === "number") wasted += r.selfDuration;
-      const root = rootCauseOf(r, reports, index);
-      const name = root ? root.name : r.parent && r.parent.name || "(unknown)";
-      const trigger = root ? root.trigger : r.parent && r.parent.trigger || "parent";
-      rootByReport.set(r, name);
-      let agg = roots.get(name);
-      if (!agg) {
-        agg = { name, trigger, count: 0, components: /* @__PURE__ */ new Map() };
-        roots.set(name, agg);
-      }
-      agg.count++;
-      agg.components.set(r.component, (agg.components.get(r.component) || 0) + 1);
-    }
+  function analyzeCommit2(reports) {
     const first = reports[0];
-    return {
-      id: first ? first.commitId : 0,
-      receivedAt: first ? first.receivedAt : 0,
-      total: reports.length,
-      avoidable,
-      wasted,
-      roots: [...roots.values()].sort((a, b) => b.count - a.count),
-      rootByReport,
-      contexts: contextAttribution(reports),
-      fixes: rankFixes(reports),
-      reports
-    };
+    return { ...analyzeCommit(reports), receivedAt: first ? first.receivedAt : 0, fixes: rankFixes(reports) };
   }
-  function contextAttribution(reports) {
-    const byCtx = /* @__PURE__ */ new Map();
-    for (const r of reports) {
-      for (const c of r.hookChanges || []) {
-        if (c.hook !== "useContext" && !/^useContext/.test(c.path)) continue;
-        const m = /useContext\((.*)\)/.exec(c.path);
-        const name = m && m[1] ? m[1] : c.path;
-        let agg = byCtx.get(name);
-        if (!agg) {
-          agg = { name, consumers: 0, avoidable: 0, components: /* @__PURE__ */ new Map(), commits: /* @__PURE__ */ new Set(), providers: /* @__PURE__ */ new Map(), changedKeys: /* @__PURE__ */ new Set(), totalKeys: 0 };
-          byCtx.set(name, agg);
-        }
-        agg.consumers++;
-        if (AVOIDABLE_KINDS.has(c.kind)) agg.avoidable++;
-        agg.components.set(r.component, (agg.components.get(r.component) || 0) + 1);
-        agg.commits.add(r.commitId);
-        if (c.provider && c.provider.component) agg.providers.set(c.provider.component, (agg.providers.get(c.provider.component) || 0) + 1);
-        if (c.changedKeys) for (const k of c.changedKeys) agg.changedKeys.add(k);
-        if (typeof c.totalKeys === "number") agg.totalKeys = Math.max(agg.totalKeys, c.totalKeys);
-      }
-    }
-    return [...byCtx.values()].sort((a, b) => b.consumers - a.consumers);
-  }
-  function cascadeTree(reports) {
-    const root = { name: "", children: /* @__PURE__ */ new Map(), report: null };
-    for (const r of reports) {
-      let node = root;
-      for (const seg of r.path.concat([r.component])) {
-        let next = node.children.get(seg);
-        if (!next) {
-          next = { name: seg, children: /* @__PURE__ */ new Map(), report: null };
-          node.children.set(seg, next);
-        }
-        node = next;
-      }
-      if (!node.report || r.avoidable) node.report = r;
-      node.count = (node.count || 0) + 1;
-      if (r.avoidable) node.avoidable = (node.avoidable || 0) + 1;
-    }
-    return root;
-  }
-  function rootCauseSummary(name, commits, analyze = (_, reports) => analyzeCommit(reports)) {
-    const out = { name, trigger: "parent", commits: [], total: 0, components: /* @__PURE__ */ new Map(), fixes: [] };
-    const affected = [];
-    for (const [key, reports] of commits) {
-      const analysis = analyze(key, reports);
-      const root = analysis.roots.find((x) => x.name === name);
-      if (!root) continue;
-      out.trigger = root.trigger;
-      out.commits.push({ key, analysis, count: root.count, components: root.components });
-      out.total += root.count;
-      for (const [c, n] of root.components) out.components.set(c, (out.components.get(c) || 0) + n);
-      for (const r of reports) if (r.avoidable && analysis.rootByReport.get(r) === name) affected.push(r);
-    }
-    out.commits.reverse();
-    out.fixes = rankFixes(affected);
-    return out;
+  function rootCauseSummary2(name, commits, analyze = (_, reports) => analyzeCommit2(reports)) {
+    const s = rootCauseSummary(name, commits, analyze);
+    return { ...s, fixes: rankFixes(s.affected) };
   }
   var PRIORITY_LABEL = { immediate: "discrete input", "user-blocking": "continuous input", normal: "transition / async", low: "low", idle: "idle" };
   function sourceContext(text, line, around = 3) {
@@ -1386,7 +1395,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     function analysisFor(key, reports) {
       const cached = commitAnalyses.get(key);
       if (cached && cached.len === reports.length) return cached.analysis;
-      const analysis = analyzeCommit(reports);
+      const analysis = analyzeCommit2(reports);
       commitAnalyses.set(key, { len: reports.length, analysis });
       return analysis;
     }
@@ -2117,7 +2126,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     }
     function renderRootDetails() {
       const name = state.selectedRoot;
-      const s = rootCauseSummary(name, state.commits, analysisFor);
+      const s = rootCauseSummary2(name, state.commits, analysisFor);
       details.append(
         el("div", { class: "details-header" }, [
           el("span", { class: "title" }, ["Root cause ", el("span", { class: "name", text: `<${name}>` })]),
@@ -2726,11 +2735,27 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         const info = await io.bridge("info");
         if (info) {
           emit({ type: "hello", version: info.protocol, payload: info });
+          startInfoRefresh();
           return true;
         }
       } catch {
       }
       return false;
+    }
+    let infoTimer = null;
+    function startInfoRefresh() {
+      if (infoTimer) return;
+      infoTimer = setInterval(() => {
+        if (disposed) return stopInfoRefresh();
+        io.bridge("info").then((info) => {
+          if (info) emit({ type: "hello", version: info.protocol, payload: info });
+          else stopInfoRefresh();
+        }).catch(() => stopInfoRefresh());
+      }, INFO_REFRESH_MS);
+    }
+    function stopInfoRefresh() {
+      if (infoTimer) clearInterval(infoTimer);
+      infoTimer = null;
     }
     let syncGen = 0;
     let syncTimer = null;
@@ -2739,6 +2764,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       syncGen++;
       if (syncTimer) clearTimeout(syncTimer);
       syncTimer = null;
+      stopInfoRefresh();
     }
     function syncWithRetry(onReady, initialDelay = 0) {
       cancelSync();
@@ -3407,7 +3433,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     createBroadcastTransport,
     createRelayClientTransport,
     sourceContext,
-    analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary, summarizeSession, compareSessions }
+    analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit: analyzeCommit2, contextAttribution, cascadeTree, rootCauseSummary: rootCauseSummary2, summarizeSession, compareSessions }
   };
   window.RerenderLensPanel = api;
   var hasChrome = typeof chrome !== "undefined" && !!chrome && !!chrome.runtime && !!chrome.runtime.id;
