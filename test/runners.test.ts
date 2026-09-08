@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import React from 'react';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { disable, track } from '../src/index';
@@ -26,12 +26,17 @@ function makeParent(child: (n: number) => React.ReactElement) {
 
 describe('rerender-lens/playwright', () => {
   it('installs the bundle at document start with the options, pulls reports and asserts a budget', async () => {
-    const script = installScript({ include: ['Row', '/^Grid/i'], relay: 'http://127.0.0.1:4141' });
-    expect(script).toContain('RerenderLens'); // the IIFE bundle
+    // The packaged bundle is a build output (gitignored); the test stays hermetic with a stand-in.
+    const bundle = '/* stand-in bundle */ window.RerenderLens = {};';
+    const script = installScript({ bundle, include: ['Row', '/^Grid/i'], relay: 'http://127.0.0.1:4141' });
+    expect(script.startsWith(bundle)).toBe(true);
     expect(script).toContain('"include":["Row","/^Grid/i"]');
     expect(script).toContain('"silent":true');
     expect(script).toContain('createDevtoolsNotifier({"relay":"http://127.0.0.1:4141"})');
-    expect(installScript()).toContain('createDevtoolsNotifier({})');
+    expect(installScript({ bundle })).toContain('createDevtoolsNotifier({})');
+    const vendor = join(__dirname, '..', 'extension', 'vendor', 'rerender-lens.js');
+    if (existsSync(vendor)) expect(installScript()).toContain('RerenderLens'); // the real IIFE bundle after `npm run build`
+    else expect(() => installScript()).toThrow(/bundle not found/);
 
     const calls: string[] = [];
     let running = false;
@@ -48,7 +53,7 @@ describe('rerender-lens/playwright', () => {
       },
     };
     await expect(pullReports(page)).rejects.toThrow(/installRerenderLens/);
-    await installRerenderLens(page, { trackAllComponents: true });
+    await installRerenderLens(page, { bundle, trackAllComponents: true });
     expect(calls[0]).toContain('"trackAllComponents":true');
     const reports = await pullReports(page);
     expect(reports.map((r) => r.component)).toEqual(['Row']);

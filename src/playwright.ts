@@ -30,6 +30,8 @@ export interface InstallOptions extends SerializableOptions {
   relay?: string;
   /** Print to the page console (default false in tests). */
   silent?: boolean;
+  /** Library source to inject instead of the packaged IIFE bundle (must define `window.RerenderLens`). */
+  bundle?: string;
 }
 
 let bundleCache: string | null = null;
@@ -51,9 +53,9 @@ export function libraryBundle(): string {
 
 /** Script that starts the library with `options` before any page script runs. */
 export function installScript(options: InstallOptions = {}): string {
-  const { relay, ...rest } = options;
+  const { relay, bundle, ...rest } = options;
   const opts: InstallOptions = { trackAllMemoized: true, silent: true, ...rest };
-  return `${libraryBundle()}\n;(function(){\n  if (window.__RERENDER_LENS_DEVTOOLS__) return;\n  var L = window.RerenderLens;\n  L.ensureDevtoolsHook();\n  var o = ${JSON.stringify(opts)};\n  o.notifier = L.createDevtoolsNotifier(${relay ? JSON.stringify({ relay }) : '{}'});\n  if (o.include) o.include = o.include.map(function (m) { var r = /^\\/(.+)\\/([a-z]*)$/.exec(m); return r ? new RegExp(r[1], r[2]) : m; });\n  if (o.exclude) o.exclude = o.exclude.map(function (m) { var r = /^\\/(.+)\\/([a-z]*)$/.exec(m); return r ? new RegExp(r[1], r[2]) : m; });\n  L.init(o);\n  window.__RERENDER_LENS_PLAYWRIGHT__ = true;\n})();`;
+  return `${bundle ?? libraryBundle()}\n;(function(){\n  if (window.__RERENDER_LENS_DEVTOOLS__) return;\n  var L = window.RerenderLens;\n  L.ensureDevtoolsHook();\n  var o = ${JSON.stringify(opts)};\n  o.notifier = L.createDevtoolsNotifier(${relay ? JSON.stringify({ relay }) : '{}'});\n  if (o.include) o.include = o.include.map(function (m) { var r = /^\\/(.+)\\/([a-z]*)$/.exec(m); return r ? new RegExp(r[1], r[2]) : m; });\n  if (o.exclude) o.exclude = o.exclude.map(function (m) { var r = /^\\/(.+)\\/([a-z]*)$/.exec(m); return r ? new RegExp(r[1], r[2]) : m; });\n  L.init(o);\n  window.__RERENDER_LENS_PLAYWRIGHT__ = true;\n})();`;
 }
 
 /** Call before `page.goto`. */
