@@ -38,7 +38,7 @@ const report = (over: Record<string, unknown> = {}) => ({
 });
 
 interface Panel {
-  state: { reports: unknown[]; selectedKey: string | null; paused: boolean; view: string; tab: string; library: unknown; relay: boolean; flashOn: boolean; recording: unknown; sessions: { name: string }[] };
+  state: { reports: unknown[]; selectedKey: string | null; paused: boolean; view: string; tab: string; library: unknown; relay: boolean; flashOn: boolean; recording: unknown; sessions: { name: string }[]; sort: { key: string; dir: number }; columns: string[]; notes: Record<string, { note?: string; muted?: boolean }> };
   handle(m: unknown): void;
   flush(): void;
   select(name: string): void;
@@ -48,6 +48,7 @@ interface Panel {
   openSettings(): void;
   startRecording(name?: string): { id: string; name: string };
   stopRecording(): { id: string; name: string; avoidable: number; fixes: { label: string }[] } | null;
+  setNote(component: string, note: { note?: string; muted?: boolean }): void;
 }
 interface Fix { kind: string; owner: string; prop: string | null; label: string; detail: string; snippet: string; count?: number; key?: string }
 interface Factory {
@@ -73,7 +74,11 @@ interface Factory {
   };
 }
 
-const names = (root: HTMLElement) => [...root.querySelectorAll('.row .name')].map((n) => n.textContent);
+/** Visible tree names in visual order (virtual rows are absolutely positioned and reused, so DOM order is not visual order). */
+const names = (root: HTMLElement) =>
+  [...root.querySelectorAll<HTMLElement>('.row')]
+    .sort((a, b) => parseInt(a.style.top || '0', 10) - parseInt(b.style.top || '0', 10))
+    .map((n) => n.querySelector('.name')!.textContent);
 const buttons = (root: HTMLElement, sel: string) => [...root.querySelectorAll(sel)] as HTMLButtonElement[];
 const button = (root: HTMLElement, sel: string, text: string) => buttons(root, sel).find((b) => b.textContent!.includes(text))!;
 
@@ -731,7 +736,8 @@ describe('sessions and deeper analysis', () => {
     send({ type: 'report', payload: r });
     panel.select('Row');
     button(root, '.actions button', 'Copy link').click();
-    await new Promise((res) => setTimeout(res, 0));
+    // compression runs off the main thread in Node; wait for the copy rather than a fixed tick
+    for (let i = 0; i < 50 && !copied.length; i++) await new Promise((res) => setTimeout(res, 10));
     expect(copied[0]).toMatch(/^chrome-extension:\/\/id\/panel\.html\?report=[jd]\./);
     // the panel stamps receivedAt on ingest; everything else round-trips
     expect({ ...(await factory.decodeShare(copied[0]!.split('report=')[1]!) as object), receivedAt: 0 }).toEqual(r);
@@ -745,6 +751,125 @@ describe('sessions and deeper analysis', () => {
       { n: 2, text: 'b', hit: true },
       { n: 3, text: 'c', hit: false },
     ]);
+  });
+
+  it('windows the Offenders and Fixes views above 200 rows, with a sticky header and a column chooser', () => {
+    for (const r of factory.floodReports(3000)) panel.handle({ type: 'report', payload: r });
+    panel.flush();
+    panel.setView('offenders');
+    expect(root.querySelector('.table-wrap .vhead')).not.toBeNull();
+    const rows = root.querySelectorAll('.table-wrap .vrow');
+    expect(rows.length).toBeGreaterThan(10);
+    expect(rows.length).toBeLessThan(100);
+    expect(root.querySelector('.table-wrap table')).toBeNull();
+    // sorting through the windowed header still works
+    (root.querySelector('.vhead span.num') as HTMLElement).click();
+    expect(panel.state.sort).toEqual({ key: 'avoidable', dir: 1 });
+    // column chooser adds "Last seen"
+    const lastSeen = [...root.querySelectorAll('.columns-menu label')].find((l) => l.textContent!.includes('Last seen'))!.querySelector('input') as HTMLInputElement;
+    lastSeen.checked = true;
+    lastSeen.dispatchEvent(new Event('change'));
+    expect(panel.state.columns).toEqual(['lastSeen']);
+    expect([...root.querySelectorAll('.vhead > span')].map((s) => s.textContent)).toContain('Last seen');
+    expect(root.querySelector('.vrow > span.mono')!.textContent).toMatch(/^\d\d:\d\d:\d\d\.\d{3}$/);
+    // the flood has 40 owners, so its fixes stay a plain list; 300 distinct owners switch to windowed rows
+    panel.setView('fixes');
+    expect(root.querySelector('.table-wrap .fixes li')).not.toBeNull();
+    panel.clearAll();
+    for (let i = 0; i < 300; i++) panel.handle({ type: 'report', payload: report({ component: `C${i}`, path: ['App'], owner: `Owner${i}`, parent: { name: `Owner${i}`, trigger: 'state' } }) });
+    panel.flush();
+    expect(root.querySelector('.table-wrap .fix-row')).not.toBeNull();
+    expect(root.querySelectorAll('.table-wrap .fix-row').length).toBeLessThan(100);
+    (root.querySelector('.table-wrap .fix-row') as HTMLElement).click();
+    expect(panel.state.tab).toBe('fixlist');
+    expect(root.querySelector('.details-header .title')!.textContent).toMatch(/^useMemo\(style\) in <Owner\d+>$/);
+  });
+
+  it('keeps the plain table below the threshold, with the column chooser', () => {
+    send({ type: 'report', payload: report({ selfDuration: 1 }) });
+    send({ type: 'report', payload: report({ component: 'Other', path: ['App'], avoidable: false, trigger: 'props', propChanges: [] }) });
+    send({ type: 'report', payload: report({ component: 'Other', path: ['App', 'B'], avoidable: false, trigger: 'props', propChanges: [] }) });
+    panel.setView('offenders');
+    expect(root.querySelector('.table-wrap table.grid')).not.toBeNull();
+    expect([...root.querySelectorAll('.grid th')].map((t) => t.textContent)).toEqual(['Component', 'Avoidable ▾', 'Total', 'Wasted', 'Top fix']);
+    const places = [...root.querySelectorAll('.columns-menu label')].find((l) => l.textContent!.includes('Places'))!.querySelector('input') as HTMLInputElement;
+    places.checked = true;
+    places.dispatchEvent(new Event('change'));
+    expect([...root.querySelectorAll('.grid th')].map((t) => t.textContent)).toEqual(['Component', 'Avoidable ▾', 'Total', 'Wasted', 'Places', 'Top fix']);
+    expect([...root.querySelectorAll('.grid tbody tr')].map((tr) => tr.children[4]!.textContent)).toEqual(['1', '2']);
+  });
+
+  it('searches values with the ~ prefix across props, hooks, contexts and state', () => {
+    send({ type: 'report', payload: report({ props: { prev: {}, next: { label: 'Keyboard', price: 49 } } }) });
+    send({ type: 'report', payload: report({ component: 'Cart', path: ['App'], hookState: [{ path: 'useState#0', hook: 'useState', index: 0, value: { items: ['mouse'] } }] }) });
+    send({ type: 'report', payload: report({ component: 'Themed', path: ['App'], contexts: [{ name: 'Theme', value: 'dark' }] }) });
+    const search = root.querySelector('input[type="search"]') as HTMLInputElement;
+    const query = (q: string) => {
+      search.value = q;
+      search.dispatchEvent(new Event('input'));
+    };
+    query('~keyboard');
+    expect(names(root)).toEqual(['App', 'List', 'Row']);
+    query('~mouse');
+    expect(names(root)).toEqual(['App', 'Cart']);
+    query('~dark');
+    expect(names(root)).toEqual(['App', 'Themed']);
+    expect(root.querySelector('.stream .count')!.textContent).toBe('1 report');
+    query('~');
+    expect(names(root)).toEqual(['App', 'List', 'Row', 'Cart', 'Themed']);
+    query('cart');
+    expect(names(root)).toEqual(['App', 'Cart']);
+  });
+
+  it('notes and mute per component persist and hide muted components from Fixes and the summary', async () => {
+    send({ type: 'report', payload: report() });
+    send({ type: 'report', payload: report({ component: 'Noisy', path: ['App'], owner: 'App', propChanges: [], renderCount: 1 }) });
+    send({ type: 'report', payload: report({ component: 'Noisy', path: ['App'], owner: 'App', propChanges: [], renderCount: 2 }) });
+    send({ type: 'report', payload: report({ component: 'Noisy', path: ['App'], owner: 'App', propChanges: [], renderCount: 3 }) });
+    expect(root.querySelector('.summary .stat.link .mono')!.textContent).toBe('<Noisy>');
+    panel.select('Noisy');
+    (root.querySelector('.details-header button[aria-label="Mute"]') as HTMLElement).click();
+    expect(panel.state.notes).toEqual({ Noisy: { muted: true } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(store.notes).toEqual({ Noisy: { muted: true } });
+    expect(root.querySelector('.summary .stat.link .mono')!.textContent).toBe('<Row>');
+    panel.setView('fixes');
+    expect([...root.querySelectorAll('.fixes li .label')].map((l) => l.textContent)).toEqual(['useMemo(style) in <List>']);
+    expect(root.querySelector('.section-title')!.textContent).toContain('1 muted component hidden');
+    panel.setView('tree');
+    const row = [...root.querySelectorAll('.row')].find((r) => r.querySelector('.name')!.textContent === 'Noisy')!;
+    expect(row.classList.contains('muted')).toBe(true);
+    // a note shows in the details and survives a reload of the panel
+    panel.select('Noisy');
+    (root.querySelector('.details-header button[aria-label="Note"]') as HTMLElement).click();
+    const input = root.querySelector('.note-input') as HTMLInputElement;
+    input.value = 'known, ticket #123';
+    input.dispatchEvent(new Event('change'));
+    expect(panel.state.notes.Noisy).toEqual({ muted: true, note: 'known, ticket #123' });
+    document.body.innerHTML = '<div id="root"></div>';
+    const again = factory.createPanel(document.getElementById('root')!, makeTransport({ storage: { get: (k: string) => Promise.resolve(store[k]), set: (k: string, v: unknown) => Promise.resolve((store[k] = v)) } }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(again.state.notes).toEqual({ Noisy: { muted: true, note: 'known, ticket #123' } });
+    again.setNote('Noisy', { muted: false, note: undefined });
+    expect(again.state.notes).toEqual({});
+  });
+
+  it('exposes roles and states for assistive tech', () => {
+    send({ type: 'report', payload: report() });
+    panel.select('Row');
+    expect(root.querySelector('.tree')!.getAttribute('role')).toBe('tree');
+    const row = [...root.querySelectorAll('.row')].find((r) => r.querySelector('.name')!.textContent === 'Row')!;
+    expect(row.getAttribute('role')).toBe('treeitem');
+    expect(row.getAttribute('aria-selected')).toBe('true');
+    expect(row.getAttribute('aria-level')).toBe('3');
+    expect(root.querySelector('.toast')!.getAttribute('aria-live')).toBe('polite');
+    expect(root.querySelector('.drawer')!.getAttribute('role')).toBe('dialog');
+    expect((root.querySelector('input[type="search"]') as HTMLInputElement).getAttribute('aria-label')).toContain('Search components');
+    expect([...root.querySelectorAll('.toolbar .ib')].every((b) => b.getAttribute('aria-label'))).toBe(true);
+    panel.openSettings();
+    expect(button(root, '.toolbar .ib', 'Settings').getAttribute('aria-expanded')).toBe('true');
+    root.querySelector('.drawer')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect((root.querySelector('.drawer') as HTMLElement).hidden).toBe(true);
   });
 
   it('labels commit priority on the report and in the commits list', () => {

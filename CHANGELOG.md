@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Panel polish.** Offenders and Fixes are windowed above 200 rows (sticky header, sortable);
+  an Offenders column chooser adds *Places* and *Last seen*; the search box takes `~text` to
+  search prop, hook, context and state values; per-component notes and a *Mute* toggle (muted
+  components leave the Fixes ranking and the summary strip, persisted per origin); roles and
+  ARIA states on the tree, lists, toast and settings dialog, Escape closes Settings.
 - **CI tooling.** `rankFixes` / `formatFixes`, `summarizeReports` / `compareSummaries`, and
   `checkBudget` / `toBudget` / `assertWithinBudget` in the package; the collector gains
   `fixes()`, `summary()` and `assertWithinBudget()`, and `assertNoAvoidable()` now ends with the
