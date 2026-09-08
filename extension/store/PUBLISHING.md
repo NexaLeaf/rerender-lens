@@ -8,6 +8,10 @@
 `rerender-lens-{chrome,edge,firefox}-X.Y.Z.zip` to the GitHub release, and uploads the Chrome
 zip to the Web Store when the secrets below exist.
 
+Bump `package.json` before tagging: npm refuses to publish a version that already exists, and a
+tag that repeats the package version (v0.3.3 and v0.3.4 both carried 0.3.0) gets a GitHub
+release with the zips but no npm publish, plus a warning in the workflow log.
+
 ## Chrome Web Store (first time)
 
 1. Register at https://chrome.google.com/webstore/devconsole (one-time fee).
