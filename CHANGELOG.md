@@ -18,6 +18,32 @@
   `clearReports`, `expectWithinBudget`.
 - A second copy of the library (another bundle on the same page) no longer wraps the hook
   again, which doubled every report.
+- **Bounded work per commit** (large apps froze the page). Deep equality is memoized across the
+  components of one commit and gives up on values too large to walk (reported as `different`);
+  large Sets compare by identity. Serialization caps every array/object/Map/Set at 100 entries
+  (`…+N more`), every report at 20k nodes, treats typed arrays, `ArrayBuffer`, DOM nodes and
+  promises as leaves, and defaults to depth 4. A commit reports at most 200 tracked components
+  and stops after 25 ms; the rest is counted in `info().truncated` with a one-time warning.
+  Source locations are cached per element, the instance registry prunes on growth only, and
+  highlight/flash measure all nodes before drawing (at most 100 boxes).
+- Reports are posted on `window` only once something says it listens (the extension's content
+  script, or `replay()`), so a page that runs the library without an open panel pays no
+  structured clone per report and wakes none of its own `message` listeners. `hello` and
+  `clear` still post; the BroadcastChannel and relay paths are unchanged.
+- The injected library (extension) now runs with `includeState: false`; Settings can turn the
+  hook/context/state snapshots on per origin. Effect-loop detection no longer flags commits
+  caused by discrete input (typing, dragging). The toolbar badge repaints at most every 100 ms.
+- **The panel keeps up.** Summary totals are incremental; the Offenders/Commits/Fixes lists and
+  the "best fix" stat update at most every 250 / 500 ms once 200 reports are buffered (the
+  tree and the stream stay live); commit analysis is memoized per commit and root causes are
+  found by index; each commit keeps at most 500 reports; buffer eviction is one splice per
+  frame. The content script sends one batched port message per task instead of one per
+  report. The DevTools panel retries the connect handshake with backoff (up to ~90 s) when a
+  page loads the library late, and the polling fallback clears the panel once per reset
+  instead of on every poll when the page overruns its buffer.
+- The injectable library ships as three vendor scripts (`rerender-lens.core.js`,
+  `rerender-lens.engine.js`, `rerender-lens.js`) built by `scripts/build-vendor.mjs`; the
+  Playwright helper still gets one concatenated bundle.
 - Removed: per-component notes and mute, share links (`panel.html?report=…`), the Offenders
   column chooser (*Places*, *Last seen*), and the windowed Offenders/Fixes variant above 200 rows.
   Offenders and Fixes always render plain rows; the tree and the stream stay virtualized. The

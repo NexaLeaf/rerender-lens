@@ -4,8 +4,12 @@
   if (window.__rerenderLensRelay) return; // defensive: run once per page even if registered twice
   window.__rerenderLensRelay = true;
 
+  const QUEUE_MAX = 500; // messages kept while the port is down
+
   let port = null;
-  let queue = [];
+  let queue = []; // messages waiting for a port
+  let pending = []; // messages of the current macrotask, sent as one port message
+  let flushTimer = null;
 
   function connect() {
     try {
@@ -18,21 +22,41 @@
       port = null;
       setTimeout(connect, 1000);
     });
-    for (const m of queue) send(m);
-    queue = [];
+    if (queue.length) {
+      const items = queue;
+      queue = [];
+      post(items);
+    }
   }
 
-  function send(message) {
+  function keep(items) {
+    queue = queue.concat(items);
+    if (queue.length > QUEUE_MAX) queue.splice(0, queue.length - QUEUE_MAX);
+  }
+
+  /** One port message per macrotask: a commit with thousands of reports is thousands of window messages, but one IPC. */
+  function post(items) {
     if (!port) {
-      queue.push(message);
-      if (queue.length > 500) queue.shift();
+      keep(items);
       return;
     }
     try {
-      port.postMessage(message);
+      port.postMessage(items.length === 1 ? items[0] : { type: 'batch', items });
     } catch {
-      queue.push(message);
+      keep(items);
     }
+  }
+
+  function flushPending() {
+    flushTimer = null;
+    const items = pending;
+    pending = [];
+    if (items.length) post(items);
+  }
+
+  function send(message) {
+    pending.push(message);
+    if (flushTimer === null) flushTimer = setTimeout(flushPending, 0);
   }
 
   // The library posts reports on window only after hearing this (so pages without the extension pay

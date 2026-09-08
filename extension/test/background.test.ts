@@ -73,6 +73,34 @@ describe('background', () => {
     expect(api.contentByTab.has(3)).toBe(false);
   });
 
+  it('forwards content-script batches as one message and counts their avoidable reports in order', async () => {
+    const panel = makePort('rerender-lens-panel');
+    chrome.runtime.onConnect.emit(panel);
+    panel.onMessage.emit({ type: 'init', tabId: 3 });
+    const content = makePort('rerender-lens-content', 3);
+    chrome.runtime.onConnect.emit(content);
+
+    const batch = {
+      type: 'batch',
+      items: [
+        { type: 'hello', version: 2, payload: { library: '0.3.0' } },
+        { type: 'report', payload: { component: 'A', avoidable: true } },
+        { type: 'report', payload: { component: 'B', avoidable: false } },
+        { type: 'report', payload: { component: 'C', avoidable: true } },
+      ],
+    };
+    content.onMessage.emit(batch);
+    // one IPC in, one IPC out: the panel unpacks it
+    expect(panel.sent.at(-1)).toBe(batch);
+    await painted();
+    expect(chrome._badges.get(3)).toBe('2');
+
+    // a clear inside a batch resets the count before the reports that follow it
+    content.onMessage.emit({ type: 'batch', items: [{ type: 'report', payload: { avoidable: true } }, { type: 'clear' }, { type: 'report', payload: { avoidable: true } }] });
+    await painted();
+    expect(chrome._badges.get(3)).toBe('1');
+  });
+
   it('origin:status reports built-in hosts as enabled without any registration', async () => {
     const res = await send(chrome, { type: 'origin:status', origin: 'http://localhost:5199' });
     expect(res.ok).toBe(true);

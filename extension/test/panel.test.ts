@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -38,7 +38,7 @@ const report = (over: Record<string, unknown> = {}) => ({
 });
 
 interface Panel {
-  state: { reports: unknown[]; selectedKey: string | null; paused: boolean; view: string; tab: string; library: unknown; relay: boolean; flashOn: boolean; recording: unknown; sessions: { name: string }[]; sort: { key: string; dir: number } };
+  state: { reports: unknown[]; commits: Map<number, unknown[]>; commitOrder: number[]; selectedKey: string | null; paused: boolean; view: string; tab: string; library: unknown; relay: boolean; flashOn: boolean; recording: unknown; sessions: { name: string }[]; sort: { key: string; dir: number } };
   handle(m: unknown): void;
   flush(): void;
   select(name: string): void;
@@ -455,6 +455,98 @@ describe('scale and navigation', () => {
         resolve();
       }),
     );
+  });
+
+  it('unpacks content-script batches in order, single messages included', () => {
+    panel.handle({
+      type: 'batch',
+      items: [
+        { type: 'hello', version: 2, payload: { library: '0.3.0', protocol: 2, react: [], production: false, enabled: true, options: {} } },
+        { type: 'report', payload: report({ component: 'First', path: ['App'] }) },
+        { type: 'report', payload: report({ component: 'Second', path: ['App'] }) },
+      ],
+    });
+    panel.handle({ type: 'report', payload: report({ component: 'Third', path: ['App'] }) });
+    panel.flush();
+    expect(panel.state.library).toMatchObject({ library: '0.3.0' });
+    expect((panel.state.reports as { component: string }[]).map((r) => r.component)).toEqual(['First', 'Second', 'Third']);
+    // a clear inside a batch drops what came before it
+    panel.handle({ type: 'batch', items: [{ type: 'report', payload: report({ component: 'Gone', path: ['App'] }) }, { type: 'clear' }, { type: 'report', payload: report({ component: 'Kept', path: ['App'] }) }] });
+    panel.flush();
+    expect((panel.state.reports as { component: string }[]).map((r) => r.component)).toEqual(['Kept']);
+  });
+
+  it('evicting the oldest reports keeps the summary counters and the commit lists consistent; a commit keeps at most 500 reports', () => {
+    const flood = factory.floodReports(3000) as { avoidable: boolean; commitId: number }[];
+    for (const r of flood) panel.handle({ type: 'report', payload: r });
+    panel.flush();
+    expect(panel.state.reports).toHaveLength(2000);
+    const kept = flood.slice(1000);
+    const avoidable = kept.filter((r) => r.avoidable).length;
+    const stats = [...root.querySelectorAll('.summary .stat')].map((s) => s.textContent);
+    expect(stats[0]).toBe('2000renders');
+    expect(stats[1]).toBe(`${avoidable}avoidable`);
+    // commits 1..20 (50 reports each) went with the evicted reports; the remaining lists hold only buffered reports
+    expect(panel.state.commitOrder).toEqual([...new Set(kept.map((r) => r.commitId))]);
+    expect([...panel.state.commits.keys()]).toEqual(panel.state.commitOrder);
+    const buffered = new Set(panel.state.reports);
+    for (const list of panel.state.commits.values()) for (const r of list) expect(buffered.has(r)).toBe(true);
+    panel.setView('commits');
+    expect(root.querySelectorAll('.commits li')).toHaveLength(40);
+
+    panel.clearAll();
+    expect((root.querySelector('.summary') as HTMLElement).hidden).toBe(true);
+    for (let i = 0; i < 600; i++) panel.handle({ type: 'report', payload: report({ component: `C${i}`, path: ['App'], commitId: 1 }) });
+    panel.flush();
+    expect(panel.state.commits.get(1)).toHaveLength(500);
+    expect([...root.querySelectorAll('.summary .stat')].map((s) => s.textContent).slice(0, 2)).toEqual(['600renders', '600avoidable']);
+    // once every buffered report of that commit is gone, so is the commit
+    for (let i = 0; i < 2000; i++) panel.handle({ type: 'report', payload: report({ component: 'Later', path: ['App'], commitId: 2 + (i % 5) }) });
+    panel.flush();
+    expect(panel.state.commits.has(1)).toBe(false);
+    expect(panel.state.commitOrder).toEqual([2, 3, 4, 5, 6]);
+    // (the best-fix stat may lag up to 500 ms on a buffer this size, so it is not asserted here)
+    expect([...root.querySelectorAll('.summary .stat')].map((s) => s.textContent).slice(0, 3)).toEqual(['2000renders', '2000avoidable', 'top<Later>×2000']);
+  });
+
+  it('throttles the non-tree views and the best-fix ranking while a large buffer streams, but not below 200 reports', async () => {
+    vi.useFakeTimers();
+    try {
+      for (let i = 0; i < 150; i++) panel.handle({ type: 'report', payload: report({ component: `C${i}`, path: ['App'] }) });
+      panel.flush();
+      panel.setView('offenders');
+      expect(root.querySelectorAll('.grid tbody tr')).toHaveLength(150);
+      // small buffer: every flush rebuilds synchronously
+      for (let i = 150; i < 199; i++) panel.handle({ type: 'report', payload: report({ component: `C${i}`, path: ['App'] }) });
+      panel.flush();
+      expect(root.querySelectorAll('.grid tbody tr')).toHaveLength(199);
+      const best = () => [...root.querySelectorAll('.summary .stat')].map((s) => s.textContent).find((t) => t!.startsWith('best fix'));
+      expect(best()).toBe('best fixuseMemo(style) in <List>−199');
+      // at 200+ (and within 250 ms / 500 ms of the last rebuild: the fake clock has not moved) the Offenders table and
+      // the best fix wait for their interval; the counters are still live
+      for (let i = 199; i < 260; i++) panel.handle({ type: 'report', payload: report({ component: `C${i}`, path: ['App'] }) });
+      panel.flush();
+      expect(root.querySelectorAll('.grid tbody tr')).toHaveLength(199);
+      panel.handle({ type: 'report', payload: report({ component: 'Late', path: ['App'] }) });
+      panel.flush();
+      expect(root.querySelectorAll('.grid tbody tr')).toHaveLength(199);
+      expect([...root.querySelectorAll('.summary .stat')].map((s) => s.textContent).slice(0, 2)).toEqual(['261renders', '261avoidable']);
+      expect(best()).toBe('best fixuseMemo(style) in <List>−199');
+      await vi.advanceTimersByTimeAsync(250);
+      expect(root.querySelectorAll('.grid tbody tr')).toHaveLength(261);
+      expect(best()).toBe('best fixuseMemo(style) in <List>−199');
+      await vi.advanceTimersByTimeAsync(250);
+      expect(best()).toBe('best fixuseMemo(style) in <List>−261');
+      // the interval has passed: the next flush rebuilds at once; user actions always render synchronously
+      panel.handle({ type: 'report', payload: report({ component: 'Later', path: ['App'] }) });
+      panel.flush();
+      expect(root.querySelectorAll('.grid tbody tr')).toHaveLength(262);
+      panel.setView('fixes');
+      expect(root.querySelectorAll('.table-wrap .fixes li')).toHaveLength(1);
+      expect(root.querySelector('.table-wrap .fixes li .badge')!.textContent).toBe('262');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keyboard: / focuses search, f opens the fix tab, Esc clears the highlight and leaves the search box', () => {

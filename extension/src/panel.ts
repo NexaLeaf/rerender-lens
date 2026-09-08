@@ -156,6 +156,8 @@ export interface CommitAnalysis {
   avoidable: number;
   wasted: number;
   roots: RootCause[];
+  /** Root cause name of every avoidable report (what `roots` was aggregated from). */
+  rootByReport: Map<Report, string>;
   contexts: ContextStat[];
   fixes: RankedFix[];
   reports: Report[];
@@ -211,6 +213,8 @@ export interface Message {
   payload?: unknown;
   version?: number;
   on?: boolean;
+  /** `type: 'batch'`: messages coalesced by the content script, in arrival order. */
+  items?: unknown[];
 }
 
 /** Only `subscribe` is required; the panel degrades gracefully without the rest. */
@@ -235,6 +239,8 @@ export interface Transport {
   tabLabel?: string | null;
   /** Text of a page resource (the module that created an element), for source context. */
   readSource?(url: string): Promise<string | null>;
+  /** Stop timers and connections (the panel keeps its state). */
+  dispose?(): void;
 }
 
 export interface PanelOptions {
@@ -337,6 +343,16 @@ const FN_PREFIX = 'ƒ '; // "f " as emitted by the library's serialize()
 const MAX_REPORTS = 2000;
 const MAX_PER_NODE = 200;
 const MAX_COMMITS = 500;
+const MAX_PER_COMMIT = 500; // reports kept per commit (the first ones: ancestors come first, which is what root-cause analysis needs)
+// While streaming with at least this many reports buffered, the expensive re-renders are throttled; below it everything is synchronous (tests).
+const THROTTLE_MIN_REPORTS = 200;
+const BEST_FIX_INTERVAL = 500; // ms between `rankFixes` over the whole buffer for the summary strip
+const LEFT_RENDER_INTERVAL = 250; // ms between rebuilds of the Offenders / Commits / Fixes / Sessions lists
+// Page handshake (`info`) retries: 500 ms doubling to 5 s, about 20 tries (~90 s).
+const SYNC_RETRY_MIN = 500;
+const SYNC_RETRY_MAX = 5000;
+const SYNC_RETRIES = 20;
+const NAVIGATION_SETTLE = 1200; // ms after a navigation before the first `info` (the old document may still answer)
 const ROW_H = 22; // tree row height (px), must match panel.css
 const ITEM_H = 20; // stream item height (px), must match panel.css
 const OVERSCAN = 8;
@@ -707,13 +723,25 @@ function rankFixes(reports: Report[]): RankedFix[] {
 const isAncestorReport = (anc: Report, r: Report): boolean =>
   anc.path.length < r.path.length && r.path[anc.path.length] === anc.component && anc.path.every((p, i) => r.path[i] === p);
 
+/** One commit's reports grouped by component name, so a parent lookup is O(same-named reports) instead of O(commit). */
+function indexByComponent(reports: Report[]): Map<string, Report[]> {
+  const index = new Map<string, Report[]>();
+  for (const r of reports) {
+    const list = index.get(r.component);
+    if (list) list.push(r);
+    else index.set(r.component, [r]);
+  }
+  return index;
+}
+
 /** Walk `parent` links inside one commit up to the component whose own change started the cascade. */
-function rootCauseOf(r: Report, commitReports: Report[]): { name: string; trigger: string; report: Report | null } | null {
+function rootCauseOf(r: Report, commitReports: Report[], index: Map<string, Report[]> = indexByComponent(commitReports)): { name: string; trigger: string; report: Report | null } | null {
   let cur = r;
   const seen = new Set<Report>([r]);
   while (cur.trigger === 'parent' && cur.parent) {
     const parent = cur.parent;
-    const p = commitReports.find((x) => x.component === parent.name && isAncestorReport(x, cur));
+    const candidates = index.get(parent.name);
+    const p = candidates && candidates.find((x) => isAncestorReport(x, cur));
     if (!p || seen.has(p)) return { name: parent.name, trigger: parent.trigger, report: null };
     seen.add(p);
     cur = p;
@@ -724,15 +752,18 @@ function rootCauseOf(r: Report, commitReports: Report[]): { name: string; trigge
 /** Group reports by commit and rank what started each cascade. */
 function analyzeCommit(reports: Report[]): CommitAnalysis {
   const roots = new Map<string, RootCause>();
+  const rootByReport = new Map<Report, string>();
+  const index = indexByComponent(reports);
   let avoidable = 0;
   let wasted = 0;
   for (const r of reports) {
     if (!r.avoidable) continue;
     avoidable++;
     if (typeof r.selfDuration === 'number') wasted += r.selfDuration;
-    const root = rootCauseOf(r, reports);
+    const root = rootCauseOf(r, reports, index);
     const name = root ? root.name : (r.parent && r.parent.name) || '(unknown)';
     const trigger = root ? root.trigger : (r.parent && r.parent.trigger) || 'parent';
+    rootByReport.set(r, name);
     let agg = roots.get(name);
     if (!agg) {
       agg = { name, trigger, count: 0, components: new Map() };
@@ -749,6 +780,7 @@ function analyzeCommit(reports: Report[]): CommitAnalysis {
     avoidable,
     wasted,
     roots: [...roots.values()].sort((a, b) => b.count - a.count),
+    rootByReport,
     contexts: contextAttribution(reports),
     fixes: rankFixes(reports),
     reports,
@@ -809,23 +841,22 @@ export interface RootSummary {
   fixes: RankedFix[];
 }
 
-/** Every commit a component started (as the root cause), across the whole session. */
-function rootCauseSummary(name: string, commits: Iterable<[number, Report[]]>): RootSummary {
+/**
+ * Every commit a component started (as the root cause), across the whole session.
+ * `analyze` lets the panel pass its per-commit memoized analysis.
+ */
+function rootCauseSummary(name: string, commits: Iterable<[number, Report[]]>, analyze: (key: number, reports: Report[]) => CommitAnalysis = (_, reports) => analyzeCommit(reports)): RootSummary {
   const out: RootSummary = { name, trigger: 'parent', commits: [], total: 0, components: new Map(), fixes: [] };
   const affected: Report[] = [];
   for (const [key, reports] of commits) {
-    const analysis = analyzeCommit(reports);
+    const analysis = analyze(key, reports);
     const root = analysis.roots.find((x) => x.name === name);
     if (!root) continue;
     out.trigger = root.trigger;
     out.commits.push({ key, analysis, count: root.count, components: root.components });
     out.total += root.count;
     for (const [c, n] of root.components) out.components.set(c, (out.components.get(c) || 0) + n);
-    for (const r of reports) {
-      if (!r.avoidable) continue;
-      const rc = rootCauseOf(r, reports);
-      if ((rc ? rc.name : r.parent && r.parent.name) === name) affected.push(r);
-    }
+    for (const r of reports) if (r.avoidable && analysis.rootByReport.get(r) === name) affected.push(r);
   }
   out.commits.reverse();
   out.fixes = rankFixes(affected);
@@ -1422,6 +1453,37 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   if (typeof ResizeObserver === 'function') new ResizeObserver(measure).observe(root);
   else window.addEventListener('resize', measure);
 
+  // Summary counters, maintained in `ingest` / `evict` so the strip never rescans the buffer.
+  const totals = { avoidable: 0, wasted: 0, perComponent: new Map<string, number>() };
+  let bestFix: RankedFix | undefined;
+  let bestFixAt = 0;
+  let bestFixGen = -1; // `dataGen` the ranking was computed for
+  let bestFixTimer: ReturnType<typeof setTimeout> | null = null;
+  const throttled = (): boolean => state.reports.length >= THROTTLE_MIN_REPORTS;
+
+  /** The "best fix" stat: `rankFixes` over the whole buffer, at most every 500 ms while a large buffer is streaming. */
+  function refreshBestFix(): void {
+    if (!totals.avoidable) {
+      bestFix = undefined;
+      bestFixGen = dataGen;
+      return;
+    }
+    if (bestFixGen === dataGen) return; // nothing changed since the last ranking
+    const now = Date.now();
+    if (throttled() && now - bestFixAt < BEST_FIX_INTERVAL) {
+      if (!bestFixTimer) {
+        bestFixTimer = setTimeout(() => {
+          bestFixTimer = null;
+          renderSummary();
+        }, BEST_FIX_INTERVAL - (now - bestFixAt));
+      }
+      return;
+    }
+    bestFixAt = now;
+    bestFixGen = dataGen;
+    bestFix = rankFixes(state.reports)[0];
+  }
+
   function renderSummary(): void {
     summary.textContent = '';
     const total = state.reports.length;
@@ -1430,17 +1492,11 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       return;
     }
     summary.hidden = false;
-    let avoidable = 0;
-    let wasted = 0;
-    const perComponent = new Map<string, number>();
-    for (const r of state.reports) {
-      if (!r.avoidable) continue;
-      avoidable++;
-      if (typeof r.selfDuration === 'number') wasted += r.selfDuration;
-      perComponent.set(r.component, (perComponent.get(r.component) || 0) + 1);
-    }
-    const top = [...perComponent].sort((a, b) => b[1] - a[1])[0];
-    const fix = avoidable ? rankFixes(state.reports)[0] : undefined;
+    const { avoidable, wasted } = totals;
+    let top: [string, number] | undefined;
+    for (const entry of totals.perComponent) if (!top || entry[1] > top[1]) top = entry;
+    refreshBestFix();
+    const fix = bestFix;
     const stat = (value: string, label: string, cls = ''): HTMLElement => el('span', { class: 'stat ' + cls }, [el('b', { text: value }), el('span', { class: 'label', text: label })]);
     summary.append(stat(String(total), plural(total, 'render').replace(/^\d+ /, '')), stat(String(avoidable), 'avoidable', avoidable ? 'bad' : 'good'));
     if (wasted) summary.append(stat(fmtMs(wasted), 'wasted', 'bad'));
@@ -1610,7 +1666,6 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     for (const r of state.reports) {
       const node = nodeOfReport(r);
       node.reports.push(r);
-      if (node.reports.length > MAX_PER_NODE) node.reports.shift();
       node.total++;
       if (r.avoidable) {
         node.avoidable++;
@@ -1618,21 +1673,47 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       }
       node.lastReport = r;
     }
+    for (const node of state.nodesByKey.values()) trimNode(node);
     renderLeft();
     renderDetails();
+  }
+
+  /** Keep the newest MAX_PER_NODE reports of a node (one splice per flush instead of a shift per report). */
+  function trimNode(node: TreeNode): void {
+    const excess = node.reports.length - MAX_PER_NODE;
+    if (excess > 0) node.reports.splice(0, excess);
+  }
+
+  // Per-commit analysis, reused while the commit's report count is unchanged.
+  const commitAnalyses = new Map<number, { len: number; analysis: CommitAnalysis }>();
+  function analysisFor(key: number, reports: Report[]): CommitAnalysis {
+    const cached = commitAnalyses.get(key);
+    if (cached && cached.len === reports.length) return cached.analysis;
+    const analysis = analyzeCommit(reports);
+    commitAnalyses.set(key, { len: reports.length, analysis });
+    return analysis;
+  }
+  const commitMember = new WeakSet<Report>(); // reports kept in their commit's list (the first MAX_PER_COMMIT of it)
+
+  function forgetCommit(key: number): void {
+    state.commits.delete(key);
+    commitAnalyses.delete(key);
   }
 
   function ingest(report: Report): TreeNode {
     if (!report.receivedAt) report.receivedAt = Date.now();
     state.reports.push(report);
-    if (state.reports.length > MAX_REPORTS) state.reports.shift();
     const node = nodeOfReport(report);
     node.reports.push(report);
-    if (node.reports.length > MAX_PER_NODE) node.reports.shift();
     node.total++;
     if (report.avoidable) {
       node.avoidable++;
-      if (typeof report.selfDuration === 'number') node.wasted += report.selfDuration;
+      totals.avoidable++;
+      totals.perComponent.set(report.component, (totals.perComponent.get(report.component) || 0) + 1);
+      if (typeof report.selfDuration === 'number') {
+        node.wasted += report.selfDuration;
+        totals.wasted += report.selfDuration;
+      }
     }
     node.lastReport = report;
     node.flash = true;
@@ -1643,10 +1724,39 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       list = [];
       state.commits.set(ck, list);
       state.commitOrder.push(ck);
-      if (state.commitOrder.length > MAX_COMMITS) state.commits.delete(state.commitOrder.shift()!);
+      if (state.commitOrder.length > MAX_COMMITS) forgetCommit(state.commitOrder.shift()!);
     }
-    list.push(report);
+    if (list.length < MAX_PER_COMMIT) {
+      list.push(report);
+      commitMember.add(report);
+    }
     return node;
+  }
+
+  /** Drop the oldest reports beyond MAX_REPORTS: counters, commit lists and (when emptied) the commit itself follow. */
+  function evict(): void {
+    const excess = state.reports.length - MAX_REPORTS;
+    if (excess <= 0) return;
+    for (const r of state.reports.splice(0, excess)) {
+      if (r.avoidable) {
+        totals.avoidable--;
+        const n = (totals.perComponent.get(r.component) || 0) - 1;
+        if (n > 0) totals.perComponent.set(r.component, n);
+        else totals.perComponent.delete(r.component);
+        if (typeof r.selfDuration === 'number') totals.wasted -= r.selfDuration;
+      }
+      if (!commitMember.has(r)) continue;
+      // Both lists are in arrival order, so an evicted member is at the front of its commit.
+      const list = state.commits.get(r.commitId);
+      if (!list || list[0] !== r) continue;
+      list.shift();
+      if (!list.length) {
+        forgetCommit(r.commitId);
+        const i = state.commitOrder.indexOf(r.commitId);
+        if (i >= 0) state.commitOrder.splice(i, 1);
+      }
+    }
+    if (totals.wasted < 0) totals.wasted = 0; // float drift
   }
 
   /** Drain the queue: one tree render per batch. */
@@ -1657,8 +1767,10 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     queue = [];
     let touchedSelected = false;
     let avoidableCount = 0;
+    const touched = new Set<TreeNode>();
     for (const r of batch) {
       const node = ingest(r);
+      touched.add(node);
       if (state.recording && state.recording.reports.length < MAX_REPORTS) state.recording.reports.push(r);
       if (r.avoidable) avoidableCount++;
       if (state.selectedKey === node.key) {
@@ -1666,11 +1778,48 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         if (state.tab === 'latest') state.selectedReport = r;
       }
     }
-    renderLeft();
+    for (const node of touched) trimNode(node);
+    evict();
+    dataGen++;
     renderStream(batch);
     renderSummary();
-    if (touchedSelected || state.view === 'commits' || state.view === 'fixes' || state.tab === 'root' || (state.recording && state.tab === 'session')) renderDetails();
-    if (state.polling && avoidableCount) transport.badge?.(state.reports.filter((r) => r.avoidable).length);
+    // The tree is incremental and cheap; the other views and the analysis-backed details rebuild from scratch, so they are throttled on large buffers.
+    const heavy = state.view === 'commits' || state.view === 'fixes' || state.tab === 'root' || !!(state.recording && state.tab === 'session');
+    if (state.view === 'tree') {
+      renderTree();
+      if (touchedSelected && !heavy) renderDetails();
+    }
+    scheduleHeavy(heavy || (touchedSelected && state.view !== 'tree'));
+    if (state.polling && avoidableCount) transport.badge?.(totals.avoidable);
+  }
+
+  let heavyAt = 0;
+  let heavyTimer: ReturnType<typeof setTimeout> | null = null;
+  let heavyDetailsPending = false;
+  function renderHeavy(details: boolean): void {
+    heavyAt = Date.now();
+    if (state.view !== 'tree') renderLeft();
+    if (details) renderDetails();
+  }
+  /** Rebuild the non-tree left pane (and the details when asked) now, or within LEFT_RENDER_INTERVAL while a large buffer streams. */
+  function scheduleHeavy(details: boolean): void {
+    const wait = throttled() ? LEFT_RENDER_INTERVAL - (Date.now() - heavyAt) : 0;
+    if (wait <= 0) {
+      if (heavyTimer) clearTimeout(heavyTimer);
+      heavyTimer = null;
+      heavyDetailsPending = false;
+      renderHeavy(details);
+      return;
+    }
+    heavyDetailsPending = heavyDetailsPending || details;
+    if (!heavyTimer) {
+      heavyTimer = setTimeout(() => {
+        heavyTimer = null;
+        const d = heavyDetailsPending;
+        heavyDetailsPending = false;
+        renderHeavy(d);
+      }, wait);
+    }
   }
 
   function enqueue(report: Report): void {
@@ -1687,6 +1836,13 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     state.reports = [];
     state.commits.clear();
     state.commitOrder = [];
+    commitAnalyses.clear();
+    totals.avoidable = 0;
+    totals.wasted = 0;
+    totals.perComponent.clear();
+    bestFix = undefined;
+    bestFixAt = 0;
+    dataGen++;
     state.selectedKey = null;
     state.selectedReport = null;
     state.selectedCommit = null;
@@ -1700,21 +1856,33 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     renderSummary();
   }
 
-  /** `~text` searches prop, hook and context values instead of component names. */
-  const valueQuery = (): string | null => (state.filter.trim().startsWith('~') ? state.filter.trim().slice(1).toLowerCase() : null);
-
-  function matchesFilter(name: string): boolean {
-    if (!state.filter || valueQuery() !== null) return true;
+  // The parsed filter, recomputed only when `state.filter` changes (`matchesFilter` runs once per tree node and report).
+  let filterCache: { filter: string; value: string | null; regex: RegExp | null; text: string } = { filter: '', value: null, regex: null, text: '' };
+  function parsedFilter(): typeof filterCache {
+    if (filterCache.filter === state.filter) return filterCache;
     const f = state.filter.trim();
-    const m = /^\/(.+)\/([a-z]*)$/.exec(f);
+    const value = f.startsWith('~') ? f.slice(1).toLowerCase() : null;
+    let regex: RegExp | null = null;
+    const m = value === null ? /^\/(.+)\/([a-z]*)$/.exec(f) : null;
     if (m && m[1] !== undefined) {
       try {
-        return new RegExp(m[1], m[2]).test(name);
+        regex = new RegExp(m[1], (m[2] || '').replace(/[gy]/g, '')); // a cached global/sticky regex would carry `lastIndex` between tests
       } catch {
         /* invalid regex: fall through to text */
       }
     }
-    return name.toLowerCase().includes(f.toLowerCase());
+    filterCache = { filter: state.filter, value, regex, text: f.toLowerCase() };
+    return filterCache;
+  }
+
+  /** `~text` searches prop, hook and context values instead of component names. */
+  const valueQuery = (): string | null => parsedFilter().value;
+
+  function matchesFilter(name: string): boolean {
+    const f = parsedFilter();
+    if (!f.filter || f.value !== null) return true;
+    if (f.regex) return f.regex.test(name);
+    return name.toLowerCase().includes(f.text);
   }
 
   const valueCache = new WeakMap<Report, string>();
@@ -1743,7 +1911,20 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   }
 
   const passes = (r: Report): boolean => (!state.avoidableOnly || r.avoidable) && matchesFilter(r.component) && matchesValues(r);
-  const filteredReports = (): Report[] => state.reports.filter(passes);
+
+  // The filtered buffer and its ranked fixes, shared by every render of one flush (or of one user action) that needs them.
+  let dataGen = 0; // bumped whenever `state.reports` changes
+  let filtered: { key: string; reports: Report[]; fixes: RankedFix[] | null } = { key: '', reports: [], fixes: null };
+  function filteredReports(): Report[] {
+    const key = `${dataGen}|${state.avoidableOnly}|${state.filter}`;
+    if (filtered.key !== key) filtered = { key, reports: state.reports.filter(passes), fixes: null };
+    return filtered.reports;
+  }
+  function filteredFixes(): RankedFix[] {
+    const reports = filteredReports();
+    if (!filtered.fixes) filtered.fixes = rankFixes(reports);
+    return filtered.fixes;
+  }
 
   // ---------- left pane ----------
   function setView(view: View): void {
@@ -2015,7 +2196,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       const key = state.commitOrder[i]!;
       const reports = state.commits.get(key);
       if (!reports || !reports.some(passes)) continue;
-      out.push({ key, analysis: analyzeCommit(reports) });
+      out.push({ key, analysis: analysisFor(key, reports) });
     }
     return out;
   }
@@ -2091,7 +2272,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   function renderFixes(): void {
     table.textContent = '';
     const reports = filteredReports();
-    const fixes = rankFixes(reports);
+    const fixes = filteredFixes();
     const contexts = contextAttribution(reports);
     if (!fixes.length && !contexts.length) {
       table.append(el('div', { class: 'empty', text: 'No avoidable re-renders, nothing to fix.' }));
@@ -2233,7 +2414,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       details.append(el('div', { class: 'empty', text: 'This commit is no longer buffered.' }));
       return;
     }
-    const a = analyzeCommit(reports);
+    const a = analysisFor(key, reports);
     details.append(
       el('div', { class: 'details-header' }, [
         el('span', { class: 'title', text: `Commit #${key}` }),
@@ -2296,7 +2477,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   }
 
   function renderFixDetails(): void {
-    const fix = rankFixes(filteredReports()).find((f) => f.key === state.selectedFix);
+    const fix = filteredFixes().find((f) => f.key === state.selectedFix);
     if (!fix) {
       details.append(el('div', { class: 'empty', text: 'Select a fix.' }));
       return;
@@ -2311,7 +2492,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   /** One root cause across every commit it started. */
   function renderRootDetails(): void {
     const name = state.selectedRoot!;
-    const s = rootCauseSummary(name, state.commits);
+    const s = rootCauseSummary(name, state.commits, analysisFor);
     details.append(
       el('div', { class: 'details-header' }, [
         el('span', { class: 'title' }, ['Root cause ', el('span', { class: 'name', text: `<${name}>` })]),
@@ -2843,6 +3024,10 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         if (r) enqueue(r);
         break;
       }
+      case 'batch':
+        // The content script coalesces one macrotask of page messages; each item is handled in order.
+        if (Array.isArray(message.items)) for (const item of message.items) handle(item as Message);
+        break;
     }
   }
 
@@ -3006,11 +3191,54 @@ function createRelayTransport(io: TransportIO): Transport {
     return false;
   }
 
+  // Handshake retries: a page answers `info` only once the library has loaded, which can be well after the
+  // navigation event (or after the panel opened). Backoff 500 ms doubling to 5 s, at most SYNC_RETRIES tries;
+  // a navigation, a tab switch, a successful attach or `dispose` cancels whatever is pending.
+  let syncGen = 0;
+  let syncTimer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
+  function cancelSync(): void {
+    syncGen++;
+    if (syncTimer) clearTimeout(syncTimer);
+    syncTimer = null;
+  }
+  /** `syncWithPage` until it succeeds (then `onReady`), with backoff; supersedes any earlier attempt. */
+  function syncWithRetry(onReady: () => void, initialDelay = 0): void {
+    cancelSync();
+    const gen = syncGen;
+    let delay = SYNC_RETRY_MIN;
+    let tries = 0;
+    const attempt = async (): Promise<void> => {
+      syncTimer = null;
+      if (gen !== syncGen || disposed) return;
+      const ok = await syncWithPage();
+      if (gen !== syncGen || disposed) return; // superseded while `info` was in flight
+      if (ok) {
+        onReady();
+        return;
+      }
+      if (++tries >= SYNC_RETRIES) return;
+      syncTimer = setTimeout(() => void attempt(), delay);
+      delay = Math.min(delay * 2, SYNC_RETRY_MAX);
+    };
+    if (initialDelay > 0) syncTimer = setTimeout(() => void attempt(), initialDelay);
+    else void attempt();
+  }
+
+  let droppedSeen = false; // `pull` reported a gap since the last `since` reset: clear once, not on every poll
+  function resetSince(): void {
+    since = 0;
+    droppedSeen = false;
+  }
+
   async function pollOnce(): Promise<void> {
     try {
       const res = await io.bridge<PullResult>('pull', since);
       if (!res) return;
-      if (res.dropped) emit({ type: 'clear' });
+      if (res.dropped && !droppedSeen) {
+        droppedSeen = true;
+        emit({ type: 'clear' });
+      }
       for (const p of res.reports) emit({ type: 'report', payload: p });
       since = res.seq;
     } catch {
@@ -3029,18 +3257,24 @@ function createRelayTransport(io: TransportIO): Transport {
     }
   }
 
-  /** First contact with a page: replay through the relay, or pull everything and start polling. */
-  async function attachToPage(): Promise<void> {
-    if (!(await syncWithPage())) return;
-    if (relayConnected) io.bridge('replay').catch(() => {});
-    else {
-      const res = await io.bridge<PullResult>('pull', 0).catch(() => null);
-      if (res) {
-        for (const p of res.reports) emit({ type: 'report', payload: p });
-        since = res.seq;
-      } else io.bridge('replay').catch(() => {});
-      setPolling(true);
-    }
+  /** First contact with a page (retried until it answers): replay through the relay, or pull everything and start polling. */
+  function attachToPage(initialDelay = 0): void {
+    syncWithRetry(() => {
+      if (relayConnected) io.bridge('replay').catch(() => {});
+      else {
+        const gen = syncGen;
+        void io.bridge<PullResult>('pull', 0)
+          .catch(() => null)
+          .then((res) => {
+            if (gen !== syncGen || disposed) return;
+            if (res) {
+              for (const p of res.reports) emit({ type: 'report', payload: p });
+              since = res.seq;
+            } else io.bridge('replay').catch(() => {});
+            setPolling(true);
+          });
+      }
+    }, initialDelay);
   }
 
   function connect(): void {
@@ -3063,16 +3297,21 @@ function createRelayTransport(io: TransportIO): Transport {
         setPolling(false);
       } else if (m.type === 'disconnected') {
         relayConnected = false;
-        void syncWithPage().then((ok) => ok && setPolling(true));
+        // The content script went away (page unloading, or the relay was disabled): fall back to polling once the page answers.
+        syncWithRetry(() => setPolling(true));
       }
       emit(m);
     });
     port.onDisconnect.addListener(() => {
       if (panelPort !== port) return;
       panelPort = null;
-      setTimeout(connect, 1000);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (!disposed) connect();
+      }, 1000);
     });
   }
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   const transport: Transport = {
     origin,
@@ -3081,44 +3320,67 @@ function createRelayTransport(io: TransportIO): Transport {
       listener = fn;
       connect();
       io.onNavigated(() => {
+        if (disposed) return;
         // The old page is gone: stop evaluating into it until the new one answers `info` (attachToPage restarts polling).
-        since = 0;
+        resetSince();
         setPolling(false);
+        cancelSync();
         fn({ type: 'navigated' });
         void resolveOrigin().then(() => {
-          setTimeout(() => void attachToPage(), 1200);
+          if (!disposed) attachToPage(NAVIGATION_SETTLE);
         });
       });
       io.onTabChange?.((label) => {
+        if (disposed) return;
         transport.tabLabel = label;
         const next = io.tabId();
         if (next === currentTab) {
           fn({ type: 'tab-label', payload: label }); // same tab, new title or URL
           return;
         }
-        since = 0;
+        resetSince();
         relayConnected = false;
         setPolling(false);
+        cancelSync();
         currentTab = next;
         void resolveOrigin().then(() => {
+          if (disposed) return;
           fn({ type: 'tab', payload: label });
           connect();
-          void attachToPage();
+          attachToPage();
         });
       });
-      void resolveOrigin().then(() => attachToPage());
+      void resolveOrigin().then(() => {
+        if (!disposed) attachToPage();
+      });
     },
     replay() {
       if (relayConnected) io.bridge('replay').catch(() => {});
       else {
-        since = 0;
+        resetSince();
         emit({ type: 'clear' });
         void syncWithPage().then(() => pollOnce());
       }
     },
     clear() {
       io.bridge('clear').catch(() => {});
-      since = 0;
+      resetSince();
+    },
+    dispose() {
+      disposed = true;
+      cancelSync();
+      setPolling(false);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      if (panelPort) {
+        try {
+          panelPort.disconnect();
+        } catch {
+          /* already gone */
+        }
+        panelPort = null;
+      }
+      listener = null;
     },
     configure: (options) => io.bridge<SerializableOptions>('configure', options).then((r) => r ?? undefined),
     highlight: (id) => io.bridge('highlight', id).catch(() => {}),

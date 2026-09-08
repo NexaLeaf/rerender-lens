@@ -52,8 +52,9 @@ Then pick one of two modes:
 
 - **Inject the library** (no app code): tick *Inject the library* in the toolbar popup or in the
   panel's Settings and reload. The extension loads rerender-lens into the page before React,
-  tracking every `React.memo` / `PureComponent` by default. Change what is tracked from
-  Settings; the choice is saved per origin.
+  tracking every `React.memo` / `PureComponent` by default, without the hook/context/state
+  snapshots (*Include state* in Settings turns them on; they are the costliest part on big
+  apps). Change what is tracked from Settings; the choice is saved per origin.
 - **The page runs the library**: install the package and pass the DevTools notifier (see below).
   This is the way to go when you also want console output or want to commit the setup.
 
@@ -339,8 +340,12 @@ init({ trackAllMemoized: true, silent: true, notifier: createDevtoolsNotifier() 
 ```
 
 Each report is serialized (functions become `ƒ name`, elements `<Type>`, cycles cut) and posted
-on `window` as `{ __rerenderLens: true, version: 2, type: 'report', payload }`. The last 300
-reports are buffered. The bridge at `window.__RERENDER_LENS_DEVTOOLS__` exposes:
+on `window` as `{ __rerenderLens: true, version: 2, type: 'report', payload }`. Reports go on
+`window` only after a listener announced itself (`{ __rerenderLensReady: true }`, which the
+extension's content script posts) or after `replay()`, so a page nobody inspects pays no
+structured clone per report. Values are bounded: 100 entries per array/object/Map/Set, depth 4
+by default (`maxDepth`), 20k nodes per report. The last 300 reports are buffered. The bridge
+at `window.__RERENDER_LENS_DEVTOOLS__` exposes:
 
 | Method | |
 | --- | --- |
@@ -392,7 +397,7 @@ deepEqual(a, b), diffRecords(prev, next), classify(prev, next)
 | `trackAllComponents` | `false` | track everything (noisy) |
 | `include` / `exclude` | | display-name matchers |
 | `trackHooks` | `true` | diff hook state and contexts |
-| `includeState` | `true` | put every hook, context and class state value on each report |
+| `includeState` | `true` (`false` when injected by the extension) | put every hook, context and class state value on each report; the costliest option on large trees |
 | `resolveHookNames` | `false` | label hooks with the custom hooks that own them (`useCart › useState#0`); re-runs each component type once |
 | `logAll` | `false` | print non-avoidable reports too |
 | `silent` | `false` | never print; notifier still runs |

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeChrome, makePort, settle, type FakeChrome, type FakePort } from './fake-chrome';
@@ -9,8 +9,19 @@ interface Panel {
   state: { reports: unknown[]; library: unknown; relay: boolean; polling: boolean; tabLabel: string | null; origin: string | null };
   flush(): void;
 }
+interface Msg {
+  type: string;
+  on?: boolean;
+}
+interface TransportIO {
+  tabId(): number | null;
+  origin(): Promise<string | null>;
+  bridge(cmd: string, arg?: unknown): Promise<unknown>;
+  onNavigated(cb: () => void): void;
+}
 interface Factory {
   bootStandalone(o: { tabId?: number | null }): Panel;
+  createRelayTransport(io: TransportIO): { subscribe(fn: (m: Msg) => void): void; dispose(): void };
 }
 
 /** A page bridge as the injected/page library would expose it. */
@@ -57,6 +68,81 @@ describe('standalone panel (side panel / window)', () => {
   };
   beforeEach(() => {
     document.body.innerHTML = '<div id="root"></div>';
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('retries the page handshake with backoff, drops pending retries on navigation, and dispose leaves no timers', async () => {
+    vi.useFakeTimers();
+    chrome = makeChrome();
+    load(chrome);
+    let answer = false;
+    const calls: string[] = [];
+    let navigate: () => void = () => {};
+    const io: TransportIO = {
+      tabId: () => 7,
+      origin: () => Promise.resolve('http://localhost:5199'),
+      bridge: (cmd) => {
+        calls.push(cmd);
+        if (cmd === 'info') return Promise.resolve(answer ? { library: '0.2.0', protocol: 2, react: [], enabled: true, options: {} } : null);
+        if (cmd === 'pull') return Promise.resolve({ seq: 0, reports: [], dropped: false });
+        return Promise.resolve(true);
+      },
+      onNavigated: (cb) => {
+        navigate = cb;
+      },
+    };
+    const transport = factory.createRelayTransport(io);
+    const got: Msg[] = [];
+    transport.subscribe((m) => got.push(m));
+    const infos = () => calls.filter((c) => c === 'info').length;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(infos()).toBe(1);
+    // 500 ms doubling to a 5 s cap
+    await vi.advanceTimersByTimeAsync(499);
+    expect(infos()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(infos()).toBe(2);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(infos()).toBe(3);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(infos()).toBe(4);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(infos()).toBe(5);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(infos()).toBe(6);
+    expect(got.some((m) => m.type === 'hello')).toBe(false);
+    // the library shows up: the next try attaches (hello, pull, polling) and the retries stop
+    answer = true;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(infos()).toBe(7);
+    expect(got.some((m) => m.type === 'hello')).toBe(true);
+    expect(got.some((m) => m.type === 'polling' && m.on === true)).toBe(true);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(infos()).toBe(7);
+    expect(calls.filter((c) => c === 'pull').length).toBeGreaterThan(1);
+
+    // navigation: the first `info` waits 1.2 s; a second navigation before that cancels it and starts over
+    answer = false;
+    const polls = calls.filter((c) => c === 'pull').length;
+    navigate();
+    expect(got.at(-1)).toEqual({ type: 'navigated' });
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(infos()).toBe(7);
+    navigate();
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(infos()).toBe(7);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(infos()).toBe(8);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(infos()).toBe(9);
+    expect(calls.filter((c) => c === 'pull').length).toBe(polls); // polling stayed off
+
+    transport.dispose();
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(infos()).toBe(9);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('pinned to a tab: connects to the relay for it, reads origin and hello through chrome.scripting, shows the tab chip', async () => {

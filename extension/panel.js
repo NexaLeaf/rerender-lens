@@ -16,6 +16,14 @@
   var MAX_REPORTS = 2e3;
   var MAX_PER_NODE = 200;
   var MAX_COMMITS = 500;
+  var MAX_PER_COMMIT = 500;
+  var THROTTLE_MIN_REPORTS = 200;
+  var BEST_FIX_INTERVAL = 500;
+  var LEFT_RENDER_INTERVAL = 250;
+  var SYNC_RETRY_MIN = 500;
+  var SYNC_RETRY_MAX = 5e3;
+  var SYNC_RETRIES = 20;
+  var NAVIGATION_SETTLE = 1200;
   var ROW_H = 22;
   var ITEM_H = 20;
   var OVERSCAN = 8;
@@ -380,12 +388,22 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     return [...byKey.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   }
   var isAncestorReport = (anc, r) => anc.path.length < r.path.length && r.path[anc.path.length] === anc.component && anc.path.every((p, i) => r.path[i] === p);
-  function rootCauseOf(r, commitReports) {
+  function indexByComponent(reports) {
+    const index = /* @__PURE__ */ new Map();
+    for (const r of reports) {
+      const list = index.get(r.component);
+      if (list) list.push(r);
+      else index.set(r.component, [r]);
+    }
+    return index;
+  }
+  function rootCauseOf(r, commitReports, index = indexByComponent(commitReports)) {
     let cur = r;
     const seen = /* @__PURE__ */ new Set([r]);
     while (cur.trigger === "parent" && cur.parent) {
       const parent = cur.parent;
-      const p = commitReports.find((x) => x.component === parent.name && isAncestorReport(x, cur));
+      const candidates = index.get(parent.name);
+      const p = candidates && candidates.find((x) => isAncestorReport(x, cur));
       if (!p || seen.has(p)) return { name: parent.name, trigger: parent.trigger, report: null };
       seen.add(p);
       cur = p;
@@ -394,15 +412,18 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
   }
   function analyzeCommit(reports) {
     const roots = /* @__PURE__ */ new Map();
+    const rootByReport = /* @__PURE__ */ new Map();
+    const index = indexByComponent(reports);
     let avoidable = 0;
     let wasted = 0;
     for (const r of reports) {
       if (!r.avoidable) continue;
       avoidable++;
       if (typeof r.selfDuration === "number") wasted += r.selfDuration;
-      const root = rootCauseOf(r, reports);
+      const root = rootCauseOf(r, reports, index);
       const name = root ? root.name : r.parent && r.parent.name || "(unknown)";
       const trigger = root ? root.trigger : r.parent && r.parent.trigger || "parent";
+      rootByReport.set(r, name);
       let agg = roots.get(name);
       if (!agg) {
         agg = { name, trigger, count: 0, components: /* @__PURE__ */ new Map() };
@@ -419,6 +440,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       avoidable,
       wasted,
       roots: [...roots.values()].sort((a, b) => b.count - a.count),
+      rootByReport,
       contexts: contextAttribution(reports),
       fixes: rankFixes(reports),
       reports
@@ -465,22 +487,18 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     }
     return root;
   }
-  function rootCauseSummary(name, commits) {
+  function rootCauseSummary(name, commits, analyze = (_, reports) => analyzeCommit(reports)) {
     const out = { name, trigger: "parent", commits: [], total: 0, components: /* @__PURE__ */ new Map(), fixes: [] };
     const affected = [];
     for (const [key, reports] of commits) {
-      const analysis = analyzeCommit(reports);
+      const analysis = analyze(key, reports);
       const root = analysis.roots.find((x) => x.name === name);
       if (!root) continue;
       out.trigger = root.trigger;
       out.commits.push({ key, analysis, count: root.count, components: root.components });
       out.total += root.count;
       for (const [c, n] of root.components) out.components.set(c, (out.components.get(c) || 0) + n);
-      for (const r of reports) {
-        if (!r.avoidable) continue;
-        const rc = rootCauseOf(r, reports);
-        if ((rc ? rc.name : r.parent && r.parent.name) === name) affected.push(r);
-      }
+      for (const r of reports) if (r.avoidable && analysis.rootByReport.get(r) === name) affected.push(r);
     }
     out.commits.reverse();
     out.fixes = rankFixes(affected);
@@ -1019,6 +1037,33 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     const measure = () => setCompact(root.clientWidth > 0 && root.clientWidth < 720);
     if (typeof ResizeObserver === "function") new ResizeObserver(measure).observe(root);
     else window.addEventListener("resize", measure);
+    const totals = { avoidable: 0, wasted: 0, perComponent: /* @__PURE__ */ new Map() };
+    let bestFix;
+    let bestFixAt = 0;
+    let bestFixGen = -1;
+    let bestFixTimer = null;
+    const throttled = () => state.reports.length >= THROTTLE_MIN_REPORTS;
+    function refreshBestFix() {
+      if (!totals.avoidable) {
+        bestFix = void 0;
+        bestFixGen = dataGen;
+        return;
+      }
+      if (bestFixGen === dataGen) return;
+      const now = Date.now();
+      if (throttled() && now - bestFixAt < BEST_FIX_INTERVAL) {
+        if (!bestFixTimer) {
+          bestFixTimer = setTimeout(() => {
+            bestFixTimer = null;
+            renderSummary();
+          }, BEST_FIX_INTERVAL - (now - bestFixAt));
+        }
+        return;
+      }
+      bestFixAt = now;
+      bestFixGen = dataGen;
+      bestFix = rankFixes(state.reports)[0];
+    }
     function renderSummary() {
       summary.textContent = "";
       const total = state.reports.length;
@@ -1027,17 +1072,11 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         return;
       }
       summary.hidden = false;
-      let avoidable = 0;
-      let wasted = 0;
-      const perComponent = /* @__PURE__ */ new Map();
-      for (const r of state.reports) {
-        if (!r.avoidable) continue;
-        avoidable++;
-        if (typeof r.selfDuration === "number") wasted += r.selfDuration;
-        perComponent.set(r.component, (perComponent.get(r.component) || 0) + 1);
-      }
-      const top = [...perComponent].sort((a, b) => b[1] - a[1])[0];
-      const fix = avoidable ? rankFixes(state.reports)[0] : void 0;
+      const { avoidable, wasted } = totals;
+      let top;
+      for (const entry of totals.perComponent) if (!top || entry[1] > top[1]) top = entry;
+      refreshBestFix();
+      const fix = bestFix;
       const stat = (value, label, cls = "") => el("span", { class: "stat " + cls }, [el("b", { text: value }), el("span", { class: "label", text: label })]);
       summary.append(stat(String(total), plural(total, "render").replace(/^\d+ /, "")), stat(String(avoidable), "avoidable", avoidable ? "bad" : "good"));
       if (wasted) summary.append(stat(fmtMs(wasted), "wasted", "bad"));
@@ -1192,7 +1231,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       for (const r of state.reports) {
         const node = nodeOfReport(r);
         node.reports.push(r);
-        if (node.reports.length > MAX_PER_NODE) node.reports.shift();
         node.total++;
         if (r.avoidable) {
           node.avoidable++;
@@ -1200,20 +1238,41 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         }
         node.lastReport = r;
       }
+      for (const node of state.nodesByKey.values()) trimNode(node);
       renderLeft();
       renderDetails();
+    }
+    function trimNode(node) {
+      const excess = node.reports.length - MAX_PER_NODE;
+      if (excess > 0) node.reports.splice(0, excess);
+    }
+    const commitAnalyses = /* @__PURE__ */ new Map();
+    function analysisFor(key, reports) {
+      const cached = commitAnalyses.get(key);
+      if (cached && cached.len === reports.length) return cached.analysis;
+      const analysis = analyzeCommit(reports);
+      commitAnalyses.set(key, { len: reports.length, analysis });
+      return analysis;
+    }
+    const commitMember = /* @__PURE__ */ new WeakSet();
+    function forgetCommit(key) {
+      state.commits.delete(key);
+      commitAnalyses.delete(key);
     }
     function ingest(report) {
       if (!report.receivedAt) report.receivedAt = Date.now();
       state.reports.push(report);
-      if (state.reports.length > MAX_REPORTS) state.reports.shift();
       const node = nodeOfReport(report);
       node.reports.push(report);
-      if (node.reports.length > MAX_PER_NODE) node.reports.shift();
       node.total++;
       if (report.avoidable) {
         node.avoidable++;
-        if (typeof report.selfDuration === "number") node.wasted += report.selfDuration;
+        totals.avoidable++;
+        totals.perComponent.set(report.component, (totals.perComponent.get(report.component) || 0) + 1);
+        if (typeof report.selfDuration === "number") {
+          node.wasted += report.selfDuration;
+          totals.wasted += report.selfDuration;
+        }
       }
       node.lastReport = report;
       node.flash = true;
@@ -1224,10 +1283,36 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         list = [];
         state.commits.set(ck, list);
         state.commitOrder.push(ck);
-        if (state.commitOrder.length > MAX_COMMITS) state.commits.delete(state.commitOrder.shift());
+        if (state.commitOrder.length > MAX_COMMITS) forgetCommit(state.commitOrder.shift());
       }
-      list.push(report);
+      if (list.length < MAX_PER_COMMIT) {
+        list.push(report);
+        commitMember.add(report);
+      }
       return node;
+    }
+    function evict() {
+      const excess = state.reports.length - MAX_REPORTS;
+      if (excess <= 0) return;
+      for (const r of state.reports.splice(0, excess)) {
+        if (r.avoidable) {
+          totals.avoidable--;
+          const n = (totals.perComponent.get(r.component) || 0) - 1;
+          if (n > 0) totals.perComponent.set(r.component, n);
+          else totals.perComponent.delete(r.component);
+          if (typeof r.selfDuration === "number") totals.wasted -= r.selfDuration;
+        }
+        if (!commitMember.has(r)) continue;
+        const list = state.commits.get(r.commitId);
+        if (!list || list[0] !== r) continue;
+        list.shift();
+        if (!list.length) {
+          forgetCommit(r.commitId);
+          const i = state.commitOrder.indexOf(r.commitId);
+          if (i >= 0) state.commitOrder.splice(i, 1);
+        }
+      }
+      if (totals.wasted < 0) totals.wasted = 0;
     }
     function flush() {
       flushScheduled = false;
@@ -1236,8 +1321,10 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       queue = [];
       let touchedSelected = false;
       let avoidableCount = 0;
+      const touched = /* @__PURE__ */ new Set();
       for (const r of batch) {
         const node = ingest(r);
+        touched.add(node);
         if (state.recording && state.recording.reports.length < MAX_REPORTS) state.recording.reports.push(r);
         if (r.avoidable) avoidableCount++;
         if (state.selectedKey === node.key) {
@@ -1245,11 +1332,45 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           if (state.tab === "latest") state.selectedReport = r;
         }
       }
-      renderLeft();
+      for (const node of touched) trimNode(node);
+      evict();
+      dataGen++;
       renderStream(batch);
       renderSummary();
-      if (touchedSelected || state.view === "commits" || state.view === "fixes" || state.tab === "root" || state.recording && state.tab === "session") renderDetails();
-      if (state.polling && avoidableCount) transport.badge?.(state.reports.filter((r) => r.avoidable).length);
+      const heavy = state.view === "commits" || state.view === "fixes" || state.tab === "root" || !!(state.recording && state.tab === "session");
+      if (state.view === "tree") {
+        renderTree();
+        if (touchedSelected && !heavy) renderDetails();
+      }
+      scheduleHeavy(heavy || touchedSelected && state.view !== "tree");
+      if (state.polling && avoidableCount) transport.badge?.(totals.avoidable);
+    }
+    let heavyAt = 0;
+    let heavyTimer = null;
+    let heavyDetailsPending = false;
+    function renderHeavy(details2) {
+      heavyAt = Date.now();
+      if (state.view !== "tree") renderLeft();
+      if (details2) renderDetails();
+    }
+    function scheduleHeavy(details2) {
+      const wait = throttled() ? LEFT_RENDER_INTERVAL - (Date.now() - heavyAt) : 0;
+      if (wait <= 0) {
+        if (heavyTimer) clearTimeout(heavyTimer);
+        heavyTimer = null;
+        heavyDetailsPending = false;
+        renderHeavy(details2);
+        return;
+      }
+      heavyDetailsPending = heavyDetailsPending || details2;
+      if (!heavyTimer) {
+        heavyTimer = setTimeout(() => {
+          heavyTimer = null;
+          const d = heavyDetailsPending;
+          heavyDetailsPending = false;
+          renderHeavy(d);
+        }, wait);
+      }
     }
     function enqueue(report) {
       queue.push(report);
@@ -1264,6 +1385,13 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       state.reports = [];
       state.commits.clear();
       state.commitOrder = [];
+      commitAnalyses.clear();
+      totals.avoidable = 0;
+      totals.wasted = 0;
+      totals.perComponent.clear();
+      bestFix = void 0;
+      bestFixAt = 0;
+      dataGen++;
       state.selectedKey = null;
       state.selectedReport = null;
       state.selectedCommit = null;
@@ -1276,18 +1404,28 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       renderStream();
       renderSummary();
     }
-    const valueQuery = () => state.filter.trim().startsWith("~") ? state.filter.trim().slice(1).toLowerCase() : null;
-    function matchesFilter(name) {
-      if (!state.filter || valueQuery() !== null) return true;
+    let filterCache = { filter: "", value: null, regex: null, text: "" };
+    function parsedFilter() {
+      if (filterCache.filter === state.filter) return filterCache;
       const f = state.filter.trim();
-      const m = /^\/(.+)\/([a-z]*)$/.exec(f);
+      const value = f.startsWith("~") ? f.slice(1).toLowerCase() : null;
+      let regex = null;
+      const m = value === null ? /^\/(.+)\/([a-z]*)$/.exec(f) : null;
       if (m && m[1] !== void 0) {
         try {
-          return new RegExp(m[1], m[2]).test(name);
+          regex = new RegExp(m[1], (m[2] || "").replace(/[gy]/g, ""));
         } catch {
         }
       }
-      return name.toLowerCase().includes(f.toLowerCase());
+      filterCache = { filter: state.filter, value, regex, text: f.toLowerCase() };
+      return filterCache;
+    }
+    const valueQuery = () => parsedFilter().value;
+    function matchesFilter(name) {
+      const f = parsedFilter();
+      if (!f.filter || f.value !== null) return true;
+      if (f.regex) return f.regex.test(name);
+      return name.toLowerCase().includes(f.text);
     }
     const valueCache = /* @__PURE__ */ new WeakMap();
     function matchesValues(r) {
@@ -1312,7 +1450,18 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       return false;
     }
     const passes = (r) => (!state.avoidableOnly || r.avoidable) && matchesFilter(r.component) && matchesValues(r);
-    const filteredReports = () => state.reports.filter(passes);
+    let dataGen = 0;
+    let filtered = { key: "", reports: [], fixes: null };
+    function filteredReports() {
+      const key = `${dataGen}|${state.avoidableOnly}|${state.filter}`;
+      if (filtered.key !== key) filtered = { key, reports: state.reports.filter(passes), fixes: null };
+      return filtered.reports;
+    }
+    function filteredFixes() {
+      const reports = filteredReports();
+      if (!filtered.fixes) filtered.fixes = rankFixes(reports);
+      return filtered.fixes;
+    }
     function setView(view) {
       state.view = view;
       for (const [id, b] of viewButtons) b.classList.toggle("active", id === view);
@@ -1557,7 +1706,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         const key = state.commitOrder[i];
         const reports = state.commits.get(key);
         if (!reports || !reports.some(passes)) continue;
-        out.push({ key, analysis: analyzeCommit(reports) });
+        out.push({ key, analysis: analysisFor(key, reports) });
       }
       return out;
     }
@@ -1623,7 +1772,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     function renderFixes() {
       table.textContent = "";
       const reports = filteredReports();
-      const fixes = rankFixes(reports);
+      const fixes = filteredFixes();
       const contexts = contextAttribution(reports);
       if (!fixes.length && !contexts.length) {
         table.append(el("div", { class: "empty", text: "No avoidable re-renders, nothing to fix." }));
@@ -1758,7 +1907,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         details.append(el("div", { class: "empty", text: "This commit is no longer buffered." }));
         return;
       }
-      const a = analyzeCommit(reports);
+      const a = analysisFor(key, reports);
       details.append(
         el("div", { class: "details-header" }, [
           el("span", { class: "title", text: `Commit #${key}` }),
@@ -1819,7 +1968,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       return list;
     }
     function renderFixDetails() {
-      const fix = rankFixes(filteredReports()).find((f) => f.key === state.selectedFix);
+      const fix = filteredFixes().find((f) => f.key === state.selectedFix);
       if (!fix) {
         details.append(el("div", { class: "empty", text: "Select a fix." }));
         return;
@@ -1832,7 +1981,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     }
     function renderRootDetails() {
       const name = state.selectedRoot;
-      const s = rootCauseSummary(name, state.commits);
+      const s = rootCauseSummary(name, state.commits, analysisFor);
       details.append(
         el("div", { class: "details-header" }, [
           el("span", { class: "title" }, ["Root cause ", el("span", { class: "name", text: `<${name}>` })]),
@@ -2326,6 +2475,9 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           if (r) enqueue(r);
           break;
         }
+        case "batch":
+          if (Array.isArray(message.items)) for (const item of message.items) handle(item);
+          break;
       }
     }
     const panelApi = {
@@ -2442,11 +2594,48 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       }
       return false;
     }
+    let syncGen = 0;
+    let syncTimer = null;
+    let disposed = false;
+    function cancelSync() {
+      syncGen++;
+      if (syncTimer) clearTimeout(syncTimer);
+      syncTimer = null;
+    }
+    function syncWithRetry(onReady, initialDelay = 0) {
+      cancelSync();
+      const gen = syncGen;
+      let delay = SYNC_RETRY_MIN;
+      let tries = 0;
+      const attempt = async () => {
+        syncTimer = null;
+        if (gen !== syncGen || disposed) return;
+        const ok = await syncWithPage();
+        if (gen !== syncGen || disposed) return;
+        if (ok) {
+          onReady();
+          return;
+        }
+        if (++tries >= SYNC_RETRIES) return;
+        syncTimer = setTimeout(() => void attempt(), delay);
+        delay = Math.min(delay * 2, SYNC_RETRY_MAX);
+      };
+      if (initialDelay > 0) syncTimer = setTimeout(() => void attempt(), initialDelay);
+      else void attempt();
+    }
+    let droppedSeen = false;
+    function resetSince() {
+      since = 0;
+      droppedSeen = false;
+    }
     async function pollOnce() {
       try {
         const res = await io.bridge("pull", since);
         if (!res) return;
-        if (res.dropped) emit({ type: "clear" });
+        if (res.dropped && !droppedSeen) {
+          droppedSeen = true;
+          emit({ type: "clear" });
+        }
         for (const p of res.reports) emit({ type: "report", payload: p });
         since = res.seq;
       } catch {
@@ -2462,19 +2651,23 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         emit({ type: "polling", on: false });
       }
     }
-    async function attachToPage() {
-      if (!await syncWithPage()) return;
-      if (relayConnected) io.bridge("replay").catch(() => {
-      });
-      else {
-        const res = await io.bridge("pull", 0).catch(() => null);
-        if (res) {
-          for (const p of res.reports) emit({ type: "report", payload: p });
-          since = res.seq;
-        } else io.bridge("replay").catch(() => {
+    function attachToPage(initialDelay = 0) {
+      syncWithRetry(() => {
+        if (relayConnected) io.bridge("replay").catch(() => {
         });
-        setPolling(true);
-      }
+        else {
+          const gen = syncGen;
+          void io.bridge("pull", 0).catch(() => null).then((res) => {
+            if (gen !== syncGen || disposed) return;
+            if (res) {
+              for (const p of res.reports) emit({ type: "report", payload: p });
+              since = res.seq;
+            } else io.bridge("replay").catch(() => {
+            });
+            setPolling(true);
+          });
+        }
+      }, initialDelay);
     }
     function connect() {
       if (panelPort) {
@@ -2495,16 +2688,20 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           setPolling(false);
         } else if (m.type === "disconnected") {
           relayConnected = false;
-          void syncWithPage().then((ok) => ok && setPolling(true));
+          syncWithRetry(() => setPolling(true));
         }
         emit(m);
       });
       port.onDisconnect.addListener(() => {
         if (panelPort !== port) return;
         panelPort = null;
-        setTimeout(connect, 1e3);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          if (!disposed) connect();
+        }, 1e3);
       });
     }
+    let reconnectTimer = null;
     const transport = {
       origin,
       tabLabel: io.tabLabel ?? null,
@@ -2512,37 +2709,44 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         listener = fn;
         connect();
         io.onNavigated(() => {
-          since = 0;
+          if (disposed) return;
+          resetSince();
           setPolling(false);
+          cancelSync();
           fn({ type: "navigated" });
           void resolveOrigin().then(() => {
-            setTimeout(() => void attachToPage(), 1200);
+            if (!disposed) attachToPage(NAVIGATION_SETTLE);
           });
         });
         io.onTabChange?.((label) => {
+          if (disposed) return;
           transport.tabLabel = label;
           const next = io.tabId();
           if (next === currentTab) {
             fn({ type: "tab-label", payload: label });
             return;
           }
-          since = 0;
+          resetSince();
           relayConnected = false;
           setPolling(false);
+          cancelSync();
           currentTab = next;
           void resolveOrigin().then(() => {
+            if (disposed) return;
             fn({ type: "tab", payload: label });
             connect();
-            void attachToPage();
+            attachToPage();
           });
         });
-        void resolveOrigin().then(() => attachToPage());
+        void resolveOrigin().then(() => {
+          if (!disposed) attachToPage();
+        });
       },
       replay() {
         if (relayConnected) io.bridge("replay").catch(() => {
         });
         else {
-          since = 0;
+          resetSince();
           emit({ type: "clear" });
           void syncWithPage().then(() => pollOnce());
         }
@@ -2550,7 +2754,22 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       clear() {
         io.bridge("clear").catch(() => {
         });
-        since = 0;
+        resetSince();
+      },
+      dispose() {
+        disposed = true;
+        cancelSync();
+        setPolling(false);
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        if (panelPort) {
+          try {
+            panelPort.disconnect();
+          } catch {
+          }
+          panelPort = null;
+        }
+        listener = null;
       },
       configure: (options) => io.bridge("configure", options).then((r) => r ?? void 0),
       highlight: (id) => io.bridge("highlight", id).catch(() => {

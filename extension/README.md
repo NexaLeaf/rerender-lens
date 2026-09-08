@@ -58,7 +58,8 @@ init({ trackAllMemoized: true, silent: true, notifier: createDevtoolsNotifier() 
 
 **2. Injection, no app code**: open the toolbar popup (or Settings in the panel), enable the site
 and tick *Inject the library*. The extension then loads rerender-lens into the page before React,
-with `trackAllMemoized` on. Reload the page. Options you change in Settings are saved per origin
+with `trackAllMemoized` on and `includeState` off (the state snapshots are the costliest part on
+large apps; tick *Include state* in Settings when you need them). Reload the page. Options you change in Settings are saved per origin
 and applied on the next load.
 
 If the page already runs the library, injection steps aside.

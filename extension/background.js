@@ -58,12 +58,22 @@ function paintBadge(tabId) {
   if (count > 0) chrome.action.setBadgeBackgroundColor({ tabId, color: '#d93025' }).catch(() => {});
 }
 
+// The content script coalesces one macrotask of page messages into `{ type: 'batch', items }`; single messages still arrive as-is.
 function bumpBadge(tabId, message) {
-  if (message.type === 'report' && message.payload && message.payload.avoidable) {
-    setBadge(tabId, (badgeByTab.get(tabId) || 0) + 1);
-  } else if (message.type === 'clear') {
-    setBadge(tabId, 0);
+  const items = message.type === 'batch' && Array.isArray(message.items) ? message.items : [message];
+  let count = badgeByTab.get(tabId) || 0;
+  let changed = false;
+  for (const m of items) {
+    if (!m) continue;
+    if (m.type === 'report' && m.payload && m.payload.avoidable) {
+      count++;
+      changed = true;
+    } else if (m.type === 'clear') {
+      count = 0;
+      changed = true;
+    }
   }
+  if (changed) setBadge(tabId, count);
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => {
