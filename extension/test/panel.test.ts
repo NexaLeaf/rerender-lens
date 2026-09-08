@@ -55,8 +55,11 @@ interface Factory {
   normalizeReport(p: unknown): Record<string, unknown> | null;
   reportToMarkdown(r: unknown): string;
   sampleReports(): Record<string, unknown>[];
+  floodReports(n: number): Record<string, unknown>[];
   analysis: {
     firstDifferentPath(a: unknown, b: unknown): string | null;
+    diffLeaves(a: unknown, b: unknown, limit?: number): { path: string; prev: unknown; next: unknown }[];
+    rootCauseSummary(name: string, commits: Iterable<[number, unknown[]]>): { total: number; commits: { key: number }[]; trigger: string };
     fixesFor(r: unknown): Fix[];
     rankFixes(rs: unknown[]): Fix[];
     rootCauseOf(r: unknown, rs: unknown[]): { name: string; trigger: string } | null;
@@ -373,6 +376,116 @@ describe('devtools panel', () => {
   });
 });
 
+describe('scale and navigation', () => {
+  let factory: Factory;
+  let root: HTMLElement;
+  let panel: Panel;
+  let calls: unknown[];
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="root"></div>';
+    root = document.getElementById('root')!;
+    const w = window as unknown as Record<string, unknown>;
+    delete w.RerenderLensPanel;
+    new Function('window', 'document', 'chrome', source)(window, document, undefined);
+    factory = w.RerenderLensPanel as Factory;
+    calls = [];
+    panel = factory.createPanel(root, makeTransport({ highlight: (id: unknown) => calls.push(['highlight', id]) }));
+  });
+
+  it('virtualizes the tree and the stream: 3000 nodes keep the DOM small and scrolling reveals the rest', () => {
+    for (const r of factory.floodReports(3000)) panel.handle({ type: 'report', payload: r });
+    panel.flush();
+    expect(panel.state.reports).toHaveLength(2000); // MAX_REPORTS ring
+    const rows = root.querySelectorAll('.row').length;
+    expect(rows).toBeGreaterThan(10);
+    expect(rows).toBeLessThan(100);
+    const inner = root.querySelector('.tree .virtual-inner') as HTMLElement;
+    const totalRows = parseInt(inner.style.height, 10) / 22;
+    expect(totalRows).toBeGreaterThan(300);
+    expect(root.querySelectorAll('.stream-item').length).toBeLessThan(100);
+    expect(root.querySelector('.stream .count')!.textContent).toBe('2000 reports');
+    // scrolling the tree moves the window; the first mounted row is no longer at the top
+    const tree = root.querySelector('.tree') as HTMLElement;
+    tree.scrollTop = 22 * 200;
+    tree.dispatchEvent(new Event('scroll'));
+    return new Promise<void>((resolve) =>
+      requestAnimationFrame(() => {
+        const tops = [...root.querySelectorAll<HTMLElement>('.row')].map((r) => parseInt(r.style.top, 10));
+        expect(Math.min(...tops)).toBeGreaterThan(22 * 100);
+        // selecting a row far down scrolls it into view
+        panel.select('Item150');
+        expect(root.querySelector('.details-header .name')!.textContent).toBe('Item150');
+        resolve();
+      }),
+    );
+  });
+
+  it('keyboard: / focuses search, f opens the fix tab, Esc clears the highlight and leaves the search box', () => {
+    panel.handle({ type: 'report', payload: report() });
+    panel.flush();
+    const search = root.querySelector('input[type="search"]') as HTMLInputElement;
+    root.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
+    expect(document.activeElement).toBe(search);
+    // typing '/' inside the box must not be swallowed
+    const ev = new KeyboardEvent('keydown', { key: '/', bubbles: true, cancelable: true });
+    search.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(false);
+    search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(document.activeElement).not.toBe(search);
+    expect(calls).toEqual([['highlight', null]]);
+    panel.select('Row');
+    root.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', bubbles: true }));
+    expect(panel.state.tab).toBe('fix');
+    expect(root.querySelector('.section.fix h3')!.textContent).toBe('useMemo(style) in <List>');
+  });
+
+  it('shows the differing leaves of a changed object prop', () => {
+    panel.handle({
+      type: 'report',
+      payload: report({
+        avoidable: false,
+        trigger: 'props',
+        props: { prev: { filters: { sort: 'asc', page: 1, tags: ['a'] } }, next: { filters: { sort: 'asc', page: 2, tags: ['a', 'b'] } } },
+        propChanges: [{ path: 'filters', kind: 'different', prev: { sort: 'asc', page: 1, tags: ['a'] }, next: { sort: 'asc', page: 2, tags: ['a', 'b'] } }],
+      }),
+    });
+    panel.flush();
+    panel.select('Row');
+    expect(root.querySelector('.kv tr.changed .kind')!.textContent).toBe('changed at filters.page');
+    expect(root.querySelector('details.diff summary')!.textContent).toBe('2 differing leaves');
+    expect([...root.querySelectorAll('.kv.leaves td.k')].map((n) => n.textContent)).toEqual(['filters.page', 'filters.tags[1]']);
+  });
+
+  it('root-cause page lists every commit a component started and the fixes for them', () => {
+    const page = (commitId: number) => report({ component: 'Page', path: ['App'], trigger: 'state', avoidable: false, parent: null, owner: 'App', propChanges: [], commitId });
+    const row = (commitId: number, n: number) => report({ path: ['App', 'Page'], parent: { name: 'Page', trigger: 'state' }, owner: 'Page', commitId, renderCount: n });
+    for (const p of [page(1), row(1, 1), page(2), row(2, 2), report({ component: 'Other', path: ['App'], parent: { name: 'App', trigger: 'state' }, commitId: 3 })]) {
+      panel.handle({ type: 'report', payload: p });
+    }
+    panel.flush();
+    panel.setView('commits');
+    (root.querySelector('.commits li:last-child') as HTMLElement).click(); // commit #1
+    expect(root.querySelector('.details-header .title')!.textContent).toBe('Commit #1');
+    (root.querySelector('.roots .root-link') as HTMLElement).click();
+    expect(panel.state.tab).toBe('root');
+    expect(root.querySelector('.details-header .title')!.textContent).toBe('Root cause <Page>');
+    expect(root.querySelector('.details-header .meta')!.textContent).toBe('started 2 commits with 2 avoidable re-renders (state)');
+    expect([...root.querySelectorAll('.root-commits .id')].map((n) => n.textContent)).toEqual(['#2', '#1']);
+    expect(root.querySelector('.section.fix h3')!.textContent).toBe('useMemo(style) in <Page>');
+    // a new report for that root cause refreshes the page
+    panel.handle({ type: 'report', payload: page(4) });
+    panel.handle({ type: 'report', payload: row(4, 3) });
+    panel.flush();
+    expect(root.querySelector('.details-header .meta')!.textContent).toBe('started 3 commits with 3 avoidable re-renders (state)');
+    (root.querySelector('.root-commits li') as HTMLElement).click();
+    expect(root.querySelector('.details-header .title')!.textContent).toBe('Commit #4');
+    // clearing leaves the root tab
+    panel.clearAll();
+    expect(panel.state.tab).toBe('latest');
+    expect(root.querySelector('.details .empty')!.textContent).toBe('Select a component to see why it re-rendered.');
+  });
+});
+
 describe('analysis', () => {
   let factory: Factory;
   beforeEach(() => {
@@ -382,13 +495,37 @@ describe('analysis', () => {
     factory = w.RerenderLensPanel as Factory;
   });
 
-  it('firstDifferentPath', () => {
-    const { firstDifferentPath } = factory.analysis;
+  it('firstDifferentPath and diffLeaves', () => {
+    const { firstDifferentPath, diffLeaves } = factory.analysis;
     expect(firstDifferentPath({ a: 1 }, { a: 1 })).toBeNull();
     expect(firstDifferentPath({ style: { color: 'red' } }, { style: { color: 'blue' } })).toBe('style.color');
     expect(firstDifferentPath({ items: [1, 2] }, { items: [1, 3] })).toBe('items[1]');
     expect(firstDifferentPath({ items: [1, 2] }, { items: [1] })).toBe('items.length');
     expect(firstDifferentPath(1, 'x')).toBe('(value)');
+    expect(diffLeaves({ a: 1, b: { c: [1, 2], d: 'x' } }, { a: 1, b: { c: [1, 3, 4], d: 'y' }, e: null })).toEqual([
+      { path: 'b.c[1]', prev: 2, next: 3 },
+      { path: 'b.c[2]', prev: undefined, next: 4 },
+      { path: 'b.d', prev: 'x', next: 'y' },
+      { path: 'e', prev: undefined, next: null },
+    ]);
+    expect(diffLeaves({ a: 1 }, { a: 1 })).toEqual([]);
+    const big = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`k${i}`, i]));
+    expect(diffLeaves(big, {}, 20)).toHaveLength(20);
+  });
+
+  it('rootCauseSummary aggregates across commits', () => {
+    const { rootCauseSummary } = factory.analysis;
+    const page = report({ component: 'Page', path: ['App'], trigger: 'state', avoidable: false, parent: null });
+    const row = report({ path: ['App', 'Page'], parent: { name: 'Page', trigger: 'state' } });
+    const s = rootCauseSummary('Page', [
+      [1, [page, row]],
+      [2, [report({ component: 'Other', path: ['App'] })]],
+      [3, [page, row, { ...row, component: 'Row2' }]],
+    ]);
+    expect(s.total).toBe(3);
+    expect(s.commits.map((c) => c.key)).toEqual([3, 1]);
+    expect(s.trigger).toBe('state');
+    expect(rootCauseSummary('Nobody', [[1, [page, row]]]).commits).toEqual([]);
   });
 
   it('fixesFor covers every avoidable change kind', () => {

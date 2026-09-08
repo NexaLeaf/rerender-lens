@@ -34,4 +34,20 @@ export default defineConfig([
     target: 'es2020',
     define,
   },
+  // The DevTools panel. Output is committed so the extension loads unpacked and jsdom tests need no build.
+  {
+    entry: { panel: 'extension/src/panel.ts' },
+    format: ['iife'],
+    outDir: 'extension',
+    outExtension: () => ({ js: '.js' }),
+    dts: false,
+    sourcemap: false,
+    clean: false,
+    splitting: false,
+    treeshake: false,
+    minify: false,
+    platform: 'browser',
+    target: 'es2020',
+    banner: { js: '/* Built from extension/src/panel.ts by `npm run build`; do not edit by hand. */' },
+  },
 ]);

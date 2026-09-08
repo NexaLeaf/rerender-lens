@@ -9,7 +9,8 @@ Other views in the left pane:
 
 - **Offenders**: every component ranked by avoidable re-renders, total renders and wasted time.
 - **Commits**: one row per React commit with its root cause; the details show the render cascade
-  (who caused whom), the contexts that changed, and the fixes for that commit.
+  (who caused whom), the contexts that changed, and the fixes for that commit. Click a root cause
+  to see every commit that component started across the session.
 - **Fixes**: every suggested fix ranked by how many avoidable re-renders it removes
   ("useCallback(onSelect) in <ProductPage>: 12"), with a snippet to copy.
 
@@ -17,6 +18,10 @@ Also: an **Elements-panel sidebar** ("Re-renders") for the selected DOM node, a 
 with the avoidable count of the current tab, hover-to-highlight of a component's DOM in the page,
 "open source" links into the Sources panel, JSON export/import, Markdown copy of a report, and a
 Settings drawer that changes the library's options live (persisted per origin).
+
+Keyboard: `/` focuses search, arrows move in the tree, `f` opens the Fix tab, `Esc` clears the
+highlight. The tree and the stream are virtualized, so tens of thousands of reports stay smooth;
+`panel.html?demo&flood=5000` is the scale test.
 
 ## Two ways to connect a page
 
@@ -90,7 +95,7 @@ and the panel says so; turn injection off for that origin.
 | `manifest.json` | MV3; `scripts/build-extension.mjs` derives the Firefox manifest from it |
 | `background.js` | routing, badge, per-origin script registration (`shared.js` helpers) |
 | `content.js`, `inject.js`, `inject-deferred.js` | relay; in-page bootstrap for injection; flag file for the deferred mode |
-| `devtools.js`, `panel.html/js/css` | the panel; `panel.js` also exports `RerenderLensPanel.analysis` (pure ranking code) |
+| `devtools.js`, `panel.html/css`, `src/panel.ts` | the panel. `npm run build` compiles `src/panel.ts` to the committed `panel.js` (CI checks it is current); `RerenderLensPanel.analysis` holds the pure ranking code |
 | `sidebar.html/js` | Elements-panel sidebar |
 | `popup.html/js` | toolbar popup to enable a site |
 | `store/` | listing text, privacy policy, publishing notes |

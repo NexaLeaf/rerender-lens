@@ -20,6 +20,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: extension/panel.js is built from extension/src/panel.ts and committed
+        run: git diff --exit-code -- extension/panel.js || (echo "::error::extension/panel.js is out of date. Run 'npm run build' and commit it." && exit 1)
       - run: npm run lint:pkg
       - run: npm run build:ext
       - uses: actions/upload-artifact@v4

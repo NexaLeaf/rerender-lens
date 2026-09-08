@@ -84,9 +84,10 @@ button:disabled { opacity: 0.4; cursor: default; }
 .main { display: flex; flex: 1; min-height: 0; }
 .tree { width: 42%; min-width: 220px; border-right: 1px solid var(--border); overflow: auto; outline: none; background: var(--bg); }
 .tree:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.virtual-inner { position: relative; width: 100%; }
 .row {
   display: flex; align-items: center; height: 22px; padding-right: 8px; white-space: nowrap;
-  cursor: default; position: relative; user-select: none;
+  cursor: default; position: absolute; left: 0; right: 0; user-select: none; box-sizing: border-box;
 }
 .row:hover { background: var(--hover); }
 .row.selected { background: var(--selected); color: var(--selected-text); }
@@ -160,17 +161,17 @@ details.obj pre { margin: 4px 0 0 12px; font: 11px/1.4 var(--mono); white-space:
 .stream { flex: none; border-top: 1px solid var(--border); background: var(--bg-alt); }
 .stream-header { display: flex; align-items: center; gap: 8px; padding: 3px 8px; color: var(--text-dim); cursor: pointer; user-select: none; }
 .stream-header .count { margin-left: auto; }
-.stream-list { list-style: none; margin: 0; padding: 0; max-height: 140px; overflow: auto; font-family: var(--mono); font-size: 11px; }
+.stream-list { margin: 0; padding: 0; height: 140px; overflow: auto; font-family: var(--mono); font-size: 11px; position: relative; }
 .stream.collapsed .stream-list { display: none; }
-.stream-list li { display: flex; gap: 8px; padding: 2px 8px; cursor: pointer; white-space: nowrap; }
-.stream-list li:hover { background: var(--hover); }
-.stream-list .t { color: var(--text-dim); flex: none; }
-.stream-list .c { color: var(--key); flex: none; }
-.stream-list .c::before { content: "<"; color: var(--text-dim); }
-.stream-list .c::after { content: ">"; color: var(--text-dim); }
-.stream-list .v.avoid { color: var(--danger); }
-.stream-list .v.ok { color: var(--ok); }
-.stream-list .s { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+.stream-item { display: flex; gap: 8px; align-items: center; height: 20px; padding: 0 8px; cursor: pointer; white-space: nowrap; position: absolute; left: 0; right: 0; box-sizing: border-box; }
+.stream-item:hover { background: var(--hover); }
+.stream-item .t { color: var(--text-dim); flex: none; }
+.stream-item .c { color: var(--key); flex: none; }
+.stream-item .c::before { content: "<"; color: var(--text-dim); }
+.stream-item .c::after { content: ">"; color: var(--text-dim); }
+.stream-item .v.avoid { color: var(--danger); }
+.stream-item .v.ok { color: var(--ok); }
+.stream-item .s { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------- status, banner, toast ---------- */
 .status.partial .dot { background: var(--warn); }
@@ -184,7 +185,7 @@ details.obj pre { margin: 4px 0 0 12px; font: 11px/1.4 var(--mono); white-space:
 .left { width: 42%; min-width: 180px; display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
 .views { display: flex; gap: 2px; padding: 3px 6px; border-bottom: 1px solid var(--border); background: var(--bg-toolbar); flex: none; }
 .views button { height: 22px; font-size: 11px; }
-.left .tree { width: auto; min-width: 0; border-right: none; flex: 1; }
+.left .tree { width: auto; min-width: 0; border-right: none; flex: 1; position: relative; }
 .table-wrap { flex: 1; overflow: auto; }
 .resizer { width: 5px; cursor: col-resize; background: var(--border); flex: none; }
 .resizer:hover { background: var(--accent); }
@@ -242,3 +243,13 @@ details.obj pre { margin: 4px 0 0 12px; font: 11px/1.4 var(--mono); white-space:
 .opt.col { flex-direction: column; align-items: stretch; gap: 2px; }
 .opt input[type="text"], .opt input[type="number"] { height: 22px; padding: 0 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: inherit; font: inherit; }
 .drawer .meta { color: var(--text-dim); margin-top: 4px; }
+
+/* ---------- leaf diff, root-cause links ---------- */
+details.diff { display: block; margin-top: 2px; }
+details.diff summary { cursor: pointer; color: var(--accent); font-family: var(--font); font-size: 10px; }
+.kv.leaves { margin: 2px 0 4px 12px; width: auto; }
+.kv.leaves td.k { color: var(--text-dim); }
+.root-link { color: var(--key); font-family: var(--mono); font-weight: 600; text-decoration: none; }
+.root-link:hover { text-decoration: underline; }
+.details-header .title .name { font-family: var(--mono); color: var(--key); }
+.root-commits li { cursor: pointer; }

@@ -1,288 +1,310 @@
-/* rerender-lens DevTools panel. Plain JS, no build step.
- * Exposes window.RerenderLensPanel.createPanel(root, transport, options) for tests, demo mode and the
- * Elements sidebar. Everything under `analysis` is pure and unit-tested on its own. */
-(function (global) {
-  'use strict';
-
-  const PROTOCOL = 2;
-  const KIND_LABEL = {
-    'deep-equal': 'equal by value',
-    function: 'new function',
-    element: 'equal element',
-    different: 'changed',
-    added: 'added',
-    removed: 'removed',
+/* Built from extension/src/panel.ts by `npm run build`; do not edit by hand. */
+"use strict";
+(() => {
+  // extension/src/panel.ts
+  var PROTOCOL = 2;
+  var KIND_LABEL = {
+    "deep-equal": "equal by value",
+    function: "new function",
+    element: "equal element",
+    different: "changed",
+    added: "added",
+    removed: "removed"
   };
-  const AVOIDABLE_KINDS = new Set(['deep-equal', 'function', 'element']);
-  const FN_PREFIX = '\u0192 '; // "f " as emitted by the library's serialize()
-  const MAX_REPORTS = 2000;
-  const MAX_PER_NODE = 200;
-  const MAX_STREAM = 300;
-  const MAX_COMMITS = 500;
-
-  // ---------- tiny DOM helpers ----------
+  var AVOIDABLE_KINDS = /* @__PURE__ */ new Set(["deep-equal", "function", "element"]);
+  var FN_PREFIX = "\u0192 ";
+  var MAX_REPORTS = 2e3;
+  var MAX_PER_NODE = 200;
+  var MAX_COMMITS = 500;
+  var ROW_H = 22;
+  var ITEM_H = 20;
+  var OVERSCAN = 8;
+  var FALLBACK_VIEWPORT = 800;
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
     if (attrs) {
       for (const k of Object.keys(attrs)) {
         const v = attrs[k];
-        if (k === 'class') node.className = v;
-        else if (k === 'text') node.textContent = v;
-        else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
-        else if (v === true) node.setAttribute(k, '');
-        else if (v !== undefined && v !== null && v !== false) node.setAttribute(k, v);
+        if (k === "class") node.className = String(v);
+        else if (k === "text") node.textContent = String(v);
+        else if (k.startsWith("on")) {
+          if (typeof v === "function") node.addEventListener(k.slice(2), v);
+        } else if (v === true) node.setAttribute(k, "");
+        else if (v !== void 0 && v !== null && v !== false) node.setAttribute(k, String(v));
       }
     }
-    if (children) for (const c of [].concat(children)) if (c != null) node.append(c);
+    if (children) {
+      for (const c of [].concat(children)) if (c != null) node.append(c);
+    }
     return node;
   }
-
   function fmtTime(ms) {
     const d = new Date(ms);
-    const p = (n, w) => String(n).padStart(w, '0');
+    const p = (n, w) => String(n).padStart(w, "0");
     return `${p(d.getHours(), 2)}:${p(d.getMinutes(), 2)}:${p(d.getSeconds(), 2)}.${p(d.getMilliseconds(), 3)}`;
   }
-
-  const fmtMs = (n) => (typeof n === 'number' && Number.isFinite(n) ? `${n.toFixed(1)} ms` : '');
-
+  var fmtMs = (n) => typeof n === "number" && Number.isFinite(n) ? `${n.toFixed(1)} ms` : "";
+  var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  var componentList = (m) => [...m].map(([c, n]) => `<${c}>${n > 1 ? " \xD7" + n : ""}`).join(", ");
   function changesOf(report) {
     return [].concat(report.propChanges || [], report.stateChanges || [], report.hookChanges || []);
   }
-
   function summarize(report) {
-    const counts = new Map();
+    const counts = /* @__PURE__ */ new Map();
     for (const c of changesOf(report)) counts.set(c.kind, (counts.get(c.kind) || 0) + 1);
-    if (counts.size === 0) return 'no changes';
-    return [...counts].map(([k, n]) => `${n} ${KIND_LABEL[k] || k}`).join(', ');
+    if (counts.size === 0) return "no changes";
+    return [...counts].map(([k, n]) => `${n} ${KIND_LABEL[k] || k}`).join(", ");
   }
-
-  /** Make an incoming payload safe to render; null when it is not a report at all. */
+  var isRecord = (v) => typeof v === "object" && v !== null;
   function normalizeReport(p) {
-    if (!p || typeof p !== 'object' || typeof p.component !== 'string') return null;
-    const arr = (x) => (Array.isArray(x) ? x.filter((c) => c && typeof c === 'object' && typeof c.path === 'string') : []);
+    if (!isRecord(p) || typeof p.component !== "string") return null;
+    const arr = (x) => Array.isArray(x) ? x.filter((c) => isRecord(c) && typeof c.path === "string") : [];
+    const props = isRecord(p.props) ? p.props : {};
+    const parent = isRecord(p.parent) && typeof p.parent.name === "string" ? { name: p.parent.name, trigger: typeof p.parent.trigger === "string" ? p.parent.trigger : "parent" } : null;
     const r = {
       component: p.component,
-      instanceId: typeof p.instanceId === 'number' ? p.instanceId : 0,
-      commitId: typeof p.commitId === 'number' ? p.commitId : 0,
-      renderCount: typeof p.renderCount === 'number' ? p.renderCount : 0,
-      trigger: typeof p.trigger === 'string' ? p.trigger : 'parent',
+      instanceId: typeof p.instanceId === "number" ? p.instanceId : 0,
+      commitId: typeof p.commitId === "number" ? p.commitId : 0,
+      renderCount: typeof p.renderCount === "number" ? p.renderCount : 0,
+      trigger: typeof p.trigger === "string" ? p.trigger : "parent",
       avoidable: !!p.avoidable,
-      props: p.props && typeof p.props === 'object' ? { prev: p.props.prev || {}, next: p.props.next || {} } : { prev: {}, next: {} },
+      props: { prev: isRecord(props.prev) ? props.prev : {}, next: isRecord(props.next) ? props.next : {} },
       propChanges: arr(p.propChanges),
       stateChanges: arr(p.stateChanges),
       hookChanges: arr(p.hookChanges),
-      parent: p.parent && typeof p.parent === 'object' && typeof p.parent.name === 'string' ? { name: p.parent.name, trigger: p.parent.trigger || 'parent' } : null,
-      owner: typeof p.owner === 'string' ? p.owner : null,
-      path: Array.isArray(p.path) ? p.path.filter((x) => typeof x === 'string') : [],
-      reasons: Array.isArray(p.reasons) ? p.reasons.filter((x) => typeof x === 'string') : [],
-      time: typeof p.time === 'number' ? p.time : 0,
+      parent,
+      owner: typeof p.owner === "string" ? p.owner : null,
+      path: Array.isArray(p.path) ? p.path.filter((x) => typeof x === "string") : [],
+      reasons: Array.isArray(p.reasons) ? p.reasons.filter((x) => typeof x === "string") : [],
+      time: typeof p.time === "number" ? p.time : 0,
+      receivedAt: typeof p.receivedAt === "number" ? p.receivedAt : 0
     };
-    if (typeof p.selfDuration === 'number') r.selfDuration = p.selfDuration;
-    if (typeof p.treeDuration === 'number') r.treeDuration = p.treeDuration;
-    if (typeof p.memoized === 'boolean') r.memoized = p.memoized;
-    if (p.source && typeof p.source === 'object' && typeof p.source.fileName === 'string') r.source = p.source;
-    if (typeof p.receivedAt === 'number') r.receivedAt = p.receivedAt;
+    if (typeof p.selfDuration === "number") r.selfDuration = p.selfDuration;
+    if (typeof p.treeDuration === "number") r.treeDuration = p.treeDuration;
+    if (typeof p.memoized === "boolean") r.memoized = p.memoized;
+    if (isRecord(p.source) && typeof p.source.fileName === "string") r.source = p.source;
     return r;
   }
-
-  // ---------- value rendering ----------
-  function valueNode(v, depth) {
-    depth = depth || 0;
-    if (v === null || v === undefined) return el('span', { class: 'v nil', text: String(v) });
+  function valueNode(v, depth = 0) {
+    if (v === null || v === void 0) return el("span", { class: "v nil", text: String(v) });
     const t = typeof v;
-    if (t === 'string') {
-      if (v.startsWith(FN_PREFIX)) return el('span', { class: 'v fn', text: v });
-      if (/^<[^>]+>$/.test(v)) return el('span', { class: 'v', text: v });
-      return el('span', { class: 'v str', text: JSON.stringify(v) });
+    if (typeof v === "string") {
+      if (v.startsWith(FN_PREFIX)) return el("span", { class: "v fn", text: v });
+      if (/^<[^>]+>$/.test(v)) return el("span", { class: "v", text: v });
+      return el("span", { class: "v str", text: JSON.stringify(v) });
     }
-    if (t === 'number' || t === 'bigint') return el('span', { class: 'v num', text: String(v) });
-    if (t === 'boolean') return el('span', { class: 'v bool', text: String(v) });
+    if (t === "number" || t === "bigint") return el("span", { class: "v num", text: String(v) });
+    if (t === "boolean") return el("span", { class: "v bool", text: String(v) });
     if (Array.isArray(v)) {
-      const short = v.length <= 4 && v.every((x) => typeof x !== 'object' || x === null);
+      const short = v.length <= 4 && v.every((x) => typeof x !== "object" || x === null);
       if (short) {
-        const s = el('span', { class: 'v' }, '[');
+        const s = el("span", { class: "v" }, "[");
         v.forEach((x, i) => {
-          if (i) s.append(', ');
+          if (i) s.append(", ");
           s.append(valueNode(x, depth + 1));
         });
-        s.append(']');
+        s.append("]");
         return s;
       }
       return objectDetails(`Array(${v.length})`, v);
     }
-    if (v.$type === 'Date') return el('span', { class: 'v', text: `Date(${v.value})` });
-    if (v.$type === 'RegExp') return el('span', { class: 'v', text: v.value });
-    if (v.$type === 'Map') return objectDetails(`Map(${v.entries.length})`, v.entries);
-    if (v.$type === 'Set') return objectDetails(`Set(${v.values.length})`, v.values);
-    const keys = Object.keys(v).filter((k) => k !== '$type');
-    const label = `${v.$type ? v.$type + ' ' : ''}{${keys.slice(0, 3).join(', ')}${keys.length > 3 ? ', ...' : ''}}`;
-    return objectDetails(label, v);
+    const o = v;
+    if (o.$type === "Date") return el("span", { class: "v", text: `Date(${String(o.value)})` });
+    if (o.$type === "RegExp") return el("span", { class: "v", text: String(o.value) });
+    if (o.$type === "Map" && Array.isArray(o.entries)) return objectDetails(`Map(${o.entries.length})`, o.entries);
+    if (o.$type === "Set" && Array.isArray(o.values)) return objectDetails(`Set(${o.values.length})`, o.values);
+    const keys = Object.keys(o).filter((k) => k !== "$type");
+    const label = `${o.$type ? String(o.$type) + " " : ""}{${keys.slice(0, 3).join(", ")}${keys.length > 3 ? ", ..." : ""}}`;
+    return objectDetails(label, o);
   }
-
   function objectDetails(label, obj) {
-    const d = el('details', { class: 'obj' }, [el('summary', { text: label })]);
+    const d = el("details", { class: "obj" }, [el("summary", { text: label })]);
     d.addEventListener(
-      'toggle',
+      "toggle",
       () => {
-        if (d.open && !d.querySelector('pre')) d.append(el('pre', { text: JSON.stringify(obj, null, 2) }));
+        if (d.open && !d.querySelector("pre")) d.append(el("pre", { text: JSON.stringify(obj, null, 2) }));
       },
-      { once: true },
+      { once: true }
     );
     return d;
   }
-
-  // ---------- analysis (pure) ----------
-  /** First path at which two serialized values differ, e.g. "style.color" or "items[2].id"; '' when equal. */
-  function firstDifferentPath(a, b, base) {
-    base = base || '';
+  function firstDifferentPath(a, b, base = "") {
     if (a === b) return null;
-    const ta = typeof a;
-    const tb = typeof b;
-    if (ta !== 'object' || tb !== 'object' || a === null || b === null) return base || '(value)';
-    if (Array.isArray(a) !== Array.isArray(b)) return base || '(value)';
-    if (Array.isArray(a)) {
-      if (a.length !== b.length) return base ? `${base}.length` : 'length';
+    if (!isRecord(a) || !isRecord(b)) return base || "(value)";
+    if (Array.isArray(a) !== Array.isArray(b)) return base || "(value)";
+    if (Array.isArray(a) && Array.isArray(b)) {
+      if (a.length !== b.length) return base ? `${base}.length` : "length";
       for (let i = 0; i < a.length; i++) {
         const p = firstDifferentPath(a[i], b[i], `${base}[${i}]`);
         if (p) return p;
       }
       return null;
     }
-    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    const keys = /* @__PURE__ */ new Set([...Object.keys(a), ...Object.keys(b)]);
     for (const k of keys) {
       const p = firstDifferentPath(a[k], b[k], base ? `${base}.${k}` : k);
       if (p) return p;
     }
     return null;
   }
-
-  function shortValue(v, max) {
-    max = max || 60;
+  function diffLeaves(a, b, limit = 20, base = "", out = []) {
+    if (out.length >= limit || a === b) return out;
+    if (!isRecord(a) || !isRecord(b) || Array.isArray(a) !== Array.isArray(b)) {
+      out.push({ path: base || "(value)", prev: a, next: b });
+      return out;
+    }
+    if (Array.isArray(a) && Array.isArray(b)) {
+      const n = Math.max(a.length, b.length);
+      for (let i = 0; i < n && out.length < limit; i++) diffLeaves(a[i], b[i], limit, `${base}[${i}]`, out);
+      return out;
+    }
+    for (const k of /* @__PURE__ */ new Set([...Object.keys(a), ...Object.keys(b)])) {
+      if (out.length >= limit) break;
+      diffLeaves(a[k], b[k], limit, base ? `${base}.${k}` : k, out);
+    }
+    return out;
+  }
+  function shortValue(v, max = 60) {
     let s;
     try {
       s = JSON.stringify(v);
     } catch {
       s = String(v);
     }
-    if (s === undefined) s = String(v);
-    return s.length > max ? s.slice(0, max - 3) + '...' : s;
+    if (s === void 0) s = String(v);
+    return s.length > max ? s.slice(0, max - 3) + "..." : s;
   }
-
-  const identifier = (name) => (/^[A-Za-z_$][\w$]*$/.test(name) ? name : 'value');
-
-  /** The concrete fixes one report suggests, each attributed to the file that must change. */
+  var identifier = (name) => /^[A-Za-z_$][\w$]*$/.test(name) ? name : "value";
   function fixesFor(r) {
     const out = [];
-    const ownerName = r.owner || (r.parent && r.parent.name) || null;
+    const ownerName = r.owner || r.parent && r.parent.name || null;
     const changes = changesOf(r);
     const avoidableProps = (r.propChanges || []).filter((c) => AVOIDABLE_KINDS.has(c.kind));
-    // Not memoized: props alone will never stop the re-render, so React.memo comes first (in addition to
-    // any prop fixes below). Reports from protocol-1 libraries have no `memoized`; assume memoized then.
     if (r.avoidable && (changes.length === 0 || r.memoized === false)) {
       const identical = changes.length === 0;
       out.push({
-        kind: 'memo',
+        kind: "memo",
         owner: r.component,
         target: r.component,
         prop: null,
         label: `Wrap <${r.component}> in React.memo`,
-        detail: identical
-          ? `<${r.component}> re-rendered with identical props because <${(r.parent && r.parent.name) || 'its parent'}> re-rendered.`
-          : `<${r.component}> is not memoized: fixing its props alone will not stop the re-render.`,
-        snippet: `// ${r.component}\nimport { memo } from 'react';\n\nexport const ${r.component} = memo(function ${r.component}(props) {\n  // ...\n});\n// class components: extend PureComponent instead`,
+        detail: identical ? `<${r.component}> re-rendered with identical props because <${r.parent && r.parent.name || "its parent"}> re-rendered.` : `<${r.component}> is not memoized: fixing its props alone will not stop the re-render.`,
+        snippet: `// ${r.component}
+import { memo } from 'react';
+
+export const ${r.component} = memo(function ${r.component}(props) {
+  // ...
+});
+// class components: extend PureComponent instead`
       });
     }
     for (const c of avoidableProps) {
-      const owner = ownerName || '?';
-      const root = c.path.split(/[.[]/)[0];
+      const owner = ownerName || "?";
+      const root = c.path.split(/[.[]/)[0] || c.path;
       const id = identifier(root);
-      if (c.kind === 'function') {
+      if (c.kind === "function") {
         out.push({
-          kind: 'useCallback',
+          kind: "useCallback",
           owner,
           target: r.component,
           prop: root,
           label: `useCallback(${root}) in <${owner}>`,
           detail: `prop "${c.path}" of <${r.component}> is a new function on every render of <${owner}>.`,
-          snippet: `// ${owner}\nimport { useCallback } from 'react';\n\nconst ${id} = useCallback((/* args */) => {\n  // ...\n}, [/* deps */]);\n\n<${r.component} ${root}={${id}} />`,
+          snippet: `// ${owner}
+import { useCallback } from 'react';
+
+const ${id} = useCallback((/* args */) => {
+  // ...
+}, [/* deps */]);
+
+<${r.component} ${root}={${id}} />`
         });
-      } else if (c.kind === 'element') {
+      } else if (c.kind === "element") {
         out.push({
-          kind: 'useMemoElement',
+          kind: "useMemoElement",
           owner,
           target: r.component,
           prop: root,
           label: `memoize element prop ${root} in <${owner}>`,
           detail: `prop "${c.path}" of <${r.component}> is a new element with the same type and props on every render of <${owner}>.`,
-          snippet: `// ${owner}\nimport { useMemo } from 'react';\n\nconst ${id} = useMemo(() => ${shortValue(c.next, 40)}, [/* deps */]);\n// or pass it as children from a component that does not re-render`,
+          snippet: `// ${owner}
+import { useMemo } from 'react';
+
+const ${id} = useMemo(() => ${shortValue(c.next, 40)}, [/* deps */]);
+// or pass it as children from a component that does not re-render`
         });
       } else {
         const isArray = Array.isArray(c.next);
         out.push({
-          kind: 'useMemo',
+          kind: "useMemo",
           owner,
           target: r.component,
           prop: root,
           label: `useMemo(${root}) in <${owner}>`,
-          detail: `prop "${c.path}" of <${r.component}> is a new ${isArray ? 'array' : 'object'} with the same contents on every render of <${owner}>.`,
-          snippet:
-            `// ${owner}\nimport { useMemo } from 'react';\n\nconst ${id} = useMemo(() => (${shortValue(c.next, 80)}), [/* deps */]);\n\n` +
-            `// or, when it never changes, hoist it to module scope:\nconst ${id.toUpperCase()} = ${shortValue(c.next, 80)};`,
+          detail: `prop "${c.path}" of <${r.component}> is a new ${isArray ? "array" : "object"} with the same contents on every render of <${owner}>.`,
+          snippet: `// ${owner}
+import { useMemo } from 'react';
+
+const ${id} = useMemo(() => (${shortValue(c.next, 80)}), [/* deps */]);
+
+// or, when it never changes, hoist it to module scope:
+const ${id.toUpperCase()} = ${shortValue(c.next, 80)};`
         });
       }
     }
     for (const c of [].concat(r.stateChanges || [], r.hookChanges || [])) {
-      if (AVOIDABLE_KINDS.has(c.kind)) {
-        if (c.hook === 'useContext' || /^useContext/.test(c.path)) {
-          const ctx = /useContext\((.*)\)/.exec(c.path);
-          const name = ctx ? ctx[1] : 'Context';
-          out.push({
-            kind: 'contextValue',
-            owner: `${name}.Provider`,
-            target: r.component,
-            prop: name,
-            label: `memoize the ${name} provider value`,
-            detail: `<${r.component}> re-rendered because ${name} produced a new value that is deep-equal to the previous one.`,
-            snippet: `// where <${name}.Provider> is rendered\nconst value = useMemo(() => ({ /* ... */ }), [/* deps */]);\n<${name}.Provider value={value}>`,
-          });
-        } else if (c.hook === 'useSyncExternalStore') {
-          out.push({
-            kind: 'storeSnapshot',
-            owner: r.component,
-            target: r.component,
-            prop: c.path,
-            label: `stable getSnapshot in <${r.component}>`,
-            detail: `${c.path} returned a new reference with the same contents; getSnapshot must return a cached value.`,
-            snippet: `// ${r.component}\n// getSnapshot must return the same reference while the data is unchanged\nconst snapshot = useSyncExternalStore(subscribe, store.getSnapshot /* cached */);`,
-          });
-        } else {
-          out.push({
-            kind: 'bailout',
-            owner: r.component,
-            target: r.component,
-            prop: c.path,
-            label: `bail out before setting ${c.path} in <${r.component}>`,
-            detail: `${c.path} was set to a value deep-equal to the current one (new reference).`,
-            snippet: `// ${r.component}\nsetState((prev) => (deepEqual(prev, next) ? prev : next));`,
-          });
-        }
+      if (!AVOIDABLE_KINDS.has(c.kind)) continue;
+      if (c.hook === "useContext" || /^useContext/.test(c.path)) {
+        const ctx = /useContext\((.*)\)/.exec(c.path);
+        const name = ctx && ctx[1] ? ctx[1] : "Context";
+        out.push({
+          kind: "contextValue",
+          owner: `${name}.Provider`,
+          target: r.component,
+          prop: name,
+          label: `memoize the ${name} provider value`,
+          detail: `<${r.component}> re-rendered because ${name} produced a new value that is deep-equal to the previous one.`,
+          snippet: `// where <${name}.Provider> is rendered
+const value = useMemo(() => ({ /* ... */ }), [/* deps */]);
+<${name}.Provider value={value}>`
+        });
+      } else if (c.hook === "useSyncExternalStore") {
+        out.push({
+          kind: "storeSnapshot",
+          owner: r.component,
+          target: r.component,
+          prop: c.path,
+          label: `stable getSnapshot in <${r.component}>`,
+          detail: `${c.path} returned a new reference with the same contents; getSnapshot must return a cached value.`,
+          snippet: `// ${r.component}
+// getSnapshot must return the same reference while the data is unchanged
+const snapshot = useSyncExternalStore(subscribe, store.getSnapshot /* cached */);`
+        });
+      } else {
+        out.push({
+          kind: "bailout",
+          owner: r.component,
+          target: r.component,
+          prop: c.path,
+          label: `bail out before setting ${c.path} in <${r.component}>`,
+          detail: `${c.path} was set to a value deep-equal to the current one (new reference).`,
+          snippet: `// ${r.component}
+setState((prev) => (deepEqual(prev, next) ? prev : next));`
+        });
       }
     }
     return out;
   }
-
-  const fixKey = (f) => `${f.kind}|${f.owner}|${f.prop || f.target}`;
-
-  /** Aggregate fixes over many reports: how many avoidable renders each one removes. */
+  var fixKey = (f) => `${f.kind}|${f.owner}|${f.prop || f.target}`;
   function rankFixes(reports) {
-    const byKey = new Map();
+    const byKey = /* @__PURE__ */ new Map();
     for (const r of reports) {
       if (!r.avoidable) continue;
       for (const f of fixesFor(r)) {
         const k = fixKey(f);
         let agg = byKey.get(k);
         if (!agg) {
-          agg = { ...f, key: k, count: 0, components: new Map(), reports: [] };
+          agg = { ...f, key: k, count: 0, components: /* @__PURE__ */ new Map(), reports: [] };
           byKey.set(k, agg);
         }
         agg.count++;
@@ -292,67 +314,61 @@
     }
     return [...byKey.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   }
-
-  const isAncestorReport = (anc, r) => anc.path.length < r.path.length && r.path[anc.path.length] === anc.component && anc.path.every((p, i) => r.path[i] === p);
-
-  /** Walk `parent` links inside one commit up to the component whose own change started the cascade. */
+  var isAncestorReport = (anc, r) => anc.path.length < r.path.length && r.path[anc.path.length] === anc.component && anc.path.every((p, i) => r.path[i] === p);
   function rootCauseOf(r, commitReports) {
     let cur = r;
-    const seen = new Set([r]);
-    while (cur.trigger === 'parent' && cur.parent) {
-      const p = commitReports.find((x) => x.component === cur.parent.name && isAncestorReport(x, cur));
-      if (!p || seen.has(p)) return { name: cur.parent.name, trigger: cur.parent.trigger, report: null };
+    const seen = /* @__PURE__ */ new Set([r]);
+    while (cur.trigger === "parent" && cur.parent) {
+      const parent = cur.parent;
+      const p = commitReports.find((x) => x.component === parent.name && isAncestorReport(x, cur));
+      if (!p || seen.has(p)) return { name: parent.name, trigger: parent.trigger, report: null };
       seen.add(p);
       cur = p;
     }
     return cur === r ? null : { name: cur.component, trigger: cur.trigger, report: cur };
   }
-
-  /** Group reports by commit and rank what started each cascade. */
   function analyzeCommit(reports) {
-    const roots = new Map();
+    const roots = /* @__PURE__ */ new Map();
     let avoidable = 0;
     let wasted = 0;
     for (const r of reports) {
       if (!r.avoidable) continue;
       avoidable++;
-      if (typeof r.selfDuration === 'number') wasted += r.selfDuration;
+      if (typeof r.selfDuration === "number") wasted += r.selfDuration;
       const root = rootCauseOf(r, reports);
-      const name = root ? root.name : (r.parent && r.parent.name) || '(unknown)';
-      const trigger = root ? root.trigger : (r.parent && r.parent.trigger) || 'parent';
+      const name = root ? root.name : r.parent && r.parent.name || "(unknown)";
+      const trigger = root ? root.trigger : r.parent && r.parent.trigger || "parent";
       let agg = roots.get(name);
       if (!agg) {
-        agg = { name, trigger, count: 0, components: new Map() };
+        agg = { name, trigger, count: 0, components: /* @__PURE__ */ new Map() };
         roots.set(name, agg);
       }
       agg.count++;
       agg.components.set(r.component, (agg.components.get(r.component) || 0) + 1);
     }
-    const contexts = contextAttribution(reports);
+    const first = reports[0];
     return {
-      id: reports[0] ? reports[0].commitId : 0,
-      receivedAt: reports[0] ? reports[0].receivedAt : 0,
+      id: first ? first.commitId : 0,
+      receivedAt: first ? first.receivedAt : 0,
       total: reports.length,
       avoidable,
       wasted,
       roots: [...roots.values()].sort((a, b) => b.count - a.count),
-      contexts,
+      contexts: contextAttribution(reports),
       fixes: rankFixes(reports),
-      reports,
+      reports
     };
   }
-
-  /** Which contexts changed and how many consumers re-rendered because of them. */
   function contextAttribution(reports) {
-    const byCtx = new Map();
+    const byCtx = /* @__PURE__ */ new Map();
     for (const r of reports) {
       for (const c of r.hookChanges || []) {
-        if (c.hook !== 'useContext' && !/^useContext/.test(c.path)) continue;
+        if (c.hook !== "useContext" && !/^useContext/.test(c.path)) continue;
         const m = /useContext\((.*)\)/.exec(c.path);
-        const name = m ? m[1] : c.path;
+        const name = m && m[1] ? m[1] : c.path;
         let agg = byCtx.get(name);
         if (!agg) {
-          agg = { name, consumers: 0, avoidable: 0, components: new Map(), commits: new Set() };
+          agg = { name, consumers: 0, avoidable: 0, components: /* @__PURE__ */ new Map(), commits: /* @__PURE__ */ new Set() };
           byCtx.set(name, agg);
         }
         agg.consumers++;
@@ -363,16 +379,14 @@
     }
     return [...byCtx.values()].sort((a, b) => b.consumers - a.consumers);
   }
-
-  /** Nested cascade for one commit: every report placed under its ancestors (untracked ancestors appear as plain names). */
   function cascadeTree(reports) {
-    const root = { name: '', children: new Map(), report: null };
+    const root = { name: "", children: /* @__PURE__ */ new Map(), report: null };
     for (const r of reports) {
       let node = root;
       for (const seg of r.path.concat([r.component])) {
         let next = node.children.get(seg);
         if (!next) {
-          next = { name: seg, children: new Map(), report: null };
+          next = { name: seg, children: /* @__PURE__ */ new Map(), report: null };
           node.children.set(seg, next);
         }
         node = next;
@@ -383,411 +397,490 @@
     }
     return root;
   }
-
+  function rootCauseSummary(name, commits) {
+    const out = { name, trigger: "parent", commits: [], total: 0, components: /* @__PURE__ */ new Map(), fixes: [] };
+    const affected = [];
+    for (const [key, reports] of commits) {
+      const analysis = analyzeCommit(reports);
+      const root = analysis.roots.find((x) => x.name === name);
+      if (!root) continue;
+      out.trigger = root.trigger;
+      out.commits.push({ key, analysis, count: root.count, components: root.components });
+      out.total += root.count;
+      for (const [c, n] of root.components) out.components.set(c, (out.components.get(c) || 0) + n);
+      for (const r of reports) {
+        if (!r.avoidable) continue;
+        const rc = rootCauseOf(r, reports);
+        if ((rc ? rc.name : r.parent && r.parent.name) === name) affected.push(r);
+      }
+    }
+    out.commits.reverse();
+    out.fixes = rankFixes(affected);
+    return out;
+  }
   function reportToMarkdown(r) {
     const lines = [];
-    lines.push(`### <${r.component}> ${r.avoidable ? 'avoidable re-render' : `re-render (${r.trigger})`} #${r.renderCount}`);
-    lines.push('');
+    lines.push(`### <${r.component}> ${r.avoidable ? "avoidable re-render" : `re-render (${r.trigger})`} #${r.renderCount}`);
+    lines.push("");
     for (const x of r.reasons || []) lines.push(`- ${x}`);
-    if (r.path && r.path.length) lines.push('', `**Path:** ${r.path.concat([r.component]).join(' > ')}`);
+    if (r.path && r.path.length) lines.push("", `**Path:** ${r.path.concat([r.component]).join(" > ")}`);
     if (r.parent) lines.push(`**Triggered by:** <${r.parent.name}> (${r.parent.trigger})`);
     if (r.owner) lines.push(`**Created by:** <${r.owner}>`);
-    if (r.source) lines.push(`**Source:** ${r.source.fileName}${r.source.lineNumber ? ':' + r.source.lineNumber : ''}`);
+    if (r.source) lines.push(`**Source:** ${r.source.fileName}${r.source.lineNumber ? ":" + r.source.lineNumber : ""}`);
     const changes = changesOf(r);
     if (changes.length) {
-      lines.push('', '| path | kind | prev | next |', '| --- | --- | --- | --- |');
+      lines.push("", "| path | kind | prev | next |", "| --- | --- | --- | --- |");
       for (const c of changes) lines.push(`| ${c.path} | ${KIND_LABEL[c.kind] || c.kind} | \`${shortValue(c.prev, 40)}\` | \`${shortValue(c.next, 40)}\` |`);
     }
     const fixes = fixesFor(r);
     if (fixes.length) {
-      lines.push('', '**Fix**', '');
+      lines.push("", "**Fix**", "");
       for (const f of fixes) lines.push(`- ${f.label}`);
-      lines.push('', '```jsx', fixes[0].snippet, '```');
+      lines.push("", "```jsx", fixes[0].snippet, "```");
     }
-    return lines.join('\n');
+    return lines.join("\n");
   }
-
-  // ---------- report view (shared with the Elements sidebar) ----------
-  function changeRow(label, c, suffix) {
-    const tr = el('tr', { class: 'changed' + (AVOIDABLE_KINDS.has(c.kind) ? '' : ' real') });
-    tr.append(el('td', { class: 'k', text: label }));
-    const td = el('td');
-    td.append(valueNode(c.prev), el('span', { class: 'arrow', text: '\u2192' }));
-    td.append(c.kind === 'removed' ? el('span', { class: 'v nil', text: '(removed)' }) : valueNode(c.next));
-    let kind = (KIND_LABEL[c.kind] || c.kind) + (suffix || '');
-    if (c.kind === 'different' && c.prev && c.next && typeof c.prev === 'object' && typeof c.next === 'object') {
-      const p = firstDifferentPath(c.prev, c.next);
+  function changeRow(label, c, suffix = "") {
+    const tr = el("tr", { class: "changed" + (AVOIDABLE_KINDS.has(c.kind) ? "" : " real") });
+    tr.append(el("td", { class: "k", text: label }));
+    const td = el("td");
+    td.append(valueNode(c.prev), el("span", { class: "arrow", text: "\u2192" }));
+    td.append(c.kind === "removed" ? el("span", { class: "v nil", text: "(removed)" }) : valueNode(c.next));
+    let kind = (KIND_LABEL[c.kind] || c.kind) + suffix;
+    const objectDiff = c.kind === "different" && isRecord(c.prev) && isRecord(c.next);
+    if (objectDiff) {
+      const p = firstDifferentPath(c.prev, c.next, c.path);
       if (p) kind += ` at ${p}`;
     }
-    td.append(el('span', { class: 'kind', text: kind }));
+    td.append(el("span", { class: "kind", text: kind }));
+    if (objectDiff) {
+      const leaves = diffLeaves(c.prev, c.next, 20, c.path);
+      if (leaves.length) {
+        const d = el("details", { class: "diff" }, [el("summary", { text: `${leaves.length}${leaves.length >= 20 ? "+" : ""} differing ${leaves.length === 1 ? "leaf" : "leaves"}` })]);
+        const table = el("table", { class: "kv leaves" });
+        for (const leaf of leaves) {
+          const row = el("tr");
+          row.append(el("td", { class: "k", text: leaf.path }));
+          const cell = el("td");
+          cell.append(valueNode(leaf.prev), el("span", { class: "arrow", text: "\u2192" }), valueNode(leaf.next));
+          row.append(cell);
+          table.append(row);
+        }
+        d.append(table);
+        td.append(d);
+      }
+    }
     tr.append(td);
     return tr;
   }
-
   function kvSection(title, next, changes) {
     const byKey = new Map(changes.map((c) => [c.path.split(/[.[]/)[0], c]));
-    const table = el('table', { class: 'kv' });
+    const table = el("table", { class: "kv" });
     for (const k of Object.keys(next || {})) {
       const c = byKey.get(k);
       if (c) {
-        table.append(changeRow(k, c, c.path !== k ? ` at ${c.path}` : ''));
+        table.append(changeRow(k, c, c.path !== k ? ` at ${c.path}` : ""));
       } else {
-        const tr = el('tr');
-        tr.append(el('td', { class: 'k', text: k }));
-        const td = el('td');
+        const tr = el("tr");
+        tr.append(el("td", { class: "k", text: k }));
+        const td = el("td");
         td.append(valueNode(next[k]));
         tr.append(td);
         table.append(tr);
       }
     }
-    for (const c of changes) if (c.kind === 'removed') table.append(changeRow(c.path, c));
-    if (!table.children.length) table.append(el('tr', null, [el('td', { class: 'v nil', text: 'no props' })]));
-    return el('div', { class: 'section' }, [el('h3', { text: title }), table]);
+    for (const c of changes) if (c.kind === "removed") table.append(changeRow(c.path, c));
+    if (!table.children.length) table.append(el("tr", null, [el("td", { class: "v nil", text: "no props" })]));
+    return el("div", { class: "section" }, [el("h3", { text: title }), table]);
   }
-
   function sourceLabel(src) {
-    const file = src.fileName.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '');
-    return `${file}${src.lineNumber ? ':' + src.lineNumber : ''}`;
+    const file = src.fileName.replace(/^https?:\/\/[^/]+/, "").replace(/\?.*$/, "");
+    return `${file}${src.lineNumber ? ":" + src.lineNumber : ""}`;
   }
-
-  /** @param actions { openSource(src), highlight(id), copy(text) } all optional */
-  function reportView(r, actions) {
-    actions = actions || {};
+  function reportView(r, actions = {}) {
     const frag = document.createDocumentFragment();
-    const duration =
-      typeof r.selfDuration === 'number'
-        ? ` \u00B7 ${fmtMs(r.selfDuration)} self${typeof r.treeDuration === 'number' && r.treeDuration > r.selfDuration ? `, ${fmtMs(r.treeDuration)} with children` : ''}`
-        : '';
-    const head = el('div', { class: 'section' }, [
-      el('h3', { text: 'Why did this render?' }),
-      el('div', null, [
-        el('span', { class: 'verdict ' + (r.avoidable ? 'avoid' : 'ok'), text: r.avoidable ? 'Avoidable re-render' : `Re-render (${r.trigger})` }),
-        el('span', { class: 'meta', text: `  #${r.renderCount} \u00B7 ${summarize(r)}${duration}` }),
+    const duration = typeof r.selfDuration === "number" ? ` \xB7 ${fmtMs(r.selfDuration)} self${typeof r.treeDuration === "number" && r.treeDuration > r.selfDuration ? `, ${fmtMs(r.treeDuration)} with children` : ""}` : "";
+    const head = el("div", { class: "section" }, [
+      el("h3", { text: "Why did this render?" }),
+      el("div", null, [
+        el("span", { class: "verdict " + (r.avoidable ? "avoid" : "ok"), text: r.avoidable ? "Avoidable re-render" : `Re-render (${r.trigger})` }),
+        el("span", { class: "meta", text: `  #${r.renderCount} \xB7 ${summarize(r)}${duration}` })
       ]),
-      el('ul', { class: 'reasons' }, (r.reasons || []).map((x) => el('li', { text: x }))),
+      el("ul", { class: "reasons" }, (r.reasons || []).map((x) => el("li", { text: x })))
     ]);
     if (!actions.compact) {
-      const bar = el('div', { class: 'actions' });
-      if (r.source && actions.openSource) bar.append(el('button', { title: r.source.fileName, onclick: () => actions.openSource(r.source) }, `\u2197 ${sourceLabel(r.source)}`));
-      else if (r.source) bar.append(el('span', { class: 'meta', title: r.source.fileName, text: sourceLabel(r.source) }));
-      if (actions.highlight && r.instanceId) bar.append(el('button', { onclick: () => actions.highlight(r.instanceId) }, '\u25A3 Highlight'));
-      if (actions.copy) bar.append(el('button', { onclick: () => actions.copy(reportToMarkdown(r)) }, '\u2398 Copy as Markdown'));
+      const bar = el("div", { class: "actions" });
+      const src = r.source;
+      if (src && actions.openSource) {
+        const open = actions.openSource;
+        bar.append(el("button", { title: src.fileName, onclick: () => open(src) }, `\u2197 ${sourceLabel(src)}`));
+      } else if (src) bar.append(el("span", { class: "meta", title: src.fileName, text: sourceLabel(src) }));
+      if (actions.highlight && r.instanceId) {
+        const highlight = actions.highlight;
+        bar.append(el("button", { onclick: () => highlight(r.instanceId) }, "\u25A3 Highlight"));
+      }
+      if (actions.copy) {
+        const copy = actions.copy;
+        bar.append(el("button", { onclick: () => copy(reportToMarkdown(r)) }, "\u2398 Copy as Markdown"));
+      }
       if (bar.children.length) head.append(bar);
     }
     frag.append(head);
-    const by = el('div', { class: 'section' }, [el('h3', { text: 'Rendered by' })]);
-    const crumbs = el('div', { class: 'crumbs' });
+    const by = el("div", { class: "section" }, [el("h3", { text: "Rendered by" })]);
+    const crumbs = el("div", { class: "crumbs" });
     const parts = [].concat(r.path || []);
     parts.forEach((p, i) => {
-      if (i) crumbs.append(' \u203A ');
+      if (i) crumbs.append(" \u203A ");
       crumbs.append(p);
     });
-    if (parts.length) crumbs.append(' \u203A ');
-    crumbs.append(el('b', { text: r.component }));
+    if (parts.length) crumbs.append(" \u203A ");
+    crumbs.append(el("b", { text: r.component }));
     by.append(crumbs);
-    if (r.parent) by.append(el('div', { text: `Triggered by <${r.parent.name}> (${r.parent.trigger})` }));
-    else by.append(el('div', { text: 'Update started in this component' }));
-    if (r.owner) by.append(el('div', { class: 'meta', text: `Created by <${r.owner}>` }));
-    if (r.memoized === false) by.append(el('div', { class: 'meta', text: 'Not memoized (re-renders whenever its parent does)' }));
-    else if (r.memoized === true) by.append(el('div', { class: 'meta', text: 'Memoized (React.memo / PureComponent)' }));
-    if (r.commitId) by.append(el('div', { class: 'meta', text: `Commit #${r.commitId}` }));
+    if (r.parent) by.append(el("div", { text: `Triggered by <${r.parent.name}> (${r.parent.trigger})` }));
+    else by.append(el("div", { text: "Update started in this component" }));
+    if (r.owner) by.append(el("div", { class: "meta", text: `Created by <${r.owner}>` }));
+    if (r.memoized === false) by.append(el("div", { class: "meta", text: "Not memoized (re-renders whenever its parent does)" }));
+    else if (r.memoized === true) by.append(el("div", { class: "meta", text: "Memoized (React.memo / PureComponent)" }));
+    if (r.commitId) by.append(el("div", { class: "meta", text: `Commit #${r.commitId}` }));
     frag.append(by);
-    frag.append(kvSection('Props', r.props ? r.props.next : {}, r.propChanges || []));
+    frag.append(kvSection("Props", r.props ? r.props.next : {}, r.propChanges || []));
     const hooks = [].concat(r.hookChanges || [], r.stateChanges || []);
     if (hooks.length) {
-      const table = el('table', { class: 'kv' });
+      const table = el("table", { class: "kv" });
       for (const c of hooks) table.append(changeRow(c.path, c));
-      frag.append(el('div', { class: 'section' }, [el('h3', { text: 'State & hooks that changed' }), table]));
+      frag.append(el("div", { class: "section" }, [el("h3", { text: "State & hooks that changed" }), table]));
     }
     return frag;
   }
-
-  function fixView(fixes, actions) {
-    actions = actions || {};
+  function fixView(fixes, actions = {}) {
     const frag = document.createDocumentFragment();
     if (!fixes.length) {
-      frag.append(el('div', { class: 'section' }, [el('h3', { text: 'Fix' }), el('div', { class: 'meta', text: 'Nothing to fix: this render was caused by a genuine change.' })]));
+      frag.append(el("div", { class: "section" }, [el("h3", { text: "Fix" }), el("div", { class: "meta", text: "Nothing to fix: this render was caused by a genuine change." })]));
       return frag;
     }
     for (const f of fixes) {
-      const sec = el('div', { class: 'section fix' }, [
-        el('h3', { text: f.label }),
-        el('div', { text: f.detail }),
-        f.count ? el('div', { class: 'meta', text: `removes ${f.count} avoidable re-render${f.count === 1 ? '' : 's'}: ${[...f.components].map(([c, n]) => `<${c}>${n > 1 ? ' \u00D7' + n : ''}`).join(', ')}` }) : null,
-        el('pre', { class: 'snippet', text: f.snippet }),
+      const ranked = "count" in f ? f : null;
+      const sec = el("div", { class: "section fix" }, [
+        el("h3", { text: f.label }),
+        el("div", { text: f.detail }),
+        ranked ? el("div", { class: "meta", text: `removes ${plural(ranked.count, "avoidable re-render")}: ${componentList(ranked.components)}` }) : null,
+        el("pre", { class: "snippet", text: f.snippet })
       ]);
-      if (actions.copy) sec.append(el('button', { onclick: () => actions.copy(f.snippet) }, '\u2398 Copy snippet'));
+      if (actions.copy) {
+        const copy = actions.copy;
+        sec.append(el("button", { onclick: () => copy(f.snippet) }, "\u2398 Copy snippet"));
+      }
       frag.append(sec);
     }
     return frag;
   }
-
-  // ---------- panel ----------
-  function createPanel(root, transport, options) {
-    options = options || {};
+  function virtualList(container, rowHeight, rowFor) {
+    const inner = el("div", { class: "virtual-inner" });
+    container.append(inner);
+    let items = [];
+    const mounted = /* @__PURE__ */ new Map();
+    let raf = 0;
+    const render = () => {
+      raf = 0;
+      const height = container.clientHeight || FALLBACK_VIEWPORT;
+      const start = Math.max(0, Math.floor(container.scrollTop / rowHeight) - OVERSCAN);
+      const end = Math.min(items.length, Math.ceil((container.scrollTop + height) / rowHeight) + OVERSCAN);
+      inner.style.height = `${items.length * rowHeight}px`;
+      const keep = /* @__PURE__ */ new Set();
+      for (let i = start; i < end; i++) {
+        const row = rowFor(items[i], i);
+        row.style.top = `${i * rowHeight}px`;
+        if (row.parentNode !== inner) inner.append(row);
+        mounted.set(row, i);
+        keep.add(row);
+      }
+      for (const row of [...mounted.keys()]) {
+        if (!keep.has(row)) {
+          row.remove();
+          mounted.delete(row);
+        }
+      }
+    };
+    container.addEventListener("scroll", () => {
+      if (!raf) raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame(render) : setTimeout(render, 0);
+    });
+    return {
+      container,
+      inner,
+      get items() {
+        return items;
+      },
+      setItems(next) {
+        items = next;
+        render();
+      },
+      render,
+      scrollTo(index) {
+        const height = container.clientHeight || FALLBACK_VIEWPORT;
+        const top = index * rowHeight;
+        if (top < container.scrollTop) container.scrollTop = top;
+        else if (top + rowHeight > container.scrollTop + height) container.scrollTop = top + rowHeight - height;
+        render();
+      }
+    };
+  }
+  function createPanel(root, transport, options = {}) {
     const state = {
-      tree: { name: '', children: new Map(), reports: [], total: 0, avoidable: 0, expanded: true, path: [], key: '' },
-      nodesByKey: new Map(),
+      tree: { name: "", children: /* @__PURE__ */ new Map(), reports: [], total: 0, avoidable: 0, wasted: 0, expanded: true, path: [], key: "" },
+      nodesByKey: /* @__PURE__ */ new Map(),
       reports: [],
-      commits: new Map(), // commitId -> reports
+      commits: /* @__PURE__ */ new Map(),
       commitOrder: [],
       selectedKey: null,
       selectedReport: null,
       selectedCommit: null,
       selectedFix: null,
-      view: 'tree', // tree | offenders | commits | fixes
-      tab: 'latest', // latest | history | fix
+      selectedRoot: null,
+      view: "tree",
+      tab: "latest",
       paused: false,
       avoidableOnly: false,
-      filter: '',
-      relay: false, // content script connected
-      library: null, // HelloPayload from the page
+      filter: "",
+      relay: false,
+      library: null,
       polling: false,
       streamCollapsed: false,
-      collapsed: new Set(),
-      sort: { key: 'avoidable', dir: -1 },
+      collapsed: /* @__PURE__ */ new Set(),
+      sort: { key: "avoidable", dir: -1 },
       flashOn: false,
       settingsOpen: false,
       origin: null,
-      legacyCommit: 0,
+      legacyCommit: 0
     };
     let persistTimer = null;
     let queue = [];
     let flushScheduled = false;
-
-    const schedule = typeof requestAnimationFrame === 'function' ? (fn) => requestAnimationFrame(fn) : (fn) => setTimeout(fn, 0);
-    const call = (name, ...args) => (transport && typeof transport[name] === 'function' ? transport[name](...args) : undefined);
+    const schedule = typeof requestAnimationFrame === "function" ? (fn) => requestAnimationFrame(fn) : (fn) => setTimeout(fn, 0);
     const copyText = (text) => {
-      const p = call('copy', text);
-      if (p === undefined && global.navigator && global.navigator.clipboard) global.navigator.clipboard.writeText(text).catch(() => {});
-      toast('Copied');
+      if (transport.copy) transport.copy(text);
+      else if (typeof navigator !== "undefined" && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {
+      });
+      toast("Copied");
     };
-
-    // ---------- DOM skeleton ----------
-    root.textContent = '';
-    const search = el('input', {
-      type: 'search',
-      placeholder: 'Search components (text or /regex/)',
+    root.textContent = "";
+    const search = el("input", {
+      type: "search",
+      placeholder: "Search components (text or /regex/)",
       oninput: () => {
         state.filter = search.value;
         renderLeft();
+        renderStream();
         persist();
-      },
+      }
     });
     const pauseBtn = el(
-      'button',
+      "button",
       {
-        title: 'Pause / resume',
+        title: "Pause / resume",
         onclick: () => {
           state.paused = !state.paused;
-          pauseBtn.classList.toggle('active', state.paused);
-          pauseBtn.textContent = state.paused ? '\u25B6 Resume' : '\u23F8 Pause';
-        },
+          pauseBtn.classList.toggle("active", state.paused);
+          pauseBtn.textContent = state.paused ? "\u25B6 Resume" : "\u23F8 Pause";
+        }
       },
-      '\u23F8 Pause',
+      "\u23F8 Pause"
     );
     const clearBtn = el(
-      'button',
+      "button",
       {
-        title: 'Clear',
+        title: "Clear",
         onclick: () => {
           clearAll();
-          call('clear');
-          call('badge', 0);
-        },
+          transport.clear?.();
+          transport.badge?.(0);
+        }
       },
-      '\u2298 Clear',
+      "\u2298 Clear"
     );
-    const replayBtn = el('button', { title: 'Replay buffered reports from the page', onclick: () => call('replay') }, '\u21BB Replay');
-    const exportBtn = el('button', { title: 'Export reports as JSON', onclick: exportJson }, '\u2913 Export');
-    const importInput = el('input', { type: 'file', accept: 'application/json,.json', class: 'hidden-file' });
-    importInput.addEventListener('change', () => {
+    const replayBtn = el("button", { title: "Replay buffered reports from the page", onclick: () => transport.replay?.() }, "\u21BB Replay");
+    const exportBtn = el("button", { title: "Export reports as JSON", onclick: exportJson }, "\u2913 Export");
+    const importInput = el("input", { type: "file", accept: "application/json,.json", class: "hidden-file" });
+    importInput.addEventListener("change", () => {
       const f = importInput.files && importInput.files[0];
       if (f) importFile(f);
-      importInput.value = '';
+      importInput.value = "";
     });
-    const importBtn = el('button', { title: 'Import a JSON export', onclick: () => importInput.click() }, '\u2912 Import');
-    const avoidCheck = el('input', {
-      type: 'checkbox',
+    const importBtn = el("button", { title: "Import a JSON export", onclick: () => importInput.click() }, "\u2912 Import");
+    const avoidCheck = el("input", {
+      type: "checkbox",
       onchange: () => {
         state.avoidableOnly = avoidCheck.checked;
         renderLeft();
         renderStream();
         persist();
-      },
+      }
     });
-    const settingsBtn = el('button', { title: 'Settings', onclick: () => toggleSettings() }, '\u2699 Settings');
-    const status = el('span', { class: 'status', title: '' }, [el('span', { class: 'dot' }), el('span', { class: 'status-text', text: 'no page' })]);
-    const toolbar = el('div', { class: 'toolbar' }, [
+    const settingsBtn = el("button", { title: "Settings", onclick: () => toggleSettings() }, "\u2699 Settings");
+    const status = el("span", { class: "status", title: "" }, [el("span", { class: "dot" }), el("span", { class: "status-text", text: "no page" })]);
+    const toolbar = el("div", { class: "toolbar" }, [
       search,
-      el('span', { class: 'sep' }),
+      el("span", { class: "sep" }),
       pauseBtn,
       clearBtn,
       replayBtn,
-      el('span', { class: 'sep' }),
+      el("span", { class: "sep" }),
       exportBtn,
       importBtn,
       importInput,
-      el('span', { class: 'sep' }),
-      el('label', null, [avoidCheck, 'Avoidable only']),
-      el('span', { class: 'spacer' }),
+      el("span", { class: "sep" }),
+      el("label", null, [avoidCheck, "Avoidable only"]),
+      el("span", { class: "spacer" }),
       status,
-      settingsBtn,
+      settingsBtn
     ]);
-    const banner = el('div', { class: 'banner', hidden: true });
-    const viewsBar = el('div', { class: 'views' });
+    const banner = el("div", { class: "banner", hidden: true });
+    const viewsBar = el("div", { class: "views" });
     const VIEWS = [
-      ['tree', 'Tree'],
-      ['offenders', 'Offenders'],
-      ['commits', 'Commits'],
-      ['fixes', 'Fixes'],
+      ["tree", "Tree"],
+      ["offenders", "Offenders"],
+      ["commits", "Commits"],
+      ["fixes", "Fixes"]
     ];
-    const viewButtons = new Map();
+    const viewButtons = /* @__PURE__ */ new Map();
     for (const [id, label] of VIEWS) {
-      const b = el('button', { 'data-view': id, onclick: () => setView(id) }, label);
+      const b = el("button", { "data-view": id, onclick: () => setView(id) }, label);
       viewButtons.set(id, b);
       viewsBar.append(b);
     }
-    const tree = el('div', { class: 'tree', tabindex: '0', onkeydown: onTreeKey });
-    const table = el('div', { class: 'table-wrap', hidden: true });
-    const left = el('div', { class: 'left' }, [viewsBar, tree, table]);
-    const resizer = el('div', { class: 'resizer', title: 'Drag to resize' });
-    const details = el('div', { class: 'details' });
-    const settings = el('div', { class: 'drawer', hidden: true });
-    const main = el('div', { class: 'main' }, [left, resizer, details, settings]);
-    const streamList = el('ul', { class: 'stream-list' });
-    const streamCount = el('span', { class: 'count', text: '0 reports' });
-    const stream = el('div', { class: 'stream' }, [
+    const tree = el("div", { class: "tree", tabindex: "0", onkeydown: onTreeKey, role: "tree" });
+    const table = el("div", { class: "table-wrap", hidden: true });
+    const left = el("div", { class: "left" }, [viewsBar, tree, table]);
+    const resizer = el("div", { class: "resizer", title: "Drag to resize" });
+    const details = el("div", { class: "details" });
+    const settings = el("div", { class: "drawer", hidden: true });
+    const main = el("div", { class: "main" }, [left, resizer, details, settings]);
+    const streamList = el("div", { class: "stream-list" });
+    const streamCount = el("span", { class: "count", text: "0 reports" });
+    const stream = el("div", { class: "stream" }, [
       el(
-        'div',
+        "div",
         {
-          class: 'stream-header',
+          class: "stream-header",
           onclick: () => {
             state.streamCollapsed = !state.streamCollapsed;
-            stream.classList.toggle('collapsed', state.streamCollapsed);
+            stream.classList.toggle("collapsed", state.streamCollapsed);
             persist();
-          },
+          }
         },
-        [el('span', { text: '\u25BE Live stream' }), streamCount],
+        [el("span", { text: "\u25BE Live stream" }), streamCount]
       ),
-      streamList,
+      streamList
     ]);
-    const toastEl = el('div', { class: 'toast', hidden: true });
+    const toastEl = el("div", { class: "toast", hidden: true });
     root.append(toolbar, banner, main, stream, toastEl);
-
+    root.addEventListener("keydown", onGlobalKey);
     let toastTimer = null;
     function toast(text) {
       toastEl.textContent = text;
       toastEl.hidden = false;
-      clearTimeout(toastTimer);
+      if (toastTimer) clearTimeout(toastTimer);
       toastTimer = setTimeout(() => {
         toastEl.hidden = true;
       }, 1200);
     }
-
-    // resizer
     let drag = null;
-    resizer.addEventListener('mousedown', (e) => {
+    resizer.addEventListener("mousedown", (e) => {
       drag = { x: e.clientX, w: left.getBoundingClientRect().width };
       e.preventDefault();
     });
-    global.addEventListener('mousemove', (e) => {
+    window.addEventListener("mousemove", (e) => {
       if (!drag) return;
       const w = Math.max(180, Math.min(drag.w + e.clientX - drag.x, root.clientWidth - 240));
-      left.style.width = w + 'px';
+      left.style.width = w + "px";
       state.treeWidth = w;
     });
-    global.addEventListener('mouseup', () => {
+    window.addEventListener("mouseup", () => {
       if (drag) persist();
       drag = null;
     });
-
-    // ---------- persistence (per origin) ----------
     function persist() {
-      if (!transport || !transport.storage) return;
-      clearTimeout(persistTimer);
+      if (!transport.storage) return;
+      if (persistTimer) clearTimeout(persistTimer);
       persistTimer = setTimeout(() => {
-        transport.storage.set('panel', {
+        const saved = {
           filter: state.filter,
           avoidableOnly: state.avoidableOnly,
           view: state.view,
+          tab: state.tab === "history" || state.tab === "fix" ? state.tab : "latest",
           streamCollapsed: state.streamCollapsed,
           collapsed: [...state.collapsed],
           treeWidth: state.treeWidth,
-          flashOn: state.flashOn,
-        });
+          flashOn: state.flashOn
+        };
+        transport.storage.set("panel", saved);
       }, 150);
     }
-
-    function restore(saved) {
-      if (!saved || typeof saved !== 'object') return;
-      if (typeof saved.filter === 'string') {
+    function restore(raw) {
+      if (!isRecord(raw)) return;
+      const saved = raw;
+      if (typeof saved.filter === "string") {
         state.filter = saved.filter;
         search.value = saved.filter;
       }
-      if (typeof saved.avoidableOnly === 'boolean') {
+      if (typeof saved.avoidableOnly === "boolean") {
         state.avoidableOnly = saved.avoidableOnly;
         avoidCheck.checked = saved.avoidableOnly;
       }
-      if (Array.isArray(saved.collapsed)) state.collapsed = new Set(saved.collapsed.filter((x) => typeof x === 'string'));
-      if (typeof saved.streamCollapsed === 'boolean') {
+      if (Array.isArray(saved.collapsed)) state.collapsed = new Set(saved.collapsed.filter((x) => typeof x === "string"));
+      if (typeof saved.streamCollapsed === "boolean") {
         state.streamCollapsed = saved.streamCollapsed;
-        stream.classList.toggle('collapsed', state.streamCollapsed);
+        stream.classList.toggle("collapsed", state.streamCollapsed);
       }
-      if (typeof saved.treeWidth === 'number' && saved.treeWidth > 100) {
+      if (typeof saved.treeWidth === "number" && saved.treeWidth > 100) {
         state.treeWidth = saved.treeWidth;
-        left.style.width = saved.treeWidth + 'px';
+        left.style.width = saved.treeWidth + "px";
       }
-      if (typeof saved.flashOn === 'boolean') state.flashOn = saved.flashOn;
+      if (typeof saved.flashOn === "boolean") state.flashOn = saved.flashOn;
+      if (saved.tab === "history" || saved.tab === "fix") state.tab = saved.tab;
       if (saved.view && viewButtons.has(saved.view)) state.view = saved.view;
       for (const n of state.nodesByKey.values()) n.expanded = !state.collapsed.has(n.key);
       setView(state.view);
       renderStream();
     }
-
-    // ---------- model ----------
-    function keyOf(path) {
-      return path.join(' ');
-    }
-
+    const keyOf = (path) => path.join(" ");
     function nodeFor(path) {
       const key = keyOf(path);
       const found = state.nodesByKey.get(key);
       if (found) return found;
       let parent = state.tree;
       for (let i = 0; i < path.length; i++) {
+        const name = path[i];
         const k = keyOf(path.slice(0, i + 1));
         let n = state.nodesByKey.get(k);
         if (!n) {
-          n = { name: path[i], children: new Map(), reports: [], total: 0, avoidable: 0, wasted: 0, expanded: !state.collapsed.has(k), path: path.slice(0, i + 1), key: k };
+          n = { name, children: /* @__PURE__ */ new Map(), reports: [], total: 0, avoidable: 0, wasted: 0, expanded: !state.collapsed.has(k), path: path.slice(0, i + 1), key: k };
           state.nodesByKey.set(k, n);
-          parent.children.set(path[i], n);
+          parent.children.set(name, n);
         }
         parent = n;
       }
       return parent;
     }
-
+    const nodeOfReport = (r) => nodeFor(r.path.concat([r.component]));
     function commitKeyFor(report) {
       if (report.commitId > 0) return report.commitId;
-      // Protocol 1 libraries have no commit id: reports delivered in one flush count as one commit.
       return -state.legacyCommit;
     }
-
     function ingest(report) {
-      if (typeof report.receivedAt !== 'number') report.receivedAt = Date.now();
+      if (!report.receivedAt) report.receivedAt = Date.now();
       state.reports.push(report);
       if (state.reports.length > MAX_REPORTS) state.reports.shift();
-      const node = nodeFor([].concat(report.path, [report.component]));
+      const node = nodeOfReport(report);
       node.reports.push(report);
       if (node.reports.length > MAX_PER_NODE) node.reports.shift();
       node.total++;
       if (report.avoidable) {
         node.avoidable++;
-        if (typeof report.selfDuration === 'number') node.wasted += report.selfDuration;
+        if (typeof report.selfDuration === "number") node.wasted += report.selfDuration;
       }
       node.lastReport = report;
       node.flash = true;
+      node.flashAt = Date.now();
       const ck = commitKeyFor(report);
       let list = state.commits.get(ck);
       if (!list) {
@@ -799,8 +892,6 @@
       list.push(report);
       return node;
     }
-
-    /** Drain the queue: one tree render per batch, one stream item per report. */
     function flush() {
       flushScheduled = false;
       if (!queue.length) return;
@@ -811,18 +902,17 @@
       let avoidableCount = 0;
       for (const r of batch) {
         const node = ingest(r);
-        appendToStream(r);
         if (r.avoidable) avoidableCount++;
         if (state.selectedKey === node.key) {
           touchedSelected = true;
-          if (state.tab === 'latest') state.selectedReport = r;
+          if (state.tab === "latest") state.selectedReport = r;
         }
       }
       renderLeft();
-      if (touchedSelected || state.view === 'commits' || state.view === 'fixes') renderDetails();
-      if (state.polling && avoidableCount) call('badge', state.reports.filter((r) => r.avoidable).length);
+      renderStream(batch);
+      if (touchedSelected || state.view === "commits" || state.view === "fixes" || state.tab === "root") renderDetails();
+      if (state.polling && avoidableCount) transport.badge?.(state.reports.filter((r) => r.avoidable).length);
     }
-
     function enqueue(report) {
       queue.push(report);
       if (!flushScheduled) {
@@ -830,7 +920,6 @@
         schedule(flush);
       }
     }
-
     function clearAll() {
       state.tree.children.clear();
       state.nodesByKey.clear();
@@ -841,227 +930,212 @@
       state.selectedReport = null;
       state.selectedCommit = null;
       state.selectedFix = null;
+      state.selectedRoot = null;
+      if (state.tab === "commit" || state.tab === "fixlist" || state.tab === "root") state.tab = "latest";
       queue = [];
       renderLeft();
       renderDetails();
       renderStream();
     }
-
     function matchesFilter(name) {
       if (!state.filter) return true;
       const f = state.filter.trim();
       const m = /^\/(.+)\/([a-z]*)$/.exec(f);
-      if (m) {
+      if (m && m[1] !== void 0) {
         try {
           return new RegExp(m[1], m[2]).test(name);
         } catch {
-          /* invalid regex: fall through to text */
         }
       }
       return name.toLowerCase().includes(f.toLowerCase());
     }
-
-    /** A node is shown if it or any descendant matches the filter (and has avoidable reports when that filter is on). */
     function visible(node) {
       const own = (!state.avoidableOnly || node.avoidable > 0) && matchesFilter(node.name) && node.total > 0;
       if (own) return true;
       for (const c of node.children.values()) if (visible(c)) return true;
       return false;
     }
-
-    const filteredReports = () => state.reports.filter((r) => (!state.avoidableOnly || r.avoidable) && matchesFilter(r.component));
-
-    // ---------- left pane ----------
+    const passes = (r) => (!state.avoidableOnly || r.avoidable) && matchesFilter(r.component);
+    const filteredReports = () => state.reports.filter(passes);
     function setView(view) {
       state.view = view;
-      for (const [id, b] of viewButtons) b.classList.toggle('active', id === view);
-      tree.hidden = view !== 'tree';
-      table.hidden = view === 'tree';
+      for (const [id, b] of viewButtons) b.classList.toggle("active", id === view);
+      tree.hidden = view !== "tree";
+      table.hidden = view === "tree";
       renderLeft();
       renderDetails();
       persist();
     }
-
     function renderLeft() {
-      if (state.view === 'tree') renderTree();
-      else if (state.view === 'offenders') renderOffenders();
-      else if (state.view === 'commits') renderCommits();
+      if (state.view === "tree") renderTree();
+      else if (state.view === "offenders") renderOffenders();
+      else if (state.view === "commits") renderCommits();
       else renderFixes();
     }
-
-    // Row elements are kept per node and updated in place, so a click is never lost to a rebuild.
-    let flatRows = [];
-    const rowEls = new Map();
-    let emptyEl = null;
+    const rowEls = /* @__PURE__ */ new Map();
+    const treeList = virtualList(tree, ROW_H, ({ node, depth }) => rowFor(node, depth));
+    const emptyEl = el("div", { class: "empty" }, [
+      el("div", { text: "No re-renders reported yet." }),
+      el("div", null, ["Call ", el("code", { text: "init({ notifier: createDevtoolsNotifier() })" }), " in the page, or enable injection in Settings, then interact with it."])
+    ]);
     function renderTree() {
-      flatRows = [];
-      if (state.tree.children.size === 0) {
-        for (const r of rowEls.values()) r.remove();
-        rowEls.clear();
-        if (!emptyEl) {
-          emptyEl = el('div', { class: 'empty' }, [
-            el('div', { text: 'No re-renders reported yet.' }),
-            el('div', null, ['Call ', el('code', { text: 'init({ notifier: createDevtoolsNotifier() })' }), ' in the page, or enable injection in Settings, then interact with it.']),
-          ]);
-        }
-        if (!emptyEl.parentNode) tree.append(emptyEl);
-        return;
-      }
-      if (emptyEl && emptyEl.parentNode) emptyEl.remove();
-      const seen = new Set();
-      let cursor = tree.firstChild;
-      const place = (row) => {
-        if (row === cursor) cursor = cursor.nextSibling;
-        else tree.insertBefore(row, cursor);
-      };
+      const flat = [];
       const walk = (node, depth) => {
         for (const child of node.children.values()) {
           if (!visible(child)) continue;
-          seen.add(child.key);
-          place(rowFor(child, depth));
-          flatRows.push(child);
+          flat.push({ node: child, depth });
           if (child.expanded) walk(child, depth + 1);
         }
       };
       walk(state.tree, 0);
-      for (const [key, row] of rowEls) {
-        if (!seen.has(key)) {
-          row.remove();
-          rowEls.delete(key);
-        }
+      if (flat.length === 0) {
+        if (!emptyEl.parentNode) tree.append(emptyEl);
+      } else emptyEl.remove();
+      if (rowEls.size > flat.length * 2 + 64) {
+        const live = new Set(flat.map((f) => f.node.key));
+        for (const key of [...rowEls.keys()]) if (!live.has(key)) rowEls.delete(key);
       }
+      treeList.setItems(flat);
     }
-
     function hoverHighlight(node, on) {
-      const r = node && node.lastReport;
+      const r = node.lastReport;
       if (!r || !r.instanceId) return;
-      call('highlight', on ? r.instanceId : null);
+      transport.highlight?.(on ? r.instanceId : null);
     }
-
     function rowFor(node, depth) {
       let row = rowEls.get(node.key);
       if (!row) {
-        row = el('div', {
-          class: 'row',
-          'data-key': node.key,
-          role: 'treeitem',
+        const created = el("div", {
+          class: "row",
+          "data-key": node.key,
+          role: "treeitem",
           onclick: () => select(node),
           onmouseenter: () => hoverHighlight(node, true),
           onmouseleave: () => hoverHighlight(node, false),
-          onanimationend: () => row.classList.remove('flash'),
+          onanimationend: () => created.classList.remove("flash")
         });
-        row.append(el('span', { class: 'indent' }));
-        row.append(
-          el('span', {
-            class: 'chevron',
+        created.append(el("span", { class: "indent" }));
+        created.append(
+          el("span", {
+            class: "chevron",
             onclick: (e) => {
               e.stopPropagation();
               toggleExpanded(node);
-            },
-          }),
+            }
+          })
         );
-        row.append(
-          el('span', { class: 'tag' }, [
-            el('span', { class: 'bracket', text: '<' }),
-            el('span', { class: 'name', text: node.name }),
-            el('span', { class: 'bracket', text: '>' }),
-          ]),
+        created.append(
+          el("span", { class: "tag" }, [el("span", { class: "bracket", text: "<" }), el("span", { class: "name", text: node.name }), el("span", { class: "bracket", text: ">" })])
         );
-        row.append(el('span', { class: 'badges' }));
-        rowEls.set(node.key, row);
+        created.append(el("span", { class: "badges" }));
+        rowEls.set(node.key, created);
+        row = created;
       }
-      row.classList.toggle('selected', state.selectedKey === node.key);
-      const indent = row.querySelector('.indent');
+      row.classList.toggle("selected", state.selectedKey === node.key);
+      const indent = row.querySelector(".indent");
       if (indent.childElementCount !== depth) {
-        indent.textContent = '';
-        for (let i = 0; i < depth; i++) indent.append(el('span', { class: 'guide' }));
+        indent.textContent = "";
+        for (let i = 0; i < depth; i++) indent.append(el("span", { class: "guide" }));
       }
       const hasChildren = [...node.children.values()].some(visible);
-      const chevron = row.querySelector('.chevron');
-      chevron.classList.toggle('leaf', !hasChildren);
-      chevron.textContent = node.expanded ? '\u25BE' : '\u25B8';
-      const badges = row.querySelector('.badges');
-      badges.textContent = '';
-      if (node.avoidable) badges.append(el('span', { class: 'badge avoid', title: 'avoidable re-renders', text: String(node.avoidable) }));
-      if (node.total) badges.append(el('span', { class: 'badge', title: 're-renders', text: String(node.total) }));
+      const chevron = row.querySelector(".chevron");
+      chevron.classList.toggle("leaf", !hasChildren);
+      chevron.textContent = node.expanded ? "\u25BE" : "\u25B8";
+      const badges = row.querySelector(".badges");
+      badges.textContent = "";
+      if (node.avoidable) badges.append(el("span", { class: "badge avoid", title: "avoidable re-renders", text: String(node.avoidable) }));
+      if (node.total) badges.append(el("span", { class: "badge", title: "re-renders", text: String(node.total) }));
       if (node.flash) {
         node.flash = false;
-        row.classList.remove('flash');
-        void row.offsetWidth; // restart the animation
-        row.classList.add('flash');
+        if (Date.now() - (node.flashAt || 0) < 1e3) {
+          row.classList.remove("flash");
+          void row.offsetWidth;
+          row.classList.add("flash");
+        }
       }
       return row;
     }
-
     function toggleExpanded(node, value) {
-      node.expanded = value === undefined ? !node.expanded : value;
+      node.expanded = value === void 0 ? !node.expanded : value;
       if (node.expanded) state.collapsed.delete(node.key);
       else state.collapsed.add(node.key);
       renderTree();
       persist();
     }
-
     function select(node, report) {
       state.selectedKey = node.key;
       state.selectedReport = report || node.lastReport || null;
-      // Picking a specific report shows it, unless the caller asked for the Fix tab.
-      if (report && state.tab !== 'fix') state.tab = 'latest';
-      if (state.tab === 'commit' || state.tab === 'fixlist') state.tab = 'latest';
+      if (report && state.tab !== "fix") state.tab = "latest";
+      if (state.tab === "commit" || state.tab === "fixlist" || state.tab === "root") state.tab = "latest";
       renderLeft();
       renderDetails();
-      const row = tree.querySelector(`[data-key="${cssEscape(node.key)}"]`);
-      if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
-    }
-
-    function cssEscape(s) {
-      return global.CSS && global.CSS.escape ? global.CSS.escape(s) : s.replace(/["\\]/g, '\\$&');
-    }
-
-    function onTreeKey(e) {
-      if (!flatRows.length) return;
-      const idx = flatRows.findIndex((n) => n.key === state.selectedKey);
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        select(flatRows[Math.min(flatRows.length - 1, idx + 1)]);
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        select(flatRows[Math.max(0, idx - 1)]);
-      } else if (e.key === 'ArrowRight' && idx >= 0) {
-        toggleExpanded(flatRows[idx], true);
-      } else if (e.key === 'ArrowLeft' && idx >= 0) {
-        toggleExpanded(flatRows[idx], false);
-      } else if (e.key === 'Escape') {
-        call('highlight', null);
+      if (state.view === "tree") {
+        const idx = treeList.items.findIndex((f) => f.node.key === node.key);
+        if (idx >= 0) treeList.scrollTo(idx);
       }
     }
-
-    function sortableHeader(label, key, numeric) {
+    function onTreeKey(e) {
+      const rows = treeList.items;
+      if (!rows.length) return;
+      const idx = rows.findIndex((f) => f.node.key === state.selectedKey);
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        select(rows[Math.min(rows.length - 1, idx + 1)].node);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        select(rows[Math.max(0, idx - 1)].node);
+      } else if (e.key === "ArrowRight" && idx >= 0) {
+        toggleExpanded(rows[idx].node, true);
+      } else if (e.key === "ArrowLeft" && idx >= 0) {
+        toggleExpanded(rows[idx].node, false);
+      }
+    }
+    function onGlobalKey(e) {
+      const target = e.target;
+      const inField = !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT");
+      if (e.key === "Escape") {
+        transport.highlight?.(null);
+        if (inField) target.blur();
+        return;
+      }
+      if (inField || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === "/") {
+        e.preventDefault();
+        search.focus();
+        search.select();
+      } else if (e.key === "f" && state.selectedKey) {
+        e.preventDefault();
+        state.tab = "fix";
+        renderDetails();
+        persist();
+      }
+    }
+    function sortableHeader(label, key, numeric = false) {
       const active = state.sort.key === key;
       return el(
-        'th',
+        "th",
         {
-          class: (active ? 'sorted ' : '') + (numeric ? 'num' : ''),
+          class: (active ? "sorted " : "") + (numeric ? "num" : ""),
           onclick: () => {
             state.sort = { key, dir: active ? -state.sort.dir : numeric ? -1 : 1 };
             renderLeft();
-          },
+          }
         },
-        label + (active ? (state.sort.dir < 0 ? ' \u25BE' : ' \u25B4') : ''),
+        label + (active ? state.sort.dir < 0 ? " \u25BE" : " \u25B4" : "")
       );
     }
-
     function offenderRows() {
-      const byName = new Map();
+      const byName = /* @__PURE__ */ new Map();
       for (const r of filteredReports()) {
         let o = byName.get(r.component);
         if (!o) {
-          o = { component: r.component, total: 0, avoidable: 0, wasted: 0, paths: new Set(), reports: [] };
+          o = { component: r.component, total: 0, avoidable: 0, wasted: 0, paths: /* @__PURE__ */ new Set(), reports: [], fix: "" };
           byName.set(r.component, o);
         }
         o.total++;
         if (r.avoidable) {
           o.avoidable++;
-          if (typeof r.selfDuration === 'number') o.wasted += r.selfDuration;
+          if (typeof r.selfDuration === "number") o.wasted += r.selfDuration;
         }
         o.paths.add(keyOf(r.path));
         o.reports.push(r);
@@ -1069,233 +1143,223 @@
       const rows = [...byName.values()];
       for (const o of rows) {
         const fixes = rankFixes(o.reports);
-        o.fix = fixes.length ? fixes[0].label : '';
+        o.fix = fixes.length ? fixes[0].label : "";
       }
       const { key, dir } = state.sort;
       rows.sort((a, b) => {
         const va = a[key];
         const vb = b[key];
-        const c = typeof va === 'number' ? va - vb : String(va).localeCompare(String(vb));
+        const c = typeof va === "number" && typeof vb === "number" ? va - vb : String(va).localeCompare(String(vb));
         return c * dir || b.avoidable - a.avoidable;
       });
       return rows;
     }
-
     function renderOffenders() {
-      table.textContent = '';
+      table.textContent = "";
       const rows = offenderRows();
       if (!rows.length) {
-        table.append(el('div', { class: 'empty', text: 'No re-renders reported yet.' }));
+        table.append(el("div", { class: "empty", text: "No re-renders reported yet." }));
         return;
       }
-      const t = el('table', { class: 'grid' });
+      const t = el("table", { class: "grid" });
       t.append(
-        el('thead', null, el('tr', null, [sortableHeader('Component', 'component'), sortableHeader('Avoidable', 'avoidable', true), sortableHeader('Total', 'total', true), sortableHeader('Wasted', 'wasted', true), el('th', { text: 'Top fix' })])),
+        el("thead", null, el("tr", null, [sortableHeader("Component", "component"), sortableHeader("Avoidable", "avoidable", true), sortableHeader("Total", "total", true), sortableHeader("Wasted", "wasted", true), el("th", { text: "Top fix" })]))
       );
-      const body = el('tbody');
+      const body = el("tbody");
       for (const o of rows) {
         body.append(
           el(
-            'tr',
+            "tr",
             {
-              class: o.avoidable ? 'has-avoid' : '',
+              class: o.avoidable ? "has-avoid" : "",
               onclick: () => {
                 const last = o.reports[o.reports.length - 1];
-                const node = nodeFor([].concat(last.path, [last.component]));
-                state.tab = 'fix';
-                select(node, last);
-              },
+                state.tab = "fix";
+                select(nodeOfReport(last), last);
+              }
             },
             [
-              el('td', { class: 'c' }, [el('span', { class: 'name', text: o.component }), o.paths.size > 1 ? el('span', { class: 'meta', text: ` \u00D7${o.paths.size} places` }) : null]),
-              el('td', { class: 'num' }, o.avoidable ? el('span', { class: 'badge avoid', text: String(o.avoidable) }) : '0'),
-              el('td', { class: 'num', text: String(o.total) }),
-              el('td', { class: 'num', text: o.wasted ? fmtMs(o.wasted) : '' }),
-              el('td', { class: 'fix', text: o.fix }),
-            ],
-          ),
+              el("td", { class: "c" }, [el("span", { class: "name", text: o.component }), o.paths.size > 1 ? el("span", { class: "meta", text: ` \xD7${o.paths.size} places` }) : null]),
+              el("td", { class: "num" }, o.avoidable ? el("span", { class: "badge avoid", text: String(o.avoidable) }) : "0"),
+              el("td", { class: "num", text: String(o.total) }),
+              el("td", { class: "num", text: o.wasted ? fmtMs(o.wasted) : "" }),
+              el("td", { class: "fix", text: o.fix })
+            ]
+          )
         );
       }
       t.append(body);
       table.append(t);
     }
-
     function commitSummaries() {
       const out = [];
       for (let i = state.commitOrder.length - 1; i >= 0; i--) {
-        const reports = state.commits.get(state.commitOrder[i]);
-        if (!reports) continue;
-        const kept = reports.filter((r) => (!state.avoidableOnly || r.avoidable) && matchesFilter(r.component));
-        if (!kept.length) continue;
-        out.push({ key: state.commitOrder[i], analysis: analyzeCommit(reports), shown: kept.length });
+        const key = state.commitOrder[i];
+        const reports = state.commits.get(key);
+        if (!reports || !reports.some(passes)) continue;
+        out.push({ key, analysis: analyzeCommit(reports) });
       }
       return out;
     }
-
+    function showCommit(key) {
+      state.selectedCommit = key;
+      state.tab = "commit";
+      renderLeft();
+      renderDetails();
+    }
+    function showRoot(name) {
+      state.selectedRoot = name;
+      state.tab = "root";
+      renderDetails();
+    }
     function renderCommits() {
-      table.textContent = '';
+      table.textContent = "";
       const items = commitSummaries();
       if (!items.length) {
-        table.append(el('div', { class: 'empty', text: 'No commits yet.' }));
+        table.append(el("div", { class: "empty", text: "No commits yet." }));
         return;
       }
-      const list = el('ul', { class: 'commits' });
+      const list = el("ul", { class: "commits" });
       for (const { key, analysis } of items) {
-        const root = analysis.roots[0];
+        const root2 = analysis.roots[0];
         list.append(
-          el(
-            'li',
-            {
-              class: (state.selectedCommit === key ? 'selected ' : '') + (analysis.avoidable ? 'has-avoid' : ''),
-              onclick: () => {
-                state.selectedCommit = key;
-                state.tab = 'commit';
-                renderLeft();
-                renderDetails();
-              },
-            },
-            [
-              el('span', { class: 'id', text: key > 0 ? `#${key}` : '\u2014' }),
-              el('span', { class: 't', text: fmtTime(analysis.receivedAt) }),
-              el('span', { class: 'n', text: `${analysis.total} render${analysis.total === 1 ? '' : 's'}` }),
-              analysis.avoidable ? el('span', { class: 'badge avoid', text: `${analysis.avoidable} avoidable` }) : el('span', { class: 'badge', text: 'ok' }),
-              el('span', { class: 'root', text: root ? `\u2190 <${root.name}> (${root.trigger})` : '' }),
-            ],
-          ),
+          el("li", { class: (state.selectedCommit === key && state.tab === "commit" ? "selected " : "") + (analysis.avoidable ? "has-avoid" : ""), onclick: () => showCommit(key) }, [
+            el("span", { class: "id", text: key > 0 ? `#${key}` : "\u2014" }),
+            el("span", { class: "t", text: fmtTime(analysis.receivedAt) }),
+            el("span", { class: "n", text: plural(analysis.total, "render") }),
+            analysis.avoidable ? el("span", { class: "badge avoid", text: `${analysis.avoidable} avoidable` }) : el("span", { class: "badge", text: "ok" }),
+            el("span", { class: "root", text: root2 ? `\u2190 <${root2.name}> (${root2.trigger})` : "" })
+          ])
         );
       }
       table.append(list);
     }
-
     function renderFixes() {
-      table.textContent = '';
-      const fixes = rankFixes(filteredReports());
-      const contexts = contextAttribution(filteredReports());
+      table.textContent = "";
+      const reports = filteredReports();
+      const fixes = rankFixes(reports);
+      const contexts = contextAttribution(reports);
       if (!fixes.length && !contexts.length) {
-        table.append(el('div', { class: 'empty', text: 'No avoidable re-renders, nothing to fix.' }));
+        table.append(el("div", { class: "empty", text: "No avoidable re-renders, nothing to fix." }));
         return;
       }
       if (fixes.length) {
-        const list = el('ol', { class: 'fixes' });
+        const list = el("ol", { class: "fixes" });
         for (const f of fixes) {
           list.append(
             el(
-              'li',
+              "li",
               {
-                class: state.selectedFix === f.key ? 'selected' : '',
+                class: state.selectedFix === f.key && state.tab === "fixlist" ? "selected" : "",
                 onclick: () => {
                   state.selectedFix = f.key;
-                  state.tab = 'fixlist';
+                  state.tab = "fixlist";
                   renderLeft();
                   renderDetails();
-                },
+                }
               },
               [
-                el('span', { class: 'badge avoid', title: 'avoidable re-renders removed', text: String(f.count) }),
-                el('span', { class: 'label', text: f.label }),
-                el('span', { class: 'meta', text: [...f.components].map(([c, n]) => `<${c}>${n > 1 ? ' \u00D7' + n : ''}`).join(', ') }),
-              ],
-            ),
+                el("span", { class: "badge avoid", title: "avoidable re-renders removed", text: String(f.count) }),
+                el("span", { class: "label", text: f.label }),
+                el("span", { class: "meta", text: componentList(f.components) })
+              ]
+            )
           );
         }
-        table.append(el('div', { class: 'section-title', text: 'Ranked by avoidable re-renders removed' }), list);
+        table.append(el("div", { class: "section-title", text: "Ranked by avoidable re-renders removed" }), list);
       }
       if (contexts.length) {
-        const list = el('ul', { class: 'contexts' });
+        const list = el("ul", { class: "contexts" });
         for (const c of contexts) {
           list.append(
-            el('li', null, [
-              el('span', { class: 'name', text: c.name }),
-              el('span', { class: 'meta', text: ` changed in ${c.commits.size} commit${c.commits.size === 1 ? '' : 's'}, ${c.consumers} consumer re-render${c.consumers === 1 ? '' : 's'}${c.avoidable ? `, ${c.avoidable} with an equal value` : ''}: ${[...c.components].map(([n, k]) => `<${n}>${k > 1 ? ' \u00D7' + k : ''}`).join(', ')}` }),
-            ]),
+            el("li", null, [
+              el("span", { class: "name", text: c.name }),
+              el("span", {
+                class: "meta",
+                text: ` changed in ${plural(c.commits.size, "commit")}, ${plural(c.consumers, "consumer re-render")}${c.avoidable ? `, ${c.avoidable} with an equal value` : ""}: ${componentList(c.components)}`
+              })
+            ])
           );
         }
-        table.append(el('div', { class: 'section-title', text: 'Contexts' }), list);
+        table.append(el("div", { class: "section-title", text: "Contexts" }), list);
       }
     }
-
-    // ---------- details ----------
     function renderDetails() {
-      const openLabels = new Set([...details.querySelectorAll('details.obj[open] > summary')].map((x) => x.textContent));
-      details.textContent = '';
-      if (state.tab === 'commit' && state.selectedCommit !== null) renderCommitDetails();
-      else if (state.tab === 'fixlist' && state.selectedFix) renderFixDetails();
-      else renderNodeDetails(state.selectedKey ? state.nodesByKey.get(state.selectedKey) : null);
+      const openLabels = new Set([...details.querySelectorAll("details.obj[open] > summary")].map((x) => x.textContent));
+      details.textContent = "";
+      if (state.tab === "commit" && state.selectedCommit !== null) renderCommitDetails();
+      else if (state.tab === "fixlist" && state.selectedFix) renderFixDetails();
+      else if (state.tab === "root" && state.selectedRoot) renderRootDetails();
+      else renderNodeDetails(state.selectedKey ? state.nodesByKey.get(state.selectedKey) ?? null : null);
       if (openLabels.size) {
-        for (const d of details.querySelectorAll('details.obj')) {
-          if (openLabels.has(d.querySelector('summary').textContent)) d.open = true;
+        for (const d of details.querySelectorAll("details.obj")) {
+          if (openLabels.has(d.querySelector("summary").textContent)) d.open = true;
         }
       }
     }
-
     const reportActions = () => ({
-      openSource: transport && transport.openResource ? (src) => transport.openResource(src.fileName, src.lineNumber, src.columnNumber) : null,
-      highlight: transport && transport.highlight ? (id) => transport.highlight(id) : null,
-      copy: copyText,
+      openSource: transport.openResource ? (src) => transport.openResource(src.fileName, src.lineNumber, src.columnNumber) : null,
+      highlight: transport.highlight ? (id) => transport.highlight(id) : null,
+      copy: copyText
     });
-
-    function tabButton(id, label, onclick) {
-      return el('button', { class: state.tab === id ? 'active' : '', onclick }, label);
-    }
-
+    const tabButton = (id, label, onclick) => el("button", { class: state.tab === id ? "active" : "", onclick }, label);
     function renderNodeDetails(node) {
       if (!node) {
-        details.append(el('div', { class: 'empty', text: 'Select a component to see why it re-rendered.' }));
+        details.append(el("div", { class: "empty", text: "Select a component to see why it re-rendered." }));
         return;
       }
-      const header = el('div', { class: 'details-header' }, [
-        el('span', { class: 'title' }, [
-          el('span', { class: 'bracket', text: '<' }),
-          el('span', { class: 'name', text: node.name }),
-          el('span', { class: 'bracket', text: '>' }),
-        ]),
-        el('span', { class: 'meta', text: `${node.total} re-render${node.total === 1 ? '' : 's'}, ${node.avoidable} avoidable${node.wasted ? ', ' + fmtMs(node.wasted) + ' wasted' : ''}` }),
-        el('span', { class: 'tabs' }, [
-          tabButton('latest', 'Report', () => {
-            state.tab = 'latest';
-            state.selectedReport = node.lastReport;
+      const header = el("div", { class: "details-header" }, [
+        el("span", { class: "title" }, [el("span", { class: "bracket", text: "<" }), el("span", { class: "name", text: node.name }), el("span", { class: "bracket", text: ">" })]),
+        el("span", { class: "meta", text: `${plural(node.total, "re-render")}, ${node.avoidable} avoidable${node.wasted ? ", " + fmtMs(node.wasted) + " wasted" : ""}` }),
+        el("span", { class: "tabs" }, [
+          tabButton("latest", "Report", () => {
+            state.tab = "latest";
+            state.selectedReport = node.lastReport ?? null;
             renderDetails();
+            persist();
           }),
-          tabButton('history', `History (${node.reports.length})`, () => {
-            state.tab = 'history';
+          tabButton("history", `History (${node.reports.length})`, () => {
+            state.tab = "history";
             renderDetails();
+            persist();
           }),
-          tabButton('fix', 'Fix', () => {
-            state.tab = 'fix';
+          tabButton("fix", "Fix", () => {
+            state.tab = "fix";
             renderDetails();
-          }),
-        ]),
+            persist();
+          })
+        ])
       ]);
       details.append(header);
-      const body = el('div', { class: 'details-body' });
+      const body = el("div", { class: "details-body" });
       details.append(body);
-      if (state.tab === 'history') {
-        const list = el('ul', { class: 'history' });
-        for (const r of [...node.reports].reverse()) {
+      if (state.tab === "history") {
+        const list = el("ul", { class: "history" });
+        for (const r2 of [...node.reports].reverse()) {
           list.append(
             el(
-              'li',
+              "li",
               {
-                class: state.selectedReport === r ? 'selected' : '',
+                class: state.selectedReport === r2 ? "selected" : "",
                 onclick: () => {
-                  state.selectedReport = r;
-                  state.tab = 'latest';
+                  state.selectedReport = r2;
+                  state.tab = "latest";
                   renderDetails();
-                },
+                }
               },
               [
-                el('span', { class: 't', text: fmtTime(r.receivedAt) }),
-                el('span', { class: 'n', text: '#' + r.renderCount }),
-                el('span', { class: 'verdict ' + (r.avoidable ? 'avoid' : 'ok'), text: r.avoidable ? 'avoidable' : r.trigger }),
-                el('span', { class: 'sum', text: summarize(r) }),
-              ],
-            ),
+                el("span", { class: "t", text: fmtTime(r2.receivedAt) }),
+                el("span", { class: "n", text: "#" + r2.renderCount }),
+                el("span", { class: "verdict " + (r2.avoidable ? "avoid" : "ok"), text: r2.avoidable ? "avoidable" : r2.trigger }),
+                el("span", { class: "sum", text: summarize(r2) })
+              ]
+            )
           );
         }
         body.append(list);
         return;
       }
-      if (state.tab === 'fix') {
+      if (state.tab === "fix") {
         body.append(fixView(rankFixes(node.reports), { copy: copyText }));
         return;
       }
@@ -1303,173 +1367,177 @@
       if (!r) return;
       body.append(reportView(r, reportActions()));
     }
-
+    function rootsList(roots) {
+      return el(
+        "ul",
+        { class: "roots" },
+        roots.map(
+          (root2) => el("li", null, [
+            el("a", { class: "root-link", href: "#", title: "Every commit this component started", onclick: (e) => (e.preventDefault(), showRoot(root2.name)) }, `<${root2.name}>`),
+            ` (${root2.trigger}) \u2192 ${plural(root2.count, "avoidable re-render")}: `,
+            el("span", { class: "meta", text: componentList(root2.components) })
+          ])
+        )
+      );
+    }
     function renderCommitDetails() {
-      const reports = state.commits.get(state.selectedCommit);
+      const key = state.selectedCommit;
+      const reports = state.commits.get(key);
       if (!reports) {
-        details.append(el('div', { class: 'empty', text: 'This commit is no longer buffered.' }));
+        details.append(el("div", { class: "empty", text: "This commit is no longer buffered." }));
         return;
       }
       const a = analyzeCommit(reports);
       details.append(
-        el('div', { class: 'details-header' }, [
-          el('span', { class: 'title', text: state.selectedCommit > 0 ? `Commit #${state.selectedCommit}` : 'Commit' }),
-          el('span', { class: 'meta', text: `${a.total} render${a.total === 1 ? '' : 's'}, ${a.avoidable} avoidable${a.wasted ? ', ' + fmtMs(a.wasted) + ' wasted' : ''} \u00B7 ${fmtTime(a.receivedAt)}` }),
-        ]),
+        el("div", { class: "details-header" }, [
+          el("span", { class: "title", text: key > 0 ? `Commit #${key}` : "Commit" }),
+          el("span", { class: "meta", text: `${plural(a.total, "render")}, ${a.avoidable} avoidable${a.wasted ? ", " + fmtMs(a.wasted) + " wasted" : ""} \xB7 ${fmtTime(a.receivedAt)}` })
+        ])
       );
-      const body = el('div', { class: 'details-body' });
+      const body = el("div", { class: "details-body" });
       details.append(body);
-      if (a.roots.length) {
-        body.append(
-          el('div', { class: 'section' }, [
-            el('h3', { text: 'Root causes' }),
-            el(
-              'ul',
-              { class: 'roots' },
-              a.roots.map((root) =>
-                el('li', null, [
-                  el('b', { text: `<${root.name}>` }),
-                  ` (${root.trigger}) \u2192 ${root.count} avoidable re-render${root.count === 1 ? '' : 's'}: `,
-                  el('span', { class: 'meta', text: [...root.components].map(([c, n]) => `<${c}>${n > 1 ? ' \u00D7' + n : ''}`).join(', ') }),
-                ]),
-              ),
-            ),
-          ]),
-        );
-      }
+      if (a.roots.length) body.append(el("div", { class: "section" }, [el("h3", { text: "Root causes" }), rootsList(a.roots)]));
       if (a.contexts.length) {
         body.append(
-          el('div', { class: 'section' }, [
-            el('h3', { text: 'Contexts that changed' }),
-            el('ul', { class: 'roots' }, a.contexts.map((c) => el('li', null, [el('b', { text: c.name }), ` \u2192 ${c.consumers} consumer${c.consumers === 1 ? '' : 's'} re-rendered${c.avoidable ? ` (${c.avoidable} with an equal value)` : ''}`]))),
-          ]),
+          el("div", { class: "section" }, [
+            el("h3", { text: "Contexts that changed" }),
+            el("ul", { class: "roots" }, a.contexts.map((c) => el("li", null, [el("b", { text: c.name }), ` \u2192 ${plural(c.consumers, "consumer")} re-rendered${c.avoidable ? ` (${c.avoidable} with an equal value)` : ""}`])))
+          ])
         );
       }
-      const cascade = el('div', { class: 'cascade' });
+      const cascade = el("div", { class: "cascade" });
       const walk = (node, depth) => {
         for (const child of node.children.values()) {
           const r = child.report;
           const line = el(
-            'div',
+            "div",
             {
-              class: 'cascade-row' + (r ? (r.avoidable ? ' avoid' : ' ok') : ' untracked'),
+              class: "cascade-row" + (r ? r.avoidable ? " avoid" : " ok" : " untracked"),
               style: `padding-left:${depth * 14}px`,
-              onclick: r
-                ? () => {
-                    const n = nodeFor([].concat(r.path, [r.component]));
-                    select(n, r);
-                  }
-                : null,
+              onclick: r ? () => select(nodeOfReport(r), r) : null
             },
             [
-              el('span', { class: 'tag' }, [el('span', { class: 'bracket', text: '<' }), el('span', { class: 'name', text: child.name }), el('span', { class: 'bracket', text: '>' })]),
-              r ? el('span', { class: 'verdict ' + (r.avoidable ? 'avoid' : 'ok'), text: r.avoidable ? 'avoidable' : r.trigger }) : el('span', { class: 'meta', text: 'did not render or untracked' }),
-              child.count > 1 ? el('span', { class: 'meta', text: ` \u00D7${child.count}` }) : null,
-              r && r.avoidable ? el('span', { class: 'meta', text: ' ' + summarize(r) }) : null,
-            ],
+              el("span", { class: "tag" }, [el("span", { class: "bracket", text: "<" }), el("span", { class: "name", text: child.name }), el("span", { class: "bracket", text: ">" })]),
+              r ? el("span", { class: "verdict " + (r.avoidable ? "avoid" : "ok"), text: r.avoidable ? "avoidable" : r.trigger }) : el("span", { class: "meta", text: "did not render or untracked" }),
+              child.count && child.count > 1 ? el("span", { class: "meta", text: ` \xD7${child.count}` }) : null,
+              r && r.avoidable ? el("span", { class: "meta", text: " " + summarize(r) }) : null
+            ]
           );
           cascade.append(line);
           walk(child, depth + 1);
         }
       };
       walk(cascadeTree(reports), 0);
-      body.append(el('div', { class: 'section' }, [el('h3', { text: 'Render cascade' }), cascade]));
+      body.append(el("div", { class: "section" }, [el("h3", { text: "Render cascade" }), cascade]));
       if (a.fixes.length) {
-        body.append(el('div', { class: 'section-title', text: 'Fixes for this commit' }));
+        body.append(el("div", { class: "section-title", text: "Fixes for this commit" }));
         body.append(fixView(a.fixes, { copy: copyText }));
       }
     }
-
+    function affectedList(reports) {
+      const list = el("ul", { class: "history" });
+      for (const r of reports.slice().reverse()) {
+        list.append(
+          el("li", { onclick: () => select(nodeOfReport(r), r) }, [
+            el("span", { class: "t", text: fmtTime(r.receivedAt) }),
+            el("span", { class: "comp", text: `<${r.component}>` }),
+            el("span", { class: "sum", text: summarize(r) })
+          ])
+        );
+      }
+      return list;
+    }
     function renderFixDetails() {
       const fix = rankFixes(filteredReports()).find((f) => f.key === state.selectedFix);
       if (!fix) {
-        details.append(el('div', { class: 'empty', text: 'Select a fix.' }));
+        details.append(el("div", { class: "empty", text: "Select a fix." }));
         return;
       }
-      details.append(el('div', { class: 'details-header' }, [el('span', { class: 'title', text: fix.label }), el('span', { class: 'meta', text: `removes ${fix.count} avoidable re-render${fix.count === 1 ? '' : 's'}` })]));
-      const body = el('div', { class: 'details-body' });
+      details.append(el("div", { class: "details-header" }, [el("span", { class: "title", text: fix.label }), el("span", { class: "meta", text: `removes ${plural(fix.count, "avoidable re-render")}` })]));
+      const body = el("div", { class: "details-body" });
       details.append(body);
       body.append(fixView([fix], { copy: copyText }));
-      const list = el('ul', { class: 'history' });
-      for (const r of fix.reports.slice().reverse()) {
+      body.append(el("div", { class: "section" }, [el("h3", { text: "Affected re-renders" }), affectedList(fix.reports)]));
+    }
+    function renderRootDetails() {
+      const name = state.selectedRoot;
+      const s = rootCauseSummary(name, state.commits);
+      details.append(
+        el("div", { class: "details-header" }, [
+          el("span", { class: "title" }, ["Root cause ", el("span", { class: "name", text: `<${name}>` })]),
+          el("span", { class: "meta", text: s.commits.length ? `started ${plural(s.commits.length, "commit")} with ${plural(s.total, "avoidable re-render")} (${s.trigger})` : "no commits in the buffer" })
+        ])
+      );
+      const body = el("div", { class: "details-body" });
+      details.append(body);
+      if (!s.commits.length) return;
+      body.append(el("div", { class: "section" }, [el("h3", { text: "Components that re-rendered avoidably because of it" }), el("div", { class: "meta", text: componentList(s.components) })]));
+      const list = el("ul", { class: "commits root-commits" });
+      for (const c of s.commits) {
         list.append(
-          el(
-            'li',
-            {
-              onclick: () => {
-                select(nodeFor([].concat(r.path, [r.component])), r);
-              },
-            },
-            [el('span', { class: 't', text: fmtTime(r.receivedAt) }), el('span', { class: 'comp', text: `<${r.component}>` }), el('span', { class: 'sum', text: summarize(r) })],
-          ),
+          el("li", { onclick: () => showCommit(c.key) }, [
+            el("span", { class: "id", text: c.key > 0 ? `#${c.key}` : "\u2014" }),
+            el("span", { class: "t", text: fmtTime(c.analysis.receivedAt) }),
+            el("span", { class: "badge avoid", text: `${c.count} avoidable` }),
+            el("span", { class: "root", text: componentList(c.components) })
+          ])
         );
       }
-      body.append(el('div', { class: 'section' }, [el('h3', { text: 'Affected re-renders' }), list]));
-    }
-
-    // ---------- stream ----------
-    let streamShown = 0;
-    function streamItem(r) {
-      return el(
-        'li',
-        {
-          onclick: () => {
-            const node = nodeFor([].concat(r.path || [], [r.component]));
-            select(node, r);
-          },
-        },
-        [
-          el('span', { class: 't', text: fmtTime(r.receivedAt) }),
-          el('span', { class: 'c', text: r.component }),
-          el('span', { class: 'v ' + (r.avoidable ? 'avoid' : 'ok'), text: r.avoidable ? 'avoidable' : r.trigger }),
-          el('span', { class: 's', text: summarize(r) }),
-        ],
-      );
-    }
-
-    /** Full rebuild: used after clear and filter changes. */
-    function renderStream() {
-      streamList.textContent = '';
-      const items = state.avoidableOnly ? state.reports.filter((r) => r.avoidable) : state.reports;
-      streamShown = items.length;
-      streamCount.textContent = `${streamShown} report${streamShown === 1 ? '' : 's'}`;
-      const frag = document.createDocumentFragment();
-      for (const r of items.slice(-MAX_STREAM).reverse()) frag.append(streamItem(r));
-      streamList.append(frag);
-    }
-
-    /** Incremental: prepend one item, keep existing elements (and any click in progress) intact. */
-    function appendToStream(r) {
-      if (state.avoidableOnly && !r.avoidable) return;
-      streamShown++;
-      streamCount.textContent = `${streamShown} report${streamShown === 1 ? '' : 's'}`;
-      streamList.prepend(streamItem(r));
-      while (streamList.childElementCount > MAX_STREAM) streamList.lastElementChild.remove();
-    }
-
-    // ---------- export / import ----------
-    function exportJson() {
-      const data = { rerenderLens: true, version: PROTOCOL, exportedAt: new Date().toISOString(), origin: state.origin, reports: state.reports };
-      const text = JSON.stringify(data, null, 2);
-      const name = `rerender-lens-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-      if (call('download', name, text) === undefined) {
-        try {
-          const blob = new Blob([text], { type: 'application/json' });
-          const url = URL.createObjectURL(blob);
-          const a = el('a', { href: url, download: name });
-          document.body.append(a);
-          a.click();
-          a.remove();
-          setTimeout(() => URL.revokeObjectURL(url), 1000);
-        } catch {
-          copyText(text);
-        }
+      body.append(el("div", { class: "section" }, [el("h3", { text: "Commits" }), list]));
+      if (s.fixes.length) {
+        body.append(el("div", { class: "section-title", text: "Fixes" }));
+        body.append(fixView(s.fixes, { copy: copyText }));
       }
     }
-
+    const itemEls = /* @__PURE__ */ new WeakMap();
+    const streamItems = virtualList(streamList, ITEM_H, (r) => {
+      let li = itemEls.get(r);
+      if (!li) {
+        li = el("div", { class: "stream-item", onclick: () => select(nodeOfReport(r), r) }, [
+          el("span", { class: "t", text: fmtTime(r.receivedAt) }),
+          el("span", { class: "c", text: r.component }),
+          el("span", { class: "v " + (r.avoidable ? "avoid" : "ok"), text: r.avoidable ? "avoidable" : r.trigger }),
+          el("span", { class: "s", text: summarize(r) })
+        ]);
+        itemEls.set(r, li);
+      }
+      return li;
+    });
+    let streamShown = [];
+    function renderStream(batch) {
+      if (batch) {
+        const fresh = batch.filter(passes).reverse();
+        if (fresh.length) streamShown = fresh.concat(streamShown);
+        if (streamShown.length > MAX_REPORTS) streamShown.length = MAX_REPORTS;
+      } else {
+        streamShown = filteredReports().reverse();
+      }
+      streamCount.textContent = plural(streamShown.length, "report");
+      streamItems.setItems(streamShown);
+    }
+    function exportJson() {
+      const data = { rerenderLens: true, version: PROTOCOL, exportedAt: (/* @__PURE__ */ new Date()).toISOString(), origin: state.origin, reports: state.reports };
+      const text = JSON.stringify(data, null, 2);
+      const name = `rerender-lens-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`;
+      if (transport.download) {
+        transport.download(name, text);
+        return;
+      }
+      try {
+        const blob = new Blob([text], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = el("a", { href: url, download: name });
+        document.body.append(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1e3);
+      } catch {
+        copyText(text);
+      }
+    }
     function importData(data) {
-      const reports = Array.isArray(data) ? data : data && Array.isArray(data.reports) ? data.reports : null;
-      if (!reports) throw new Error('not a rerender-lens export');
+      const reports = Array.isArray(data) ? data : isRecord(data) && Array.isArray(data.reports) ? data.reports : null;
+      if (!reports) throw new Error("not a rerender-lens export");
       clearAll();
       let n = 0;
       for (const p of reports) {
@@ -1480,10 +1548,9 @@
         }
       }
       flush();
-      toast(`Imported ${n} report${n === 1 ? '' : 's'}`);
+      toast(`Imported ${plural(n, "report")}`);
       return n;
     }
-
     function importFile(file) {
       const reader = new FileReader();
       reader.onload = () => {
@@ -1495,151 +1562,141 @@
       };
       reader.readAsText(file);
     }
-
-    // ---------- status / settings ----------
     function renderStatus() {
       const lib = state.library;
       let text;
-      let cls = 'none';
-      let title = '';
+      let cls = "none";
+      let title = "";
       if (lib) {
         const react = lib.react && lib.react[0];
-        text = `connected \u00B7 lib ${lib.library || '?'}${react && react.version ? ` \u00B7 React ${react.version}` : ''}${lib.production ? ' (prod)' : ''}`;
-        cls = 'connected';
-        title = state.relay ? 'live via content script' : 'polling the page';
+        text = `connected \xB7 lib ${lib.library || "?"}${react && react.version ? ` \xB7 React ${react.version}` : ""}${lib.production ? " (prod)" : ""}`;
+        cls = "connected";
+        title = state.relay ? "live via content script" : "polling the page";
       } else if (state.relay || state.polling) {
-        text = 'no library in page';
-        cls = 'partial';
-        title = 'rerender-lens is not running in this page';
+        text = "no library in page";
+        cls = "partial";
+        title = "rerender-lens is not running in this page";
       } else {
-        text = 'no page';
+        text = "no page";
       }
-      status.className = 'status ' + cls;
+      status.className = "status " + cls;
       status.title = title;
-      status.querySelector('.status-text').textContent = text;
-      // warnings
-      banner.textContent = '';
+      status.querySelector(".status-text").textContent = text;
+      banner.textContent = "";
       const warnings = [];
-      if (lib && typeof lib.protocol === 'number' && lib.protocol !== PROTOCOL) {
+      if (lib && typeof lib.protocol === "number" && lib.protocol !== PROTOCOL) {
         warnings.push(
-          lib.protocol < PROTOCOL
-            ? `The page runs rerender-lens ${lib.library || ''} (protocol ${lib.protocol}); this panel expects protocol ${PROTOCOL}. Update the rerender-lens package for commit grouping, source links and settings.`
-            : `The page runs a newer rerender-lens (protocol ${lib.protocol}) than this panel (${PROTOCOL}). Update the extension.`,
+          lib.protocol < PROTOCOL ? `The page runs rerender-lens ${lib.library || ""} (protocol ${lib.protocol}); this panel expects protocol ${PROTOCOL}. Update the rerender-lens package for commit grouping, source links and settings.` : `The page runs a newer rerender-lens (protocol ${lib.protocol}) than this panel (${PROTOCOL}). Update the extension.`
         );
       }
-      if (lib && lib.production) warnings.push('Production React build detected: component names may be minified and hooks are unlabeled. Use a development build.');
-      if (lib && lib.injected && lib.source === 'page')
-        warnings.push(`The page runs its own rerender-lens ${lib.library || ''}; the copy injected by the extension stepped aside. Turn injection off for this origin in Settings to avoid loading the library twice.`);
-      if (lib && lib.enabled === false) warnings.push('rerender-lens is present but disabled in this page.');
+      if (lib && lib.production) warnings.push("Production React build detected: component names may be minified and hooks are unlabeled. Use a development build.");
+      if (lib && lib.injected && lib.source === "page")
+        warnings.push(`The page runs its own rerender-lens ${lib.library || ""}; the copy injected by the extension stepped aside. Turn injection off for this origin in Settings to avoid loading the library twice.`);
+      if (lib && lib.enabled === false) warnings.push("rerender-lens is present but disabled in this page.");
       banner.hidden = warnings.length === 0;
-      for (const w of warnings) banner.append(el('div', { text: w }));
+      for (const w of warnings) banner.append(el("div", { text: w }));
     }
-
     function setRelay(on) {
       state.relay = on;
       if (!on) state.library = null;
       renderStatus();
     }
-
     function setLibrary(info) {
-      state.library = info && typeof info === 'object' ? info : { library: '?', protocol: 1 };
+      state.library = info;
       renderStatus();
-      if (state.settingsOpen) renderSettings();
-      if (state.flashOn) call('flashAvoidable', true);
+      if (state.settingsOpen) void renderSettings();
+      if (state.flashOn) transport.flashAvoidable?.(true);
     }
-
     function toggleSettings(open) {
-      state.settingsOpen = open === undefined ? !state.settingsOpen : open;
+      state.settingsOpen = open === void 0 ? !state.settingsOpen : open;
       settings.hidden = !state.settingsOpen;
-      settingsBtn.classList.toggle('active', state.settingsOpen);
-      if (state.settingsOpen) renderSettings();
+      settingsBtn.classList.toggle("active", state.settingsOpen);
+      if (state.settingsOpen) void renderSettings();
     }
-
     function optionRow(label, key, current, onchange) {
-      const input = el('input', { type: 'checkbox' });
+      const input = el("input", { type: "checkbox" });
       input.checked = !!current[key];
-      input.addEventListener('change', () => onchange({ [key]: input.checked }));
-      return el('label', { class: 'opt' }, [input, label]);
+      input.addEventListener("change", () => onchange({ [key]: input.checked }));
+      return el("label", { class: "opt" }, [input, label]);
     }
-
     async function renderSettings() {
-      settings.textContent = '';
-      settings.append(el('div', { class: 'drawer-header' }, [el('b', { text: 'Settings' }), el('button', { onclick: () => toggleSettings(false) }, '\u2715')]));
-      const body = el('div', { class: 'drawer-body' });
+      settings.textContent = "";
+      settings.append(el("div", { class: "drawer-header" }, [el("b", { text: "Settings" }), el("button", { onclick: () => toggleSettings(false) }, "\u2715")]));
+      const body = el("div", { class: "drawer-body" });
       settings.append(body);
-
-      // --- site ---
-      if (transport && transport.originStatus) {
-        const site = el('div', { class: 'section' }, [el('h3', { text: 'This site' }), el('div', { class: 'meta', text: state.origin || '' })]);
+      if (transport.originStatus) {
+        const site = el("div", { class: "section" }, [el("h3", { text: "This site" }), el("div", { class: "meta", text: state.origin || "" })]);
         body.append(site);
         try {
           const st = await transport.originStatus();
           if (st) {
-            const enabled = el('input', { type: 'checkbox' });
+            const enabled = el("input", { type: "checkbox" });
             enabled.checked = st.enabled;
             enabled.disabled = st.builtIn;
-            const inject = el('input', { type: 'checkbox' });
+            const inject = el("input", { type: "checkbox" });
             inject.checked = st.inject;
             inject.disabled = !st.enabled;
-            const defer = el('input', { type: 'checkbox' });
+            const defer = el("input", { type: "checkbox" });
             defer.checked = !!st.deferHook;
             defer.disabled = !st.inject;
-            const msg = el('div', { class: 'meta' });
+            const msg = el("div", { class: "meta" });
             const apply = async () => {
               try {
                 if (enabled.checked && !st.permitted && transport.requestPermission) {
                   const ok = await transport.requestPermission();
                   if (!ok) {
-                    msg.textContent = 'Permission not granted. You can also enable the site from the toolbar icon.';
+                    msg.textContent = "Permission not granted. You can also enable the site from the toolbar icon.";
                     enabled.checked = false;
                     return;
                   }
                 }
-                await transport.setOrigin({ enabled: enabled.checked, inject: enabled.checked && inject.checked, deferHook: inject.checked && defer.checked });
-                renderSettings();
+                await transport.setOrigin?.({ enabled: enabled.checked, inject: enabled.checked && inject.checked, deferHook: inject.checked && defer.checked });
+                void renderSettings();
               } catch (e) {
-                msg.textContent = String(e && e.message ? e.message : e);
+                msg.textContent = String(e.message || e);
               }
             };
-            enabled.addEventListener('change', () => {
+            enabled.addEventListener("change", () => {
               if (!enabled.checked) inject.checked = false;
-              apply();
+              void apply();
             });
-            inject.addEventListener('change', apply);
-            defer.addEventListener('change', apply);
+            inject.addEventListener("change", () => void apply());
+            defer.addEventListener("change", () => void apply());
             site.append(
-              el('label', { class: 'opt' }, [enabled, st.builtIn ? 'Enabled (local development host)' : 'Enable on this site']),
-              el('label', { class: 'opt' }, [inject, 'Inject the library into the page (no app code needed)']),
-              el('label', { class: 'opt', title: 'Only needed when React DevTools is installed and its Components tab comes up empty' }, [defer, 'Let React DevTools create the hook (if both are installed)']),
-              el('div', { class: 'meta', text: st.inject ? 'Injection is on. Reload the page after changing it.' : 'Without injection the page must call init({ notifier: createDevtoolsNotifier() }).' }),
-              msg,
+              el("label", { class: "opt" }, [enabled, st.builtIn ? "Enabled (local development host)" : "Enable on this site"]),
+              el("label", { class: "opt" }, [inject, "Inject the library into the page (no app code needed)"]),
+              el("label", { class: "opt", title: "Only needed when React DevTools is installed and its Components tab comes up empty" }, [defer, "Let React DevTools create the hook (if both are installed)"]),
+              el("div", { class: "meta", text: st.inject ? "Injection is on. Reload the page after changing it." : "Without injection the page must call init({ notifier: createDevtoolsNotifier() })." }),
+              msg
             );
           }
         } catch (e) {
-          site.append(el('div', { class: 'meta', text: String(e && e.message ? e.message : e) }));
+          site.append(el("div", { class: "meta", text: String(e.message || e) }));
         }
       }
-
-      // --- panel ---
-      const flash = el('input', { type: 'checkbox' });
+      const flash = el("input", { type: "checkbox" });
       flash.checked = state.flashOn;
-      flash.addEventListener('change', () => {
+      flash.addEventListener("change", () => {
         state.flashOn = flash.checked;
-        call('flashAvoidable', state.flashOn);
+        transport.flashAvoidable?.(state.flashOn);
         persist();
       });
-      body.append(el('div', { class: 'section' }, [el('h3', { text: 'Panel' }), el('label', { class: 'opt' }, [flash, 'Flash avoidable re-renders in the page'])]));
-
-      // --- library options ---
+      body.append(
+        el("div", { class: "section" }, [
+          el("h3", { text: "Panel" }),
+          el("label", { class: "opt" }, [flash, "Flash avoidable re-renders in the page"]),
+          el("div", { class: "meta", text: "Shortcuts: / search, f fix tab, Esc clear highlight, arrows in the tree." })
+        ])
+      );
       const lib = state.library;
-      const sec = el('div', { class: 'section' }, [el('h3', { text: 'Library options' })]);
+      const sec = el("div", { class: "section" }, [el("h3", { text: "Library options" })]);
       body.append(sec);
-      if (!lib || !transport || !transport.configure) {
-        sec.append(el('div', { class: 'meta', text: 'Connect to a page running rerender-lens to change its options.' }));
+      if (!lib || !transport.configure) {
+        sec.append(el("div", { class: "meta", text: "Connect to a page running rerender-lens to change its options." }));
         return;
       }
       if (lib.protocol < PROTOCOL) {
-        sec.append(el('div', { class: 'meta', text: 'The page library is too old to be configured from here.' }));
+        sec.append(el("div", { class: "meta", text: "The page library is too old to be configured from here." }));
         return;
       }
       const current = Object.assign({}, lib.options || {});
@@ -1647,58 +1704,56 @@
         Object.assign(current, patch);
         try {
           const applied = await transport.configure(patch);
-          if (applied) state.library.options = applied;
-          if (transport.storage) transport.storage.set('settings', Object.assign({}, state.library.options));
-          toast('Applied');
+          if (applied && state.library) state.library.options = applied;
+          if (transport.storage && state.library) transport.storage.set("settings", Object.assign({}, state.library.options));
+          toast("Applied");
         } catch (e) {
           toast(`Failed: ${e.message}`);
         }
       };
       sec.append(
-        optionRow('Track every React.memo / PureComponent', 'trackAllMemoized', current, applyOptions),
-        optionRow('Track every component (noisy)', 'trackAllComponents', current, applyOptions),
-        optionRow('Diff hook state and contexts', 'trackHooks', { trackHooks: current.trackHooks !== false }, applyOptions),
-        optionRow('Ignore Fast Refresh commits', 'ignoreHotReload', { ignoreHotReload: current.ignoreHotReload !== false }, applyOptions),
-        optionRow('Print to the page console', 'silent', { silent: !current.silent }, (p) => applyOptions({ silent: !p.silent })),
-        optionRow('Print genuine re-renders too (logAll)', 'logAll', current, applyOptions),
+        optionRow("Track every React.memo / PureComponent", "trackAllMemoized", current, applyOptions),
+        optionRow("Track every component (noisy)", "trackAllComponents", current, applyOptions),
+        optionRow("Diff hook state and contexts", "trackHooks", { trackHooks: current.trackHooks !== false }, applyOptions),
+        optionRow("Ignore Fast Refresh commits", "ignoreHotReload", { ignoreHotReload: current.ignoreHotReload !== false }, applyOptions),
+        optionRow("Print to the page console", "silent", { silent: !current.silent }, (p) => applyOptions({ silent: !p.silent })),
+        optionRow("Print genuine re-renders too (logAll)", "logAll", current, applyOptions)
       );
       const listInput = (label, key) => {
-        const input = el('input', { type: 'text', placeholder: 'Name, /regex/, ...', value: (current[key] || []).join(', ') });
-        input.addEventListener('change', () => applyOptions({ [key]: input.value.split(',').map((s) => s.trim()).filter(Boolean) }));
-        return el('label', { class: 'opt col' }, [label, input]);
+        const input = el("input", { type: "text", placeholder: "Name, /regex/, ...", value: (current[key] || []).join(", ") });
+        input.addEventListener("change", () => void applyOptions({ [key]: input.value.split(",").map((s) => s.trim()).filter(Boolean) }));
+        return el("label", { class: "opt col" }, [label, input]);
       };
-      sec.append(listInput('Include (display names)', 'include'), listInput('Exclude', 'exclude'));
-      const max = el('input', { type: 'number', min: '0', value: String(current.maxReportsPerComponent || 0) });
-      max.addEventListener('change', () => applyOptions({ maxReportsPerComponent: Math.max(0, Number(max.value) || 0) }));
-      sec.append(el('label', { class: 'opt col' }, ['Stop printing a component after N reports (0 = never)', max]));
+      sec.append(listInput("Include (display names)", "include"), listInput("Exclude", "exclude"));
+      const max = el("input", { type: "number", min: "0", value: String(current.maxReportsPerComponent || 0) });
+      max.addEventListener("change", () => void applyOptions({ maxReportsPerComponent: Math.max(0, Number(max.value) || 0) }));
+      sec.append(el("label", { class: "opt col" }, ["Stop printing a component after N reports (0 = never)", max]));
     }
-
-    // ---------- transport ----------
     function handle(message) {
-      if (!message || typeof message !== 'object') return;
+      if (!isRecord(message)) return;
       switch (message.type) {
-        case 'connected':
+        case "connected":
           setRelay(true);
           break;
-        case 'disconnected':
+        case "disconnected":
           setRelay(false);
           break;
-        case 'polling':
+        case "polling":
           state.polling = !!message.on;
           renderStatus();
           break;
-        case 'hello':
-          setLibrary(message.payload && typeof message.payload === 'object' ? Object.assign({ protocol: message.version || 1 }, message.payload) : { protocol: message.version || 1 });
+        case "hello":
+          setLibrary(isRecord(message.payload) ? Object.assign({ protocol: message.version || 1 }, message.payload) : { protocol: message.version || 1 });
           break;
-        case 'clear':
-        case 'navigated':
+        case "clear":
+        case "navigated":
           clearAll();
-          if (message.type === 'navigated') {
+          if (message.type === "navigated") {
             state.library = null;
             renderStatus();
           }
           break;
-        case 'report': {
+        case "report": {
           if (state.paused) break;
           const r = normalizeReport(message.payload);
           if (r) enqueue(r);
@@ -1706,18 +1761,17 @@
         }
       }
     }
-
-    if (options.theme === 'dark') document.documentElement.classList.add('theme-dark');
-    state.origin = (transport && transport.origin) || null;
+    if (options.theme === "dark") document.documentElement.classList.add("theme-dark");
+    state.origin = transport.origin || null;
     setView(state.view);
     renderDetails();
     renderStream();
     renderStatus();
-    if (transport && transport.storage) {
-      Promise.resolve(transport.storage.get('panel')).then(restore, () => {});
+    if (transport.storage) {
+      Promise.resolve(transport.storage.get("panel")).then(restore, () => {
+      });
     }
     transport.subscribe(handle);
-
     return {
       state,
       handle,
@@ -1728,247 +1782,330 @@
         for (const n of state.nodesByKey.values()) if (n.name === name) return select(n);
       },
       setView,
-      openSettings: () => toggleSettings(true),
+      openSettings: () => toggleSettings(true)
     };
   }
-
-  // ---------- boot: extension ----------
   function bootExtension() {
     const tabId = chrome.devtools.inspectedWindow.tabId;
     let listener = null;
     let relayConnected = false;
     let pollTimer = null;
     let since = 0;
-    const evalIn = (code) =>
-      new Promise((resolve, reject) =>
-        chrome.devtools.inspectedWindow.eval(code, (result, err) => {
-          if (err && (err.isException || err.isError)) reject(new Error(err.value || err.description || 'eval failed'));
-          else resolve(result);
-        }),
-      );
+    const evalIn = (code) => new Promise(
+      (resolve, reject) => chrome.devtools.inspectedWindow.eval(code, (result, err) => {
+        if (err && (err.isException || err.isError)) reject(new Error(err.value || err.description || "eval failed"));
+        else resolve(result);
+      })
+    );
     const bridge = (expr) => evalIn(`(function(){var b=window.__RERENDER_LENS_DEVTOOLS__;if(!b)return null;try{return (${expr});}catch(e){return {__error:String(e)}}})()`).then((r) => {
-      if (r && r.__error) throw new Error(r.__error);
+      if (isRecord(r) && typeof r.__error === "string") throw new Error(r.__error);
       return r;
     });
-    const send = (message) =>
-      new Promise((resolve, reject) =>
-        chrome.runtime.sendMessage(message, (res) => {
-          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-          else if (!res || !res.ok) reject(new Error((res && res.error) || 'no response'));
-          else resolve(res.result);
-        }),
-      );
+    const send = (message) => new Promise(
+      (resolve, reject) => chrome.runtime.sendMessage(message, (res) => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else if (!res || !res.ok) reject(new Error(res && res.error || "no response"));
+        else resolve(res.result);
+      })
+    );
     let origin = null;
     let panelPort = null;
-    const emit = (m) => listener && listener(m);
-
+    const emit = (m) => {
+      if (listener) listener(m);
+    };
     async function resolveOrigin() {
       try {
-        origin = await evalIn('location.origin');
+        origin = await evalIn("location.origin");
       } catch {
         origin = null;
       }
       transport.origin = origin;
     }
-
-    /** Ask the page for its hello and, when the relay is down, poll `pull()` for reports. */
     async function syncWithPage() {
       try {
-        const info = await bridge('b.info?b.info():{count:b.size,protocol:b.version}');
+        const info = await bridge("b.info?b.info():{count:b.size,protocol:b.version}");
         if (info) {
-          emit({ type: 'hello', version: info.protocol || 1, payload: info });
+          emit({ type: "hello", version: info.protocol || 1, payload: info });
           return true;
         }
       } catch {
-        /* page not ready */
       }
       return false;
     }
-
     async function pollOnce() {
       try {
         const res = await bridge(`b.pull?b.pull(${since}):null`);
         if (!res) return;
-        if (res.dropped) emit({ type: 'clear' });
-        for (const p of res.reports) emit({ type: 'report', payload: p });
+        if (res.dropped) emit({ type: "clear" });
+        for (const p of res.reports) emit({ type: "report", payload: p });
         since = res.seq;
       } catch {
-        /* ignore */
       }
     }
-
     function setPolling(on) {
       if (on && !pollTimer) {
-        pollTimer = setInterval(pollOnce, 500);
-        emit({ type: 'polling', on: true });
+        pollTimer = setInterval(() => void pollOnce(), 500);
+        emit({ type: "polling", on: true });
       } else if (!on && pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
-        emit({ type: 'polling', on: false });
+        emit({ type: "polling", on: false });
       }
     }
-
     const transport = {
       origin,
       subscribe(fn) {
         listener = fn;
         connect();
-        chrome.devtools.network.onNavigated.addListener(async () => {
+        chrome.devtools.network.onNavigated.addListener(() => {
           since = 0;
-          fn({ type: 'navigated' });
-          await resolveOrigin();
-          setTimeout(async () => {
-            if (relayConnected) bridge('b.replay()').catch(() => {});
-            else if (await syncWithPage()) setPolling(true);
-          }, 1200);
+          fn({ type: "navigated" });
+          void resolveOrigin().then(() => {
+            setTimeout(async () => {
+              if (relayConnected) bridge("b.replay()").catch(() => {
+              });
+              else if (await syncWithPage()) setPolling(true);
+            }, 1200);
+          });
         });
-        resolveOrigin().then(async () => {
-          // Late panel: the relay (if any) buffered nothing, so ask the page to replay; otherwise start polling.
-          if (!(await syncWithPage())) return;
-          if (relayConnected) bridge('b.replay()').catch(() => {});
+        void resolveOrigin().then(async () => {
+          if (!await syncWithPage()) return;
+          if (relayConnected) bridge("b.replay()").catch(() => {
+          });
           else {
-            const res = await bridge('b.pull?b.pull(0):null').catch(() => null);
+            const res = await bridge("b.pull?b.pull(0):null").catch(() => null);
             if (res) {
-              for (const p of res.reports) emit({ type: 'report', payload: p });
+              for (const p of res.reports) emit({ type: "report", payload: p });
               since = res.seq;
-            } else bridge('b.replay()').catch(() => {});
+            } else bridge("b.replay()").catch(() => {
+            });
             setPolling(true);
           }
         });
       },
       replay() {
-        if (relayConnected) bridge('b.replay()').catch(() => {});
+        if (relayConnected) bridge("b.replay()").catch(() => {
+        });
         else {
           since = 0;
-          emit({ type: 'clear' });
-          syncWithPage().then(() => pollOnce());
+          emit({ type: "clear" });
+          void syncWithPage().then(() => pollOnce());
         }
       },
       clear() {
-        bridge('b.clear()').catch(() => {});
+        bridge("b.clear()").catch(() => {
+        });
         since = 0;
       },
-      configure: (options) => bridge(`b.configure(${JSON.stringify(options)})`),
-      highlight: (id) => bridge(`b.highlight(${id === null ? 'null' : Number(id)})`).catch(() => {}),
-      flashAvoidable: (on) => bridge(`b.flashAvoidable(${!!on})`).catch(() => {}),
+      configure: (options) => bridge(`b.configure(${JSON.stringify(options)})`).then((r) => r ?? void 0),
+      highlight: (id) => bridge(`b.highlight(${id === null ? "null" : Number(id)})`).catch(() => {
+      }),
+      flashAvoidable: (on) => bridge(`b.flashAvoidable(${!!on})`).catch(() => {
+      }),
       openResource(url, line, col) {
-        if (chrome.devtools.panels.openResource) chrome.devtools.panels.openResource(url, Math.max(0, (line || 1) - 1), Math.max(0, (col || 1) - 1), () => {});
+        if (chrome.devtools.panels.openResource) chrome.devtools.panels.openResource(url, Math.max(0, (line || 1) - 1), Math.max(0, (col || 1) - 1), () => {
+        });
       },
-      originStatus: () => (origin ? send({ type: 'origin:status', origin }) : Promise.resolve(null)),
-      setOrigin: (cfg) => send({ type: 'origin:set', origin, enabled: cfg.enabled, inject: cfg.inject, deferHook: cfg.deferHook }),
-      requestPermission: () => chrome.permissions.request({ origins: [origin + '/*'] }),
+      originStatus: () => origin ? send({ type: "origin:status", origin }) : Promise.resolve(null),
+      setOrigin: (cfg) => send({ type: "origin:set", origin, enabled: cfg.enabled, inject: cfg.inject, deferHook: cfg.deferHook }),
+      requestPermission: () => chrome.permissions.request({ origins: [origin + "/*"] }),
       storage: {
-        get: (key) => new Promise((resolve) => chrome.storage.local.get(`${key}:${origin}`, (got) => resolve(got ? got[`${key}:${origin}`] : undefined))),
-        set: (key, value) => new Promise((resolve) => chrome.storage.local.set({ [`${key}:${origin}`]: value }, resolve)),
+        get: (key) => new Promise((resolve) => chrome.storage.local.get(`${key}:${origin}`, (got) => resolve(got ? got[`${key}:${origin}`] : void 0))),
+        set: (key, value) => new Promise((resolve) => chrome.storage.local.set({ [`${key}:${origin}`]: value }, resolve))
       },
       badge(count) {
-        if (panelPort) panelPort.postMessage({ type: 'badge', count });
+        if (panelPort) panelPort.postMessage({ type: "badge", count });
       },
-      copy: (text) => navigator.clipboard.writeText(text).catch(() => {}),
+      copy: (text) => navigator.clipboard.writeText(text).catch(() => {
+      })
     };
-
     function connect() {
-      panelPort = chrome.runtime.connect({ name: 'rerender-lens-panel' });
-      panelPort.postMessage({ type: 'init', tabId });
-      panelPort.onMessage.addListener((m) => {
+      const port = chrome.runtime.connect({ name: "rerender-lens-panel" });
+      panelPort = port;
+      port.postMessage({ type: "init", tabId });
+      port.onMessage.addListener((m) => {
         if (!m) return;
-        if (m.type === 'connected') {
+        if (m.type === "connected") {
           relayConnected = true;
           setPolling(false);
-        } else if (m.type === 'disconnected') {
+        } else if (m.type === "disconnected") {
           relayConnected = false;
-          syncWithPage().then((ok) => ok && setPolling(true));
+          void syncWithPage().then((ok) => ok && setPolling(true));
         }
         emit(m);
       });
-      panelPort.onDisconnect.addListener(() => {
+      port.onDisconnect.addListener(() => {
         panelPort = null;
-        setTimeout(connect, 1000);
+        setTimeout(connect, 1e3);
       });
     }
-    const prefersDark = global.matchMedia && global.matchMedia('(prefers-color-scheme: dark)').matches;
-    const theme = chrome.devtools.panels.themeName === 'dark' || prefersDark ? 'dark' : 'light';
-    createPanel(document.getElementById('root'), transport, { theme });
+    const prefersDark = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
+    const theme = chrome.devtools.panels.themeName === "dark" || prefersDark ? "dark" : "light";
+    createPanel(document.getElementById("root"), transport, { theme });
   }
-
-  // ---------- boot: demo ----------
   function sampleReports() {
     const fn = (name) => FN_PREFIX + name;
     return [
       {
-        component: 'ProductRow', path: ['App', 'ProductPage', 'ProductList'], trigger: 'parent', avoidable: true, renderCount: 1, instanceId: 4, commitId: 1,
-        owner: 'ProductList', parent: { name: 'ProductPage', trigger: 'state' }, selfDuration: 0.8,
-        source: { fileName: 'http://localhost:5199/src/ProductList.tsx', lineNumber: 14, columnNumber: 7 },
+        component: "ProductRow",
+        path: ["App", "ProductPage", "ProductList"],
+        trigger: "parent",
+        avoidable: true,
+        renderCount: 1,
+        instanceId: 4,
+        commitId: 1,
+        memoized: true,
+        owner: "ProductList",
+        parent: { name: "ProductPage", trigger: "state" },
+        selfDuration: 0.8,
+        treeDuration: 1.1,
+        source: { fileName: "http://localhost:5199/src/ProductList.tsx", lineNumber: 14, columnNumber: 7 },
         props: {
-          prev: { product: { id: 1, name: 'Keyboard', price: 49 }, style: { color: 'red' }, onSelect: fn('onSelect'), selected: false },
-          next: { product: { id: 1, name: 'Keyboard', price: 49 }, style: { color: 'red' }, onSelect: fn('onSelect'), selected: false },
+          prev: { product: { id: 1, name: "Keyboard", price: 49 }, style: { color: "red" }, onSelect: fn("onSelect"), selected: false },
+          next: { product: { id: 1, name: "Keyboard", price: 49 }, style: { color: "red" }, onSelect: fn("onSelect"), selected: false }
         },
         propChanges: [
-          { path: 'style', kind: 'deep-equal', prev: { color: 'red' }, next: { color: 'red' } },
-          { path: 'onSelect', kind: 'function', prev: fn('onSelect'), next: fn('onSelect') },
+          { path: "style", kind: "deep-equal", prev: { color: "red" }, next: { color: "red" } },
+          { path: "onSelect", kind: "function", prev: fn("onSelect"), next: fn("onSelect") }
         ],
-        stateChanges: [], hookChanges: [],
+        stateChanges: [],
+        hookChanges: [],
         reasons: [
-          'caused by <ProductPage> re-rendering (its state changed).',
+          "caused by <ProductPage> re-rendering (its state changed).",
           'prop "style" is a new reference but deep-equal to the previous value: memoize the object with useMemo, or hoist it to module scope if it is constant.',
-          'prop "onSelect" is a new function instance on every render: wrap it in useCallback (or hoist it out of the parent\'s render).',
-        ],
+          `prop "onSelect" is a new function instance on every render: wrap it in useCallback (or hoist it out of the parent's render).`
+        ]
       },
       {
-        component: 'Toolbar', path: ['App', 'ProductPage'], trigger: 'parent', avoidable: true, renderCount: 1, instanceId: 2, commitId: 1,
-        owner: 'ProductPage', parent: { name: 'ProductPage', trigger: 'state' }, selfDuration: 0.3,
-        props: { prev: { title: 'Products', count: 3 }, next: { title: 'Products', count: 3 } }, propChanges: [], stateChanges: [], hookChanges: [],
-        reasons: ['re-rendered with identical props because <ProductPage> re-rendered (its state changed). Wrap "Toolbar" in React.memo (or extend PureComponent).'],
+        component: "Toolbar",
+        path: ["App", "ProductPage"],
+        trigger: "parent",
+        avoidable: true,
+        renderCount: 1,
+        instanceId: 2,
+        commitId: 1,
+        memoized: false,
+        owner: "ProductPage",
+        parent: { name: "ProductPage", trigger: "state" },
+        selfDuration: 0.3,
+        props: { prev: { title: "Products", count: 3 }, next: { title: "Products", count: 3 } },
+        propChanges: [],
+        stateChanges: [],
+        hookChanges: [],
+        reasons: ['re-rendered with identical props because <ProductPage> re-rendered (its state changed). Wrap "Toolbar" in React.memo (or extend PureComponent).']
       },
       {
-        component: 'ProductPage', path: ['App'], trigger: 'state', avoidable: false, renderCount: 1, instanceId: 3, commitId: 1,
-        owner: 'App', parent: null,
-        props: { prev: { placeholder: 'Search' }, next: { placeholder: 'Search' } }, propChanges: [], stateChanges: [],
-        hookChanges: [{ path: 'useState#0', hook: 'useState', index: 0, kind: 'different', prev: 'ab', next: 'abc' }], reasons: ['useState #0 changed.'],
+        component: "ProductPage",
+        path: ["App"],
+        trigger: "state",
+        avoidable: false,
+        renderCount: 1,
+        instanceId: 3,
+        commitId: 1,
+        memoized: false,
+        owner: "App",
+        parent: null,
+        props: { prev: { placeholder: "Search", filters: { sort: "asc", page: 1 } }, next: { placeholder: "Search", filters: { sort: "asc", page: 2 } } },
+        propChanges: [{ path: "filters", kind: "different", prev: { sort: "asc", page: 1 }, next: { sort: "asc", page: 2 } }],
+        stateChanges: [],
+        hookChanges: [{ path: "useState#0", hook: "useState", index: 0, kind: "different", prev: "ab", next: "abc" }],
+        reasons: ["useState #0 changed."]
       },
       {
-        component: 'Sidebar', path: ['App'], trigger: 'hooks', avoidable: false, renderCount: 1, instanceId: 5, owner: 'App', parent: null, commitId: 2,
-        props: { prev: {}, next: {} }, propChanges: [], stateChanges: [],
-        hookChanges: [{ path: 'useContext(Theme)', hook: 'useContext', index: 0, kind: 'different', prev: 'light', next: 'dark' }], reasons: ['useContext #0 changed.'],
-      },
+        component: "Sidebar",
+        path: ["App"],
+        trigger: "hooks",
+        avoidable: false,
+        renderCount: 1,
+        instanceId: 5,
+        owner: "App",
+        parent: null,
+        commitId: 2,
+        memoized: true,
+        props: { prev: {}, next: {} },
+        propChanges: [],
+        stateChanges: [],
+        hookChanges: [{ path: "useContext(Theme)", hook: "useContext", index: 0, kind: "different", prev: "light", next: "dark" }],
+        reasons: ["useContext #0 changed."]
+      }
     ];
   }
-
+  function floodReports(n) {
+    const out = [];
+    const components = Math.max(10, Math.floor(n / 10));
+    for (let i = 0; i < n; i++) {
+      const id = i % components;
+      const depth = 1 + id % 6;
+      const path = ["App"];
+      for (let d = 1; d < depth; d++) path.push(`Section${(id * 7 + d) % 40}`);
+      const avoidable = id % 3 !== 0;
+      out.push({
+        component: `Item${id}`,
+        path,
+        trigger: avoidable ? "parent" : "props",
+        avoidable,
+        renderCount: Math.floor(i / components) + 1,
+        instanceId: id + 1,
+        commitId: Math.floor(i / 50) + 1,
+        memoized: id % 2 === 0,
+        owner: path[path.length - 1],
+        parent: { name: path[path.length - 1], trigger: "state" },
+        selfDuration: id % 7 / 10,
+        props: { prev: { style: { w: id }, n: i }, next: { style: { w: id }, n: i + (avoidable ? 0 : 1) } },
+        propChanges: avoidable ? [{ path: "style", kind: "deep-equal", prev: { w: id }, next: { w: id } }] : [{ path: "n", kind: "different", prev: i, next: i + 1 }],
+        stateChanges: [],
+        hookChanges: [],
+        reasons: [avoidable ? 'prop "style" is a new reference but deep-equal to the previous value.' : 'prop "n" changed.']
+      });
+    }
+    return out;
+  }
   function bootDemo() {
+    const params = new URLSearchParams(location.search);
+    const flood = Number(params.get("flood") || 0);
     const sample = sampleReports();
     let i = 0;
     let commit = 0;
     const mem = {};
     const transport = {
-      origin: 'http://localhost:5199',
+      origin: "http://localhost:5199",
       subscribe(fn) {
-        fn({ type: 'connected' });
-        fn({ type: 'hello', version: PROTOCOL, payload: { count: 0, library: 'demo', protocol: PROTOCOL, react: [{ version: '19.2.0', bundleType: 1 }], production: false, enabled: true, options: { trackAllMemoized: true, silent: true } } });
+        fn({ type: "connected" });
+        fn({ type: "hello", version: PROTOCOL, payload: { count: 0, library: "demo", protocol: PROTOCOL, react: [{ version: "19.2.0", bundleType: 1 }], production: false, enabled: true, options: { trackAllMemoized: true, silent: true }, source: "page", injected: false } });
+        if (flood > 0) {
+          const t0 = performance.now();
+          for (const r of floodReports(flood)) fn({ type: "report", payload: r });
+          requestAnimationFrame(() => console.log(`[rerender-lens demo] ${flood} reports ingested and rendered in ${(performance.now() - t0).toFixed(0)} ms`));
+          return;
+        }
         const tick = () => {
           const r = JSON.parse(JSON.stringify(sample[i % sample.length]));
           r.renderCount = Math.floor(i / sample.length) + 1;
           if (i % sample.length === 0) commit++;
           r.commitId = commit + (r.commitId === 2 ? 100 : 0);
-          fn({ type: 'report', payload: r });
+          fn({ type: "report", payload: r });
           i++;
           if (i < 14) setTimeout(tick, i < 4 ? 50 : 900);
         };
         tick();
       },
-      replay() {},
-      clear() {},
+      replay() {
+      },
+      clear() {
+      },
       configure: (o) => Promise.resolve(o),
-      highlight() {},
-      flashAvoidable() {},
-      originStatus: () => Promise.resolve({ origin: 'http://localhost:5199', builtIn: true, permitted: true, enabled: true, inject: false }),
+      highlight() {
+      },
+      flashAvoidable() {
+      },
+      originStatus: () => Promise.resolve({ origin: "http://localhost:5199", builtIn: true, permitted: true, enabled: true, inject: false, deferHook: false }),
       setOrigin: () => Promise.resolve(),
-      storage: { get: (k) => Promise.resolve(mem[k]), set: (k, v) => Promise.resolve((mem[k] = v)) },
+      storage: { get: (k) => Promise.resolve(mem[k]), set: (k, v) => Promise.resolve(mem[k] = v) }
     };
-    const dark = /theme=dark/.test(location.search) || (global.matchMedia && global.matchMedia('(prefers-color-scheme: dark)').matches);
-    createPanel(document.getElementById('root'), transport, { theme: dark ? 'dark' : 'light' });
+    const dark = /theme=dark/.test(location.search) || typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
+    createPanel(document.getElementById("root"), transport, { theme: dark ? "dark" : "light" });
   }
-
-  global.RerenderLensPanel = {
+  var api = {
     PROTOCOL,
     createPanel,
     summarize,
@@ -1978,8 +2115,11 @@
     normalizeReport,
     reportToMarkdown,
     sampleReports,
-    analysis: { firstDifferentPath, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree },
+    floodReports,
+    analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary }
   };
-  if (global.chrome && global.chrome.devtools && global.chrome.devtools.inspectedWindow && /panel\.html/.test(String(global.location && global.location.pathname))) bootExtension();
-  else if (typeof location !== 'undefined' && /[?&]demo/.test(location.search)) bootDemo();
-})(typeof window !== 'undefined' ? window : globalThis);
+  window.RerenderLensPanel = api;
+  var hasDevtools = typeof chrome !== "undefined" && !!chrome && !!chrome.devtools && !!chrome.devtools.inspectedWindow;
+  if (hasDevtools && /panel\.html/.test(String(location && location.pathname))) bootExtension();
+  else if (typeof location !== "undefined" && /[?&]demo/.test(location.search)) bootDemo();
+})();

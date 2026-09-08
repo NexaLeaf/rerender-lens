@@ -14,6 +14,17 @@
 - Elements sidebar: an element without a React component above it now says so instead of
   "not running".
 - jsdom tests for `background.js`, `popup.js` and `sidebar.js` (shared fake `chrome`).
+- Panel source moved to TypeScript (`extension/src/panel.ts`); `npm run build` writes the
+  committed `extension/panel.js`, and CI fails when it is out of date.
+- Tree and live stream are virtualized (only the rows in view exist in the DOM); the stream now
+  keeps every buffered report instead of the last 300. `panel.html?demo&flood=5000` loads
+  synthetic data for scale testing.
+- Keyboard: `/` focuses search, `f` opens the Fix tab, `Esc` clears the page highlight. The
+  details tab is remembered per origin.
+- `different` object props show the differing leaves (`filters.page: 1 → 2`) without expanding
+  the whole value; the kind label names the first differing path.
+- Root-cause page: click a root cause in a commit to see every commit it started, the components
+  it re-rendered avoidably, and the fixes for them.
 
 ## 0.2.0
 

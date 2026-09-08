@@ -15,5 +15,5 @@
     "noEmit": true,
     "types": ["node", "chrome"]
   },
-  "include": ["src", "test", "extension/test", "e2e", "tsup.config.ts", "vitest.config.ts"]
+  "include": ["src", "test", "extension/src", "extension/test", "e2e", "tsup.config.ts", "vitest.config.ts"]
 }

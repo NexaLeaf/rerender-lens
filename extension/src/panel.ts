@@ -1,0 +1,2495 @@
+/* rerender-lens DevTools panel. TypeScript source; `npm run build` writes extension/panel.js
+ * (committed, so the extension loads unpacked and the jsdom tests run without a build step).
+ * Exposes window.RerenderLensPanel.createPanel(root, transport, options) for tests, demo mode and the
+ * Elements sidebar. Everything under `analysis` is pure and unit-tested on its own. */
+
+// ---------- types ----------
+type ChangeKind = 'deep-equal' | 'function' | 'element' | 'different' | 'added' | 'removed';
+
+export interface Change {
+  path: string;
+  kind: ChangeKind;
+  prev: unknown;
+  next: unknown;
+  hook?: string;
+  index?: number;
+}
+
+export interface SourceLocation {
+  fileName: string;
+  lineNumber?: number;
+  columnNumber?: number;
+}
+
+export interface Report {
+  component: string;
+  instanceId: number;
+  commitId: number;
+  renderCount: number;
+  trigger: string;
+  avoidable: boolean;
+  memoized?: boolean;
+  props: { prev: Record<string, unknown>; next: Record<string, unknown> };
+  propChanges: Change[];
+  stateChanges: Change[];
+  hookChanges: Change[];
+  parent: { name: string; trigger: string } | null;
+  owner: string | null;
+  path: string[];
+  reasons: string[];
+  time: number;
+  selfDuration?: number;
+  treeDuration?: number;
+  source?: SourceLocation;
+  receivedAt: number;
+}
+
+export interface TreeNode {
+  name: string;
+  children: Map<string, TreeNode>;
+  reports: Report[];
+  total: number;
+  avoidable: number;
+  wasted: number;
+  expanded: boolean;
+  path: string[];
+  key: string;
+  lastReport?: Report;
+  flash?: boolean;
+  flashAt?: number;
+}
+
+export interface Fix {
+  kind: 'memo' | 'useCallback' | 'useMemo' | 'useMemoElement' | 'contextValue' | 'storeSnapshot' | 'bailout';
+  owner: string;
+  target: string;
+  prop: string | null;
+  label: string;
+  detail: string;
+  snippet: string;
+}
+
+export interface RankedFix extends Fix {
+  key: string;
+  count: number;
+  components: Map<string, number>;
+  reports: Report[];
+}
+
+export interface RootCause {
+  name: string;
+  trigger: string;
+  count: number;
+  components: Map<string, number>;
+}
+
+export interface ContextStat {
+  name: string;
+  consumers: number;
+  avoidable: number;
+  components: Map<string, number>;
+  commits: Set<number>;
+}
+
+export interface CommitAnalysis {
+  id: number;
+  receivedAt: number;
+  total: number;
+  avoidable: number;
+  wasted: number;
+  roots: RootCause[];
+  contexts: ContextStat[];
+  fixes: RankedFix[];
+  reports: Report[];
+}
+
+interface CascadeNode {
+  name: string;
+  children: Map<string, CascadeNode>;
+  report: Report | null;
+  count?: number;
+  avoidable?: number;
+}
+
+export interface HelloPayload {
+  count?: number;
+  library?: string;
+  protocol: number;
+  react?: { version?: string; bundleType?: number }[];
+  production?: boolean;
+  enabled?: boolean;
+  options?: SerializableOptions;
+  source?: 'page' | 'extension';
+  injected?: boolean;
+}
+
+export interface SerializableOptions {
+  trackAllMemoized?: boolean;
+  trackAllComponents?: boolean;
+  include?: string[];
+  exclude?: string[];
+  trackHooks?: boolean;
+  logAll?: boolean;
+  silent?: boolean;
+  collapse?: boolean;
+  ignoreHotReload?: boolean;
+  maxReportsPerComponent?: number;
+}
+
+export interface OriginStatus {
+  origin: string;
+  builtIn: boolean;
+  permitted: boolean;
+  enabled: boolean;
+  inject: boolean;
+  deferHook?: boolean;
+}
+
+export interface Message {
+  type: string;
+  payload?: unknown;
+  version?: number;
+  on?: boolean;
+}
+
+/** Only `subscribe` is required; the panel degrades gracefully without the rest. */
+export interface Transport {
+  subscribe(fn: (m: Message) => void): void;
+  replay?(): void;
+  clear?(): void;
+  origin?: string | null;
+  configure?(options: SerializableOptions): Promise<SerializableOptions | undefined>;
+  highlight?(id: number | null): unknown;
+  flashAvoidable?(on: boolean): unknown;
+  openResource?(url: string, line?: number, col?: number): void;
+  originStatus?(): Promise<OriginStatus | null>;
+  setOrigin?(cfg: { enabled: boolean; inject: boolean; deferHook: boolean }): Promise<unknown>;
+  requestPermission?(): Promise<boolean>;
+  storage?: { get(key: string): Promise<unknown> | unknown; set(key: string, value: unknown): unknown };
+  badge?(count: number): void;
+  copy?(text: string): unknown;
+  download?(name: string, text: string): unknown;
+}
+
+export interface PanelOptions {
+  theme?: 'dark' | 'light';
+}
+
+interface PersistedState {
+  filter?: string;
+  avoidableOnly?: boolean;
+  view?: View;
+  tab?: Tab;
+  streamCollapsed?: boolean;
+  collapsed?: string[];
+  treeWidth?: number;
+  flashOn?: boolean;
+}
+
+type View = 'tree' | 'offenders' | 'commits' | 'fixes';
+type Tab = 'latest' | 'history' | 'fix' | 'commit' | 'fixlist' | 'root';
+
+export interface PanelState {
+  tree: TreeNode;
+  nodesByKey: Map<string, TreeNode>;
+  reports: Report[];
+  commits: Map<number, Report[]>;
+  commitOrder: number[];
+  selectedKey: string | null;
+  selectedReport: Report | null;
+  selectedCommit: number | null;
+  selectedFix: string | null;
+  selectedRoot: string | null;
+  view: View;
+  tab: Tab;
+  paused: boolean;
+  avoidableOnly: boolean;
+  filter: string;
+  relay: boolean;
+  library: HelloPayload | null;
+  polling: boolean;
+  streamCollapsed: boolean;
+  collapsed: Set<string>;
+  sort: { key: OffenderKey; dir: 1 | -1 };
+  flashOn: boolean;
+  settingsOpen: boolean;
+  origin: string | null;
+  legacyCommit: number;
+  treeWidth?: number;
+}
+
+export interface Panel {
+  state: PanelState;
+  handle(message: Message): void;
+  flush(): void;
+  clearAll(): void;
+  importData(data: unknown): number;
+  select(name: string): void;
+  setView(view: View): void;
+  openSettings(): void;
+}
+
+type OffenderKey = 'component' | 'avoidable' | 'total' | 'wasted';
+
+interface Offender {
+  component: string;
+  total: number;
+  avoidable: number;
+  wasted: number;
+  paths: Set<string>;
+  reports: Report[];
+  fix: string;
+}
+
+declare global {
+  interface Window {
+    RerenderLensPanel: typeof api;
+  }
+}
+
+// ---------- constants ----------
+const PROTOCOL = 2;
+const KIND_LABEL: Record<string, string> = {
+  'deep-equal': 'equal by value',
+  function: 'new function',
+  element: 'equal element',
+  different: 'changed',
+  added: 'added',
+  removed: 'removed',
+};
+const AVOIDABLE_KINDS = new Set<string>(['deep-equal', 'function', 'element']);
+const FN_PREFIX = 'ƒ '; // "f " as emitted by the library's serialize()
+const MAX_REPORTS = 2000;
+const MAX_PER_NODE = 200;
+const MAX_COMMITS = 500;
+const ROW_H = 22; // tree row height (px), must match panel.css
+const ITEM_H = 20; // stream item height (px), must match panel.css
+const OVERSCAN = 8;
+const FALLBACK_VIEWPORT = 800; // when the container has no layout (jsdom)
+
+// ---------- tiny DOM helpers ----------
+type Child = Node | string | null | undefined;
+type Attrs = Record<string, unknown>;
+
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs?: Attrs | null, children?: Child | Child[]): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  if (attrs) {
+    for (const k of Object.keys(attrs)) {
+      const v = attrs[k];
+      if (k === 'class') node.className = String(v);
+      else if (k === 'text') node.textContent = String(v);
+      else if (k.startsWith('on')) {
+        if (typeof v === 'function') node.addEventListener(k.slice(2), v as EventListener);
+      } else if (v === true) node.setAttribute(k, '');
+      else if (v !== undefined && v !== null && v !== false) node.setAttribute(k, String(v));
+    }
+  }
+  if (children) for (const c of ([] as Child[]).concat(children)) if (c != null) node.append(c);
+  return node;
+}
+
+function fmtTime(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number, w: number) => String(n).padStart(w, '0');
+  return `${p(d.getHours(), 2)}:${p(d.getMinutes(), 2)}:${p(d.getSeconds(), 2)}.${p(d.getMilliseconds(), 3)}`;
+}
+
+const fmtMs = (n: unknown): string => (typeof n === 'number' && Number.isFinite(n) ? `${n.toFixed(1)} ms` : '');
+
+const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+const componentList = (m: Map<string, number>): string => [...m].map(([c, n]) => `<${c}>${n > 1 ? ' ×' + n : ''}`).join(', ');
+
+function changesOf(report: Report): Change[] {
+  return ([] as Change[]).concat(report.propChanges || [], report.stateChanges || [], report.hookChanges || []);
+}
+
+function summarize(report: Report): string {
+  const counts = new Map<string, number>();
+  for (const c of changesOf(report)) counts.set(c.kind, (counts.get(c.kind) || 0) + 1);
+  if (counts.size === 0) return 'no changes';
+  return [...counts].map(([k, n]) => `${n} ${KIND_LABEL[k] || k}`).join(', ');
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+
+/** Make an incoming payload safe to render; null when it is not a report at all. */
+function normalizeReport(p: unknown): Report | null {
+  if (!isRecord(p) || typeof p.component !== 'string') return null;
+  const arr = (x: unknown): Change[] => (Array.isArray(x) ? x.filter((c): c is Change => isRecord(c) && typeof c.path === 'string') : []);
+  const props = isRecord(p.props) ? p.props : {};
+  const parent = isRecord(p.parent) && typeof p.parent.name === 'string' ? { name: p.parent.name, trigger: typeof p.parent.trigger === 'string' ? p.parent.trigger : 'parent' } : null;
+  const r: Report = {
+    component: p.component,
+    instanceId: typeof p.instanceId === 'number' ? p.instanceId : 0,
+    commitId: typeof p.commitId === 'number' ? p.commitId : 0,
+    renderCount: typeof p.renderCount === 'number' ? p.renderCount : 0,
+    trigger: typeof p.trigger === 'string' ? p.trigger : 'parent',
+    avoidable: !!p.avoidable,
+    props: { prev: isRecord(props.prev) ? props.prev : {}, next: isRecord(props.next) ? props.next : {} },
+    propChanges: arr(p.propChanges),
+    stateChanges: arr(p.stateChanges),
+    hookChanges: arr(p.hookChanges),
+    parent,
+    owner: typeof p.owner === 'string' ? p.owner : null,
+    path: Array.isArray(p.path) ? p.path.filter((x): x is string => typeof x === 'string') : [],
+    reasons: Array.isArray(p.reasons) ? p.reasons.filter((x): x is string => typeof x === 'string') : [],
+    time: typeof p.time === 'number' ? p.time : 0,
+    receivedAt: typeof p.receivedAt === 'number' ? p.receivedAt : 0,
+  };
+  if (typeof p.selfDuration === 'number') r.selfDuration = p.selfDuration;
+  if (typeof p.treeDuration === 'number') r.treeDuration = p.treeDuration;
+  if (typeof p.memoized === 'boolean') r.memoized = p.memoized;
+  if (isRecord(p.source) && typeof p.source.fileName === 'string') r.source = p.source as unknown as SourceLocation;
+  return r;
+}
+
+// ---------- value rendering ----------
+function valueNode(v: unknown, depth = 0): HTMLElement {
+  if (v === null || v === undefined) return el('span', { class: 'v nil', text: String(v) });
+  const t = typeof v;
+  if (typeof v === 'string') {
+    if (v.startsWith(FN_PREFIX)) return el('span', { class: 'v fn', text: v });
+    if (/^<[^>]+>$/.test(v)) return el('span', { class: 'v', text: v });
+    return el('span', { class: 'v str', text: JSON.stringify(v) });
+  }
+  if (t === 'number' || t === 'bigint') return el('span', { class: 'v num', text: String(v) });
+  if (t === 'boolean') return el('span', { class: 'v bool', text: String(v) });
+  if (Array.isArray(v)) {
+    const short = v.length <= 4 && v.every((x) => typeof x !== 'object' || x === null);
+    if (short) {
+      const s = el('span', { class: 'v' }, '[');
+      v.forEach((x, i) => {
+        if (i) s.append(', ');
+        s.append(valueNode(x, depth + 1));
+      });
+      s.append(']');
+      return s;
+    }
+    return objectDetails(`Array(${v.length})`, v);
+  }
+  const o = v as Record<string, unknown>;
+  if (o.$type === 'Date') return el('span', { class: 'v', text: `Date(${String(o.value)})` });
+  if (o.$type === 'RegExp') return el('span', { class: 'v', text: String(o.value) });
+  if (o.$type === 'Map' && Array.isArray(o.entries)) return objectDetails(`Map(${o.entries.length})`, o.entries);
+  if (o.$type === 'Set' && Array.isArray(o.values)) return objectDetails(`Set(${o.values.length})`, o.values);
+  const keys = Object.keys(o).filter((k) => k !== '$type');
+  const label = `${o.$type ? String(o.$type) + ' ' : ''}{${keys.slice(0, 3).join(', ')}${keys.length > 3 ? ', ...' : ''}}`;
+  return objectDetails(label, o);
+}
+
+function objectDetails(label: string, obj: unknown): HTMLElement {
+  const d = el('details', { class: 'obj' }, [el('summary', { text: label })]);
+  d.addEventListener(
+    'toggle',
+    () => {
+      if (d.open && !d.querySelector('pre')) d.append(el('pre', { text: JSON.stringify(obj, null, 2) }));
+    },
+    { once: true },
+  );
+  return d;
+}
+
+// ---------- analysis (pure) ----------
+/** First path at which two serialized values differ, e.g. "style.color" or "items[2].id"; null when equal. */
+function firstDifferentPath(a: unknown, b: unknown, base = ''): string | null {
+  if (a === b) return null;
+  if (!isRecord(a) || !isRecord(b)) return base || '(value)';
+  if (Array.isArray(a) !== Array.isArray(b)) return base || '(value)';
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return base ? `${base}.length` : 'length';
+    for (let i = 0; i < a.length; i++) {
+      const p = firstDifferentPath(a[i], b[i], `${base}[${i}]`);
+      if (p) return p;
+    }
+    return null;
+  }
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of keys) {
+    const p = firstDifferentPath(a[k], b[k], base ? `${base}.${k}` : k);
+    if (p) return p;
+  }
+  return null;
+}
+
+export interface Leaf {
+  path: string;
+  prev: unknown;
+  next: unknown;
+}
+
+/** Every leaf at which two serialized values differ (bounded), for the diff view of `different` changes. */
+function diffLeaves(a: unknown, b: unknown, limit = 20, base = '', out: Leaf[] = []): Leaf[] {
+  if (out.length >= limit || a === b) return out;
+  if (!isRecord(a) || !isRecord(b) || Array.isArray(a) !== Array.isArray(b)) {
+    out.push({ path: base || '(value)', prev: a, next: b });
+    return out;
+  }
+  if (Array.isArray(a) && Array.isArray(b)) {
+    const n = Math.max(a.length, b.length);
+    for (let i = 0; i < n && out.length < limit; i++) diffLeaves(a[i], b[i], limit, `${base}[${i}]`, out);
+    return out;
+  }
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if (out.length >= limit) break;
+    diffLeaves(a[k], b[k], limit, base ? `${base}.${k}` : k, out);
+  }
+  return out;
+}
+
+function shortValue(v: unknown, max = 60): string {
+  let s: string | undefined;
+  try {
+    s = JSON.stringify(v);
+  } catch {
+    s = String(v);
+  }
+  if (s === undefined) s = String(v);
+  return s.length > max ? s.slice(0, max - 3) + '...' : s;
+}
+
+const identifier = (name: string): string => (/^[A-Za-z_$][\w$]*$/.test(name) ? name : 'value');
+
+/** The concrete fixes one report suggests, each attributed to the file that must change. */
+function fixesFor(r: Report): Fix[] {
+  const out: Fix[] = [];
+  const ownerName = r.owner || (r.parent && r.parent.name) || null;
+  const changes = changesOf(r);
+  const avoidableProps = (r.propChanges || []).filter((c) => AVOIDABLE_KINDS.has(c.kind));
+  // Not memoized: props alone will never stop the re-render, so React.memo comes first (in addition to
+  // any prop fixes below). Reports from protocol-1 libraries have no `memoized`; assume memoized then.
+  if (r.avoidable && (changes.length === 0 || r.memoized === false)) {
+    const identical = changes.length === 0;
+    out.push({
+      kind: 'memo',
+      owner: r.component,
+      target: r.component,
+      prop: null,
+      label: `Wrap <${r.component}> in React.memo`,
+      detail: identical
+        ? `<${r.component}> re-rendered with identical props because <${(r.parent && r.parent.name) || 'its parent'}> re-rendered.`
+        : `<${r.component}> is not memoized: fixing its props alone will not stop the re-render.`,
+      snippet: `// ${r.component}\nimport { memo } from 'react';\n\nexport const ${r.component} = memo(function ${r.component}(props) {\n  // ...\n});\n// class components: extend PureComponent instead`,
+    });
+  }
+  for (const c of avoidableProps) {
+    const owner = ownerName || '?';
+    const root = c.path.split(/[.[]/)[0] || c.path;
+    const id = identifier(root);
+    if (c.kind === 'function') {
+      out.push({
+        kind: 'useCallback',
+        owner,
+        target: r.component,
+        prop: root,
+        label: `useCallback(${root}) in <${owner}>`,
+        detail: `prop "${c.path}" of <${r.component}> is a new function on every render of <${owner}>.`,
+        snippet: `// ${owner}\nimport { useCallback } from 'react';\n\nconst ${id} = useCallback((/* args */) => {\n  // ...\n}, [/* deps */]);\n\n<${r.component} ${root}={${id}} />`,
+      });
+    } else if (c.kind === 'element') {
+      out.push({
+        kind: 'useMemoElement',
+        owner,
+        target: r.component,
+        prop: root,
+        label: `memoize element prop ${root} in <${owner}>`,
+        detail: `prop "${c.path}" of <${r.component}> is a new element with the same type and props on every render of <${owner}>.`,
+        snippet: `// ${owner}\nimport { useMemo } from 'react';\n\nconst ${id} = useMemo(() => ${shortValue(c.next, 40)}, [/* deps */]);\n// or pass it as children from a component that does not re-render`,
+      });
+    } else {
+      const isArray = Array.isArray(c.next);
+      out.push({
+        kind: 'useMemo',
+        owner,
+        target: r.component,
+        prop: root,
+        label: `useMemo(${root}) in <${owner}>`,
+        detail: `prop "${c.path}" of <${r.component}> is a new ${isArray ? 'array' : 'object'} with the same contents on every render of <${owner}>.`,
+        snippet:
+          `// ${owner}\nimport { useMemo } from 'react';\n\nconst ${id} = useMemo(() => (${shortValue(c.next, 80)}), [/* deps */]);\n\n` +
+          `// or, when it never changes, hoist it to module scope:\nconst ${id.toUpperCase()} = ${shortValue(c.next, 80)};`,
+      });
+    }
+  }
+  for (const c of ([] as Change[]).concat(r.stateChanges || [], r.hookChanges || [])) {
+    if (!AVOIDABLE_KINDS.has(c.kind)) continue;
+    if (c.hook === 'useContext' || /^useContext/.test(c.path)) {
+      const ctx = /useContext\((.*)\)/.exec(c.path);
+      const name = ctx && ctx[1] ? ctx[1] : 'Context';
+      out.push({
+        kind: 'contextValue',
+        owner: `${name}.Provider`,
+        target: r.component,
+        prop: name,
+        label: `memoize the ${name} provider value`,
+        detail: `<${r.component}> re-rendered because ${name} produced a new value that is deep-equal to the previous one.`,
+        snippet: `// where <${name}.Provider> is rendered\nconst value = useMemo(() => ({ /* ... */ }), [/* deps */]);\n<${name}.Provider value={value}>`,
+      });
+    } else if (c.hook === 'useSyncExternalStore') {
+      out.push({
+        kind: 'storeSnapshot',
+        owner: r.component,
+        target: r.component,
+        prop: c.path,
+        label: `stable getSnapshot in <${r.component}>`,
+        detail: `${c.path} returned a new reference with the same contents; getSnapshot must return a cached value.`,
+        snippet: `// ${r.component}\n// getSnapshot must return the same reference while the data is unchanged\nconst snapshot = useSyncExternalStore(subscribe, store.getSnapshot /* cached */);`,
+      });
+    } else {
+      out.push({
+        kind: 'bailout',
+        owner: r.component,
+        target: r.component,
+        prop: c.path,
+        label: `bail out before setting ${c.path} in <${r.component}>`,
+        detail: `${c.path} was set to a value deep-equal to the current one (new reference).`,
+        snippet: `// ${r.component}\nsetState((prev) => (deepEqual(prev, next) ? prev : next));`,
+      });
+    }
+  }
+  return out;
+}
+
+const fixKey = (f: Fix): string => `${f.kind}|${f.owner}|${f.prop || f.target}`;
+
+/** Aggregate fixes over many reports: how many avoidable renders each one removes. */
+function rankFixes(reports: Report[]): RankedFix[] {
+  const byKey = new Map<string, RankedFix>();
+  for (const r of reports) {
+    if (!r.avoidable) continue;
+    for (const f of fixesFor(r)) {
+      const k = fixKey(f);
+      let agg = byKey.get(k);
+      if (!agg) {
+        agg = { ...f, key: k, count: 0, components: new Map(), reports: [] };
+        byKey.set(k, agg);
+      }
+      agg.count++;
+      agg.components.set(r.component, (agg.components.get(r.component) || 0) + 1);
+      if (agg.reports.length < 50) agg.reports.push(r);
+    }
+  }
+  return [...byKey.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+}
+
+const isAncestorReport = (anc: Report, r: Report): boolean =>
+  anc.path.length < r.path.length && r.path[anc.path.length] === anc.component && anc.path.every((p, i) => r.path[i] === p);
+
+/** Walk `parent` links inside one commit up to the component whose own change started the cascade. */
+function rootCauseOf(r: Report, commitReports: Report[]): { name: string; trigger: string; report: Report | null } | null {
+  let cur = r;
+  const seen = new Set<Report>([r]);
+  while (cur.trigger === 'parent' && cur.parent) {
+    const parent = cur.parent;
+    const p = commitReports.find((x) => x.component === parent.name && isAncestorReport(x, cur));
+    if (!p || seen.has(p)) return { name: parent.name, trigger: parent.trigger, report: null };
+    seen.add(p);
+    cur = p;
+  }
+  return cur === r ? null : { name: cur.component, trigger: cur.trigger, report: cur };
+}
+
+/** Group reports by commit and rank what started each cascade. */
+function analyzeCommit(reports: Report[]): CommitAnalysis {
+  const roots = new Map<string, RootCause>();
+  let avoidable = 0;
+  let wasted = 0;
+  for (const r of reports) {
+    if (!r.avoidable) continue;
+    avoidable++;
+    if (typeof r.selfDuration === 'number') wasted += r.selfDuration;
+    const root = rootCauseOf(r, reports);
+    const name = root ? root.name : (r.parent && r.parent.name) || '(unknown)';
+    const trigger = root ? root.trigger : (r.parent && r.parent.trigger) || 'parent';
+    let agg = roots.get(name);
+    if (!agg) {
+      agg = { name, trigger, count: 0, components: new Map() };
+      roots.set(name, agg);
+    }
+    agg.count++;
+    agg.components.set(r.component, (agg.components.get(r.component) || 0) + 1);
+  }
+  const first = reports[0];
+  return {
+    id: first ? first.commitId : 0,
+    receivedAt: first ? first.receivedAt : 0,
+    total: reports.length,
+    avoidable,
+    wasted,
+    roots: [...roots.values()].sort((a, b) => b.count - a.count),
+    contexts: contextAttribution(reports),
+    fixes: rankFixes(reports),
+    reports,
+  };
+}
+
+/** Which contexts changed and how many consumers re-rendered because of them. */
+function contextAttribution(reports: Report[]): ContextStat[] {
+  const byCtx = new Map<string, ContextStat>();
+  for (const r of reports) {
+    for (const c of r.hookChanges || []) {
+      if (c.hook !== 'useContext' && !/^useContext/.test(c.path)) continue;
+      const m = /useContext\((.*)\)/.exec(c.path);
+      const name = m && m[1] ? m[1] : c.path;
+      let agg = byCtx.get(name);
+      if (!agg) {
+        agg = { name, consumers: 0, avoidable: 0, components: new Map(), commits: new Set() };
+        byCtx.set(name, agg);
+      }
+      agg.consumers++;
+      if (AVOIDABLE_KINDS.has(c.kind)) agg.avoidable++;
+      agg.components.set(r.component, (agg.components.get(r.component) || 0) + 1);
+      agg.commits.add(r.commitId);
+    }
+  }
+  return [...byCtx.values()].sort((a, b) => b.consumers - a.consumers);
+}
+
+/** Nested cascade for one commit: every report placed under its ancestors (untracked ancestors appear as plain names). */
+function cascadeTree(reports: Report[]): CascadeNode {
+  const root: CascadeNode = { name: '', children: new Map(), report: null };
+  for (const r of reports) {
+    let node = root;
+    for (const seg of r.path.concat([r.component])) {
+      let next = node.children.get(seg);
+      if (!next) {
+        next = { name: seg, children: new Map(), report: null };
+        node.children.set(seg, next);
+      }
+      node = next;
+    }
+    if (!node.report || r.avoidable) node.report = r;
+    node.count = (node.count || 0) + 1;
+    if (r.avoidable) node.avoidable = (node.avoidable || 0) + 1;
+  }
+  return root;
+}
+
+export interface RootSummary {
+  name: string;
+  trigger: string;
+  commits: { key: number; analysis: CommitAnalysis; count: number; components: Map<string, number> }[];
+  total: number;
+  components: Map<string, number>;
+  fixes: RankedFix[];
+}
+
+/** Every commit a component started (as the root cause), across the whole session. */
+function rootCauseSummary(name: string, commits: Iterable<[number, Report[]]>): RootSummary {
+  const out: RootSummary = { name, trigger: 'parent', commits: [], total: 0, components: new Map(), fixes: [] };
+  const affected: Report[] = [];
+  for (const [key, reports] of commits) {
+    const analysis = analyzeCommit(reports);
+    const root = analysis.roots.find((x) => x.name === name);
+    if (!root) continue;
+    out.trigger = root.trigger;
+    out.commits.push({ key, analysis, count: root.count, components: root.components });
+    out.total += root.count;
+    for (const [c, n] of root.components) out.components.set(c, (out.components.get(c) || 0) + n);
+    for (const r of reports) {
+      if (!r.avoidable) continue;
+      const rc = rootCauseOf(r, reports);
+      if ((rc ? rc.name : r.parent && r.parent.name) === name) affected.push(r);
+    }
+  }
+  out.commits.reverse();
+  out.fixes = rankFixes(affected);
+  return out;
+}
+
+function reportToMarkdown(r: Report): string {
+  const lines: string[] = [];
+  lines.push(`### <${r.component}> ${r.avoidable ? 'avoidable re-render' : `re-render (${r.trigger})`} #${r.renderCount}`);
+  lines.push('');
+  for (const x of r.reasons || []) lines.push(`- ${x}`);
+  if (r.path && r.path.length) lines.push('', `**Path:** ${r.path.concat([r.component]).join(' > ')}`);
+  if (r.parent) lines.push(`**Triggered by:** <${r.parent.name}> (${r.parent.trigger})`);
+  if (r.owner) lines.push(`**Created by:** <${r.owner}>`);
+  if (r.source) lines.push(`**Source:** ${r.source.fileName}${r.source.lineNumber ? ':' + r.source.lineNumber : ''}`);
+  const changes = changesOf(r);
+  if (changes.length) {
+    lines.push('', '| path | kind | prev | next |', '| --- | --- | --- | --- |');
+    for (const c of changes) lines.push(`| ${c.path} | ${KIND_LABEL[c.kind] || c.kind} | \`${shortValue(c.prev, 40)}\` | \`${shortValue(c.next, 40)}\` |`);
+  }
+  const fixes = fixesFor(r);
+  if (fixes.length) {
+    lines.push('', '**Fix**', '');
+    for (const f of fixes) lines.push(`- ${f.label}`);
+    lines.push('', '```jsx', fixes[0]!.snippet, '```');
+  }
+  return lines.join('\n');
+}
+
+// ---------- report view (shared with the Elements sidebar) ----------
+function changeRow(label: string, c: Change, suffix = ''): HTMLTableRowElement {
+  const tr = el('tr', { class: 'changed' + (AVOIDABLE_KINDS.has(c.kind) ? '' : ' real') });
+  tr.append(el('td', { class: 'k', text: label }));
+  const td = el('td');
+  td.append(valueNode(c.prev), el('span', { class: 'arrow', text: '→' }));
+  td.append(c.kind === 'removed' ? el('span', { class: 'v nil', text: '(removed)' }) : valueNode(c.next));
+  let kind = (KIND_LABEL[c.kind] || c.kind) + suffix;
+  const objectDiff = c.kind === 'different' && isRecord(c.prev) && isRecord(c.next);
+  if (objectDiff) {
+    const p = firstDifferentPath(c.prev, c.next, c.path);
+    if (p) kind += ` at ${p}`;
+  }
+  td.append(el('span', { class: 'kind', text: kind }));
+  if (objectDiff) {
+    // Diff view: straight to the leaves that differ, without expanding the whole object.
+    const leaves = diffLeaves(c.prev, c.next, 20, c.path);
+    if (leaves.length) {
+      const d = el('details', { class: 'diff' }, [el('summary', { text: `${leaves.length}${leaves.length >= 20 ? '+' : ''} differing ${leaves.length === 1 ? 'leaf' : 'leaves'}` })]);
+      const table = el('table', { class: 'kv leaves' });
+      for (const leaf of leaves) {
+        const row = el('tr');
+        row.append(el('td', { class: 'k', text: leaf.path }));
+        const cell = el('td');
+        cell.append(valueNode(leaf.prev), el('span', { class: 'arrow', text: '→' }), valueNode(leaf.next));
+        row.append(cell);
+        table.append(row);
+      }
+      d.append(table);
+      td.append(d);
+    }
+  }
+  tr.append(td);
+  return tr;
+}
+
+function kvSection(title: string, next: Record<string, unknown>, changes: Change[]): HTMLElement {
+  const byKey = new Map(changes.map((c) => [c.path.split(/[.[]/)[0], c] as const));
+  const table = el('table', { class: 'kv' });
+  for (const k of Object.keys(next || {})) {
+    const c = byKey.get(k);
+    if (c) {
+      table.append(changeRow(k, c, c.path !== k ? ` at ${c.path}` : ''));
+    } else {
+      const tr = el('tr');
+      tr.append(el('td', { class: 'k', text: k }));
+      const td = el('td');
+      td.append(valueNode(next[k]));
+      tr.append(td);
+      table.append(tr);
+    }
+  }
+  for (const c of changes) if (c.kind === 'removed') table.append(changeRow(c.path, c));
+  if (!table.children.length) table.append(el('tr', null, [el('td', { class: 'v nil', text: 'no props' })]));
+  return el('div', { class: 'section' }, [el('h3', { text: title }), table]);
+}
+
+function sourceLabel(src: SourceLocation): string {
+  const file = src.fileName.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '');
+  return `${file}${src.lineNumber ? ':' + src.lineNumber : ''}`;
+}
+
+export interface ReportViewActions {
+  openSource?: ((src: SourceLocation) => void) | null;
+  highlight?: ((id: number) => void) | null;
+  copy?: ((text: string) => void) | null;
+  compact?: boolean;
+}
+
+function reportView(r: Report, actions: ReportViewActions = {}): DocumentFragment {
+  const frag = document.createDocumentFragment();
+  const duration =
+    typeof r.selfDuration === 'number'
+      ? ` · ${fmtMs(r.selfDuration)} self${typeof r.treeDuration === 'number' && r.treeDuration > r.selfDuration ? `, ${fmtMs(r.treeDuration)} with children` : ''}`
+      : '';
+  const head = el('div', { class: 'section' }, [
+    el('h3', { text: 'Why did this render?' }),
+    el('div', null, [
+      el('span', { class: 'verdict ' + (r.avoidable ? 'avoid' : 'ok'), text: r.avoidable ? 'Avoidable re-render' : `Re-render (${r.trigger})` }),
+      el('span', { class: 'meta', text: `  #${r.renderCount} · ${summarize(r)}${duration}` }),
+    ]),
+    el('ul', { class: 'reasons' }, (r.reasons || []).map((x) => el('li', { text: x }))),
+  ]);
+  if (!actions.compact) {
+    const bar = el('div', { class: 'actions' });
+    const src = r.source;
+    if (src && actions.openSource) {
+      const open = actions.openSource;
+      bar.append(el('button', { title: src.fileName, onclick: () => open(src) }, `↗ ${sourceLabel(src)}`));
+    } else if (src) bar.append(el('span', { class: 'meta', title: src.fileName, text: sourceLabel(src) }));
+    if (actions.highlight && r.instanceId) {
+      const highlight = actions.highlight;
+      bar.append(el('button', { onclick: () => highlight(r.instanceId) }, '▣ Highlight'));
+    }
+    if (actions.copy) {
+      const copy = actions.copy;
+      bar.append(el('button', { onclick: () => copy(reportToMarkdown(r)) }, '⎘ Copy as Markdown'));
+    }
+    if (bar.children.length) head.append(bar);
+  }
+  frag.append(head);
+  const by = el('div', { class: 'section' }, [el('h3', { text: 'Rendered by' })]);
+  const crumbs = el('div', { class: 'crumbs' });
+  const parts = ([] as string[]).concat(r.path || []);
+  parts.forEach((p, i) => {
+    if (i) crumbs.append(' › ');
+    crumbs.append(p);
+  });
+  if (parts.length) crumbs.append(' › ');
+  crumbs.append(el('b', { text: r.component }));
+  by.append(crumbs);
+  if (r.parent) by.append(el('div', { text: `Triggered by <${r.parent.name}> (${r.parent.trigger})` }));
+  else by.append(el('div', { text: 'Update started in this component' }));
+  if (r.owner) by.append(el('div', { class: 'meta', text: `Created by <${r.owner}>` }));
+  if (r.memoized === false) by.append(el('div', { class: 'meta', text: 'Not memoized (re-renders whenever its parent does)' }));
+  else if (r.memoized === true) by.append(el('div', { class: 'meta', text: 'Memoized (React.memo / PureComponent)' }));
+  if (r.commitId) by.append(el('div', { class: 'meta', text: `Commit #${r.commitId}` }));
+  frag.append(by);
+  frag.append(kvSection('Props', r.props ? r.props.next : {}, r.propChanges || []));
+  const hooks = ([] as Change[]).concat(r.hookChanges || [], r.stateChanges || []);
+  if (hooks.length) {
+    const table = el('table', { class: 'kv' });
+    for (const c of hooks) table.append(changeRow(c.path, c));
+    frag.append(el('div', { class: 'section' }, [el('h3', { text: 'State & hooks that changed' }), table]));
+  }
+  return frag;
+}
+
+function fixView(fixes: (Fix | RankedFix)[], actions: { copy?: (text: string) => void } = {}): DocumentFragment {
+  const frag = document.createDocumentFragment();
+  if (!fixes.length) {
+    frag.append(el('div', { class: 'section' }, [el('h3', { text: 'Fix' }), el('div', { class: 'meta', text: 'Nothing to fix: this render was caused by a genuine change.' })]));
+    return frag;
+  }
+  for (const f of fixes) {
+    const ranked = 'count' in f ? f : null;
+    const sec = el('div', { class: 'section fix' }, [
+      el('h3', { text: f.label }),
+      el('div', { text: f.detail }),
+      ranked ? el('div', { class: 'meta', text: `removes ${plural(ranked.count, 'avoidable re-render')}: ${componentList(ranked.components)}` }) : null,
+      el('pre', { class: 'snippet', text: f.snippet }),
+    ]);
+    if (actions.copy) {
+      const copy = actions.copy;
+      sec.append(el('button', { onclick: () => copy(f.snippet) }, '⎘ Copy snippet'));
+    }
+    frag.append(sec);
+  }
+  return frag;
+}
+
+// ---------- virtual list ----------
+interface VirtualList<T> {
+  container: HTMLElement;
+  inner: HTMLElement;
+  setItems(items: T[]): void;
+  render(): void;
+  scrollTo(index: number): void;
+  readonly items: T[];
+}
+
+/**
+ * Fixed-height windowed list: only the rows in view (plus overscan) exist in the DOM.
+ * `rowFor(item, index)` returns a positioned element; the same element may be reused between renders.
+ */
+function virtualList<T>(container: HTMLElement, rowHeight: number, rowFor: (item: T, index: number) => HTMLElement): VirtualList<T> {
+  const inner = el('div', { class: 'virtual-inner' });
+  container.append(inner);
+  let items: T[] = [];
+  const mounted = new Map<HTMLElement, number>();
+  let raf = 0;
+  const render = (): void => {
+    raf = 0;
+    const height = container.clientHeight || FALLBACK_VIEWPORT;
+    const start = Math.max(0, Math.floor(container.scrollTop / rowHeight) - OVERSCAN);
+    const end = Math.min(items.length, Math.ceil((container.scrollTop + height) / rowHeight) + OVERSCAN);
+    inner.style.height = `${items.length * rowHeight}px`;
+    const keep = new Set<HTMLElement>();
+    for (let i = start; i < end; i++) {
+      const row = rowFor(items[i]!, i);
+      row.style.top = `${i * rowHeight}px`;
+      if (row.parentNode !== inner) inner.append(row);
+      mounted.set(row, i);
+      keep.add(row);
+    }
+    for (const row of [...mounted.keys()]) {
+      if (!keep.has(row)) {
+        row.remove();
+        mounted.delete(row);
+      }
+    }
+  };
+  container.addEventListener('scroll', () => {
+    if (!raf) raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame(render) : (setTimeout(render, 0) as unknown as number);
+  });
+  return {
+    container,
+    inner,
+    get items() {
+      return items;
+    },
+    setItems(next) {
+      items = next;
+      render();
+    },
+    render,
+    scrollTo(index) {
+      const height = container.clientHeight || FALLBACK_VIEWPORT;
+      const top = index * rowHeight;
+      if (top < container.scrollTop) container.scrollTop = top;
+      else if (top + rowHeight > container.scrollTop + height) container.scrollTop = top + rowHeight - height;
+      render();
+    },
+  };
+}
+
+// ---------- panel ----------
+function createPanel(root: HTMLElement, transport: Transport, options: PanelOptions = {}): Panel {
+  const state: PanelState = {
+    tree: { name: '', children: new Map(), reports: [], total: 0, avoidable: 0, wasted: 0, expanded: true, path: [], key: '' },
+    nodesByKey: new Map(),
+    reports: [],
+    commits: new Map(),
+    commitOrder: [],
+    selectedKey: null,
+    selectedReport: null,
+    selectedCommit: null,
+    selectedFix: null,
+    selectedRoot: null,
+    view: 'tree',
+    tab: 'latest',
+    paused: false,
+    avoidableOnly: false,
+    filter: '',
+    relay: false,
+    library: null,
+    polling: false,
+    streamCollapsed: false,
+    collapsed: new Set(),
+    sort: { key: 'avoidable', dir: -1 },
+    flashOn: false,
+    settingsOpen: false,
+    origin: null,
+    legacyCommit: 0,
+  };
+  let persistTimer: ReturnType<typeof setTimeout> | null = null;
+  let queue: Report[] = [];
+  let flushScheduled = false;
+
+  const schedule = typeof requestAnimationFrame === 'function' ? (fn: () => void) => requestAnimationFrame(fn) : (fn: () => void) => setTimeout(fn, 0);
+  const copyText = (text: string): void => {
+    if (transport.copy) transport.copy(text);
+    else if (typeof navigator !== 'undefined' && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+    toast('Copied');
+  };
+
+  // ---------- DOM skeleton ----------
+  root.textContent = '';
+  const search = el('input', {
+    type: 'search',
+    placeholder: 'Search components (text or /regex/)',
+    oninput: () => {
+      state.filter = search.value;
+      renderLeft();
+      renderStream();
+      persist();
+    },
+  });
+  const pauseBtn = el(
+    'button',
+    {
+      title: 'Pause / resume',
+      onclick: () => {
+        state.paused = !state.paused;
+        pauseBtn.classList.toggle('active', state.paused);
+        pauseBtn.textContent = state.paused ? '▶ Resume' : '⏸ Pause';
+      },
+    },
+    '⏸ Pause',
+  );
+  const clearBtn = el(
+    'button',
+    {
+      title: 'Clear',
+      onclick: () => {
+        clearAll();
+        transport.clear?.();
+        transport.badge?.(0);
+      },
+    },
+    '⊘ Clear',
+  );
+  const replayBtn = el('button', { title: 'Replay buffered reports from the page', onclick: () => transport.replay?.() }, '↻ Replay');
+  const exportBtn = el('button', { title: 'Export reports as JSON', onclick: exportJson }, '⤓ Export');
+  const importInput = el('input', { type: 'file', accept: 'application/json,.json', class: 'hidden-file' });
+  importInput.addEventListener('change', () => {
+    const f = importInput.files && importInput.files[0];
+    if (f) importFile(f);
+    importInput.value = '';
+  });
+  const importBtn = el('button', { title: 'Import a JSON export', onclick: () => importInput.click() }, '⤒ Import');
+  const avoidCheck = el('input', {
+    type: 'checkbox',
+    onchange: () => {
+      state.avoidableOnly = avoidCheck.checked;
+      renderLeft();
+      renderStream();
+      persist();
+    },
+  });
+  const settingsBtn = el('button', { title: 'Settings', onclick: () => toggleSettings() }, '⚙ Settings');
+  const status = el('span', { class: 'status', title: '' }, [el('span', { class: 'dot' }), el('span', { class: 'status-text', text: 'no page' })]);
+  const toolbar = el('div', { class: 'toolbar' }, [
+    search,
+    el('span', { class: 'sep' }),
+    pauseBtn,
+    clearBtn,
+    replayBtn,
+    el('span', { class: 'sep' }),
+    exportBtn,
+    importBtn,
+    importInput,
+    el('span', { class: 'sep' }),
+    el('label', null, [avoidCheck, 'Avoidable only']),
+    el('span', { class: 'spacer' }),
+    status,
+    settingsBtn,
+  ]);
+  const banner = el('div', { class: 'banner', hidden: true });
+  const viewsBar = el('div', { class: 'views' });
+  const VIEWS: [View, string][] = [
+    ['tree', 'Tree'],
+    ['offenders', 'Offenders'],
+    ['commits', 'Commits'],
+    ['fixes', 'Fixes'],
+  ];
+  const viewButtons = new Map<View, HTMLButtonElement>();
+  for (const [id, label] of VIEWS) {
+    const b = el('button', { 'data-view': id, onclick: () => setView(id) }, label);
+    viewButtons.set(id, b);
+    viewsBar.append(b);
+  }
+  const tree = el('div', { class: 'tree', tabindex: '0', onkeydown: onTreeKey, role: 'tree' });
+  const table = el('div', { class: 'table-wrap', hidden: true });
+  const left = el('div', { class: 'left' }, [viewsBar, tree, table]);
+  const resizer = el('div', { class: 'resizer', title: 'Drag to resize' });
+  const details = el('div', { class: 'details' });
+  const settings = el('div', { class: 'drawer', hidden: true });
+  const main = el('div', { class: 'main' }, [left, resizer, details, settings]);
+  const streamList = el('div', { class: 'stream-list' });
+  const streamCount = el('span', { class: 'count', text: '0 reports' });
+  const stream = el('div', { class: 'stream' }, [
+    el(
+      'div',
+      {
+        class: 'stream-header',
+        onclick: () => {
+          state.streamCollapsed = !state.streamCollapsed;
+          stream.classList.toggle('collapsed', state.streamCollapsed);
+          persist();
+        },
+      },
+      [el('span', { text: '▾ Live stream' }), streamCount],
+    ),
+    streamList,
+  ]);
+  const toastEl = el('div', { class: 'toast', hidden: true });
+  root.append(toolbar, banner, main, stream, toastEl);
+  root.addEventListener('keydown', onGlobalKey);
+
+  let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  function toast(text: string): void {
+    toastEl.textContent = text;
+    toastEl.hidden = false;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toastEl.hidden = true;
+    }, 1200);
+  }
+
+  // resizer
+  let drag: { x: number; w: number } | null = null;
+  resizer.addEventListener('mousedown', (e) => {
+    drag = { x: e.clientX, w: left.getBoundingClientRect().width };
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!drag) return;
+    const w = Math.max(180, Math.min(drag.w + e.clientX - drag.x, root.clientWidth - 240));
+    left.style.width = w + 'px';
+    state.treeWidth = w;
+  });
+  window.addEventListener('mouseup', () => {
+    if (drag) persist();
+    drag = null;
+  });
+
+  // ---------- persistence (per origin) ----------
+  function persist(): void {
+    if (!transport.storage) return;
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      const saved: PersistedState = {
+        filter: state.filter,
+        avoidableOnly: state.avoidableOnly,
+        view: state.view,
+        tab: state.tab === 'history' || state.tab === 'fix' ? state.tab : 'latest',
+        streamCollapsed: state.streamCollapsed,
+        collapsed: [...state.collapsed],
+        treeWidth: state.treeWidth,
+        flashOn: state.flashOn,
+      };
+      transport.storage!.set('panel', saved);
+    }, 150);
+  }
+
+  function restore(raw: unknown): void {
+    if (!isRecord(raw)) return;
+    const saved = raw as PersistedState;
+    if (typeof saved.filter === 'string') {
+      state.filter = saved.filter;
+      search.value = saved.filter;
+    }
+    if (typeof saved.avoidableOnly === 'boolean') {
+      state.avoidableOnly = saved.avoidableOnly;
+      avoidCheck.checked = saved.avoidableOnly;
+    }
+    if (Array.isArray(saved.collapsed)) state.collapsed = new Set(saved.collapsed.filter((x): x is string => typeof x === 'string'));
+    if (typeof saved.streamCollapsed === 'boolean') {
+      state.streamCollapsed = saved.streamCollapsed;
+      stream.classList.toggle('collapsed', state.streamCollapsed);
+    }
+    if (typeof saved.treeWidth === 'number' && saved.treeWidth > 100) {
+      state.treeWidth = saved.treeWidth;
+      left.style.width = saved.treeWidth + 'px';
+    }
+    if (typeof saved.flashOn === 'boolean') state.flashOn = saved.flashOn;
+    if (saved.tab === 'history' || saved.tab === 'fix') state.tab = saved.tab;
+    if (saved.view && viewButtons.has(saved.view)) state.view = saved.view;
+    for (const n of state.nodesByKey.values()) n.expanded = !state.collapsed.has(n.key);
+    setView(state.view);
+    renderStream();
+  }
+
+  // ---------- model ----------
+  const keyOf = (path: string[]): string => path.join(' ');
+
+  function nodeFor(path: string[]): TreeNode {
+    const key = keyOf(path);
+    const found = state.nodesByKey.get(key);
+    if (found) return found;
+    let parent = state.tree;
+    for (let i = 0; i < path.length; i++) {
+      const name = path[i]!;
+      const k = keyOf(path.slice(0, i + 1));
+      let n = state.nodesByKey.get(k);
+      if (!n) {
+        n = { name, children: new Map(), reports: [], total: 0, avoidable: 0, wasted: 0, expanded: !state.collapsed.has(k), path: path.slice(0, i + 1), key: k };
+        state.nodesByKey.set(k, n);
+        parent.children.set(name, n);
+      }
+      parent = n;
+    }
+    return parent;
+  }
+
+  const nodeOfReport = (r: Report): TreeNode => nodeFor(r.path.concat([r.component]));
+
+  function commitKeyFor(report: Report): number {
+    if (report.commitId > 0) return report.commitId;
+    // Protocol 1 libraries have no commit id: reports delivered in one flush count as one commit.
+    return -state.legacyCommit;
+  }
+
+  function ingest(report: Report): TreeNode {
+    if (!report.receivedAt) report.receivedAt = Date.now();
+    state.reports.push(report);
+    if (state.reports.length > MAX_REPORTS) state.reports.shift();
+    const node = nodeOfReport(report);
+    node.reports.push(report);
+    if (node.reports.length > MAX_PER_NODE) node.reports.shift();
+    node.total++;
+    if (report.avoidable) {
+      node.avoidable++;
+      if (typeof report.selfDuration === 'number') node.wasted += report.selfDuration;
+    }
+    node.lastReport = report;
+    node.flash = true;
+    node.flashAt = Date.now();
+    const ck = commitKeyFor(report);
+    let list = state.commits.get(ck);
+    if (!list) {
+      list = [];
+      state.commits.set(ck, list);
+      state.commitOrder.push(ck);
+      if (state.commitOrder.length > MAX_COMMITS) state.commits.delete(state.commitOrder.shift()!);
+    }
+    list.push(report);
+    return node;
+  }
+
+  /** Drain the queue: one tree render per batch. */
+  function flush(): void {
+    flushScheduled = false;
+    if (!queue.length) return;
+    const batch = queue;
+    queue = [];
+    state.legacyCommit++;
+    let touchedSelected = false;
+    let avoidableCount = 0;
+    for (const r of batch) {
+      const node = ingest(r);
+      if (r.avoidable) avoidableCount++;
+      if (state.selectedKey === node.key) {
+        touchedSelected = true;
+        if (state.tab === 'latest') state.selectedReport = r;
+      }
+    }
+    renderLeft();
+    renderStream(batch);
+    if (touchedSelected || state.view === 'commits' || state.view === 'fixes' || state.tab === 'root') renderDetails();
+    if (state.polling && avoidableCount) transport.badge?.(state.reports.filter((r) => r.avoidable).length);
+  }
+
+  function enqueue(report: Report): void {
+    queue.push(report);
+    if (!flushScheduled) {
+      flushScheduled = true;
+      schedule(flush);
+    }
+  }
+
+  function clearAll(): void {
+    state.tree.children.clear();
+    state.nodesByKey.clear();
+    state.reports = [];
+    state.commits.clear();
+    state.commitOrder = [];
+    state.selectedKey = null;
+    state.selectedReport = null;
+    state.selectedCommit = null;
+    state.selectedFix = null;
+    state.selectedRoot = null;
+    if (state.tab === 'commit' || state.tab === 'fixlist' || state.tab === 'root') state.tab = 'latest';
+    queue = [];
+    renderLeft();
+    renderDetails();
+    renderStream();
+  }
+
+  function matchesFilter(name: string): boolean {
+    if (!state.filter) return true;
+    const f = state.filter.trim();
+    const m = /^\/(.+)\/([a-z]*)$/.exec(f);
+    if (m && m[1] !== undefined) {
+      try {
+        return new RegExp(m[1], m[2]).test(name);
+      } catch {
+        /* invalid regex: fall through to text */
+      }
+    }
+    return name.toLowerCase().includes(f.toLowerCase());
+  }
+
+  /** A node is shown if it or any descendant matches the filter (and has avoidable reports when that filter is on). */
+  function visible(node: TreeNode): boolean {
+    const own = (!state.avoidableOnly || node.avoidable > 0) && matchesFilter(node.name) && node.total > 0;
+    if (own) return true;
+    for (const c of node.children.values()) if (visible(c)) return true;
+    return false;
+  }
+
+  const passes = (r: Report): boolean => (!state.avoidableOnly || r.avoidable) && matchesFilter(r.component);
+  const filteredReports = (): Report[] => state.reports.filter(passes);
+
+  // ---------- left pane ----------
+  function setView(view: View): void {
+    state.view = view;
+    for (const [id, b] of viewButtons) b.classList.toggle('active', id === view);
+    tree.hidden = view !== 'tree';
+    table.hidden = view === 'tree';
+    renderLeft();
+    renderDetails();
+    persist();
+  }
+
+  function renderLeft(): void {
+    if (state.view === 'tree') renderTree();
+    else if (state.view === 'offenders') renderOffenders();
+    else if (state.view === 'commits') renderCommits();
+    else renderFixes();
+  }
+
+  // ---------- tree (virtualized) ----------
+  interface FlatRow {
+    node: TreeNode;
+    depth: number;
+  }
+  const rowEls = new Map<string, HTMLElement>();
+  const treeList = virtualList<FlatRow>(tree, ROW_H, ({ node, depth }) => rowFor(node, depth));
+  const emptyEl = el('div', { class: 'empty' }, [
+    el('div', { text: 'No re-renders reported yet.' }),
+    el('div', null, ['Call ', el('code', { text: 'init({ notifier: createDevtoolsNotifier() })' }), ' in the page, or enable injection in Settings, then interact with it.']),
+  ]);
+
+  function renderTree(): void {
+    const flat: FlatRow[] = [];
+    const walk = (node: TreeNode, depth: number): void => {
+      for (const child of node.children.values()) {
+        if (!visible(child)) continue;
+        flat.push({ node: child, depth });
+        if (child.expanded) walk(child, depth + 1);
+      }
+    };
+    walk(state.tree, 0);
+    if (flat.length === 0) {
+      if (!emptyEl.parentNode) tree.append(emptyEl);
+    } else emptyEl.remove();
+    // drop cached rows for nodes that are gone
+    if (rowEls.size > flat.length * 2 + 64) {
+      const live = new Set(flat.map((f) => f.node.key));
+      for (const key of [...rowEls.keys()]) if (!live.has(key)) rowEls.delete(key);
+    }
+    treeList.setItems(flat);
+  }
+
+  function hoverHighlight(node: TreeNode, on: boolean): void {
+    const r = node.lastReport;
+    if (!r || !r.instanceId) return;
+    transport.highlight?.(on ? r.instanceId : null);
+  }
+
+  function rowFor(node: TreeNode, depth: number): HTMLElement {
+    let row = rowEls.get(node.key);
+    if (!row) {
+      const created = el('div', {
+        class: 'row',
+        'data-key': node.key,
+        role: 'treeitem',
+        onclick: () => select(node),
+        onmouseenter: () => hoverHighlight(node, true),
+        onmouseleave: () => hoverHighlight(node, false),
+        onanimationend: () => created.classList.remove('flash'),
+      });
+      created.append(el('span', { class: 'indent' }));
+      created.append(
+        el('span', {
+          class: 'chevron',
+          onclick: (e: Event) => {
+            e.stopPropagation();
+            toggleExpanded(node);
+          },
+        }),
+      );
+      created.append(
+        el('span', { class: 'tag' }, [el('span', { class: 'bracket', text: '<' }), el('span', { class: 'name', text: node.name }), el('span', { class: 'bracket', text: '>' })]),
+      );
+      created.append(el('span', { class: 'badges' }));
+      rowEls.set(node.key, created);
+      row = created;
+    }
+    row.classList.toggle('selected', state.selectedKey === node.key);
+    const indent = row.querySelector('.indent') as HTMLElement;
+    if (indent.childElementCount !== depth) {
+      indent.textContent = '';
+      for (let i = 0; i < depth; i++) indent.append(el('span', { class: 'guide' }));
+    }
+    const hasChildren = [...node.children.values()].some(visible);
+    const chevron = row.querySelector('.chevron') as HTMLElement;
+    chevron.classList.toggle('leaf', !hasChildren);
+    chevron.textContent = node.expanded ? '▾' : '▸';
+    const badges = row.querySelector('.badges') as HTMLElement;
+    badges.textContent = '';
+    if (node.avoidable) badges.append(el('span', { class: 'badge avoid', title: 'avoidable re-renders', text: String(node.avoidable) }));
+    if (node.total) badges.append(el('span', { class: 'badge', title: 're-renders', text: String(node.total) }));
+    if (node.flash) {
+      node.flash = false;
+      // Rows scrolled into view long after the report arrived should not flash.
+      if (Date.now() - (node.flashAt || 0) < 1000) {
+        row.classList.remove('flash');
+        void row.offsetWidth; // restart the animation
+        row.classList.add('flash');
+      }
+    }
+    return row;
+  }
+
+  function toggleExpanded(node: TreeNode, value?: boolean): void {
+    node.expanded = value === undefined ? !node.expanded : value;
+    if (node.expanded) state.collapsed.delete(node.key);
+    else state.collapsed.add(node.key);
+    renderTree();
+    persist();
+  }
+
+  function select(node: TreeNode, report?: Report): void {
+    state.selectedKey = node.key;
+    state.selectedReport = report || node.lastReport || null;
+    // Picking a specific report shows it, unless the caller asked for the Fix tab.
+    if (report && state.tab !== 'fix') state.tab = 'latest';
+    if (state.tab === 'commit' || state.tab === 'fixlist' || state.tab === 'root') state.tab = 'latest';
+    renderLeft();
+    renderDetails();
+    if (state.view === 'tree') {
+      const idx = treeList.items.findIndex((f) => f.node.key === node.key);
+      if (idx >= 0) treeList.scrollTo(idx);
+    }
+  }
+
+  function onTreeKey(e: KeyboardEvent): void {
+    const rows = treeList.items;
+    if (!rows.length) return;
+    const idx = rows.findIndex((f) => f.node.key === state.selectedKey);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      select(rows[Math.min(rows.length - 1, idx + 1)]!.node);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      select(rows[Math.max(0, idx - 1)]!.node);
+    } else if (e.key === 'ArrowRight' && idx >= 0) {
+      toggleExpanded(rows[idx]!.node, true);
+    } else if (e.key === 'ArrowLeft' && idx >= 0) {
+      toggleExpanded(rows[idx]!.node, false);
+    }
+  }
+
+  /** Panel-wide shortcuts: `/` search, `f` fix tab, `Esc` clear highlight / leave the search box. */
+  function onGlobalKey(e: KeyboardEvent): void {
+    const target = e.target as HTMLElement | null;
+    const inField = !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT');
+    if (e.key === 'Escape') {
+      transport.highlight?.(null);
+      if (inField) target!.blur();
+      return;
+    }
+    if (inField || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === '/') {
+      e.preventDefault();
+      search.focus();
+      search.select();
+    } else if (e.key === 'f' && state.selectedKey) {
+      e.preventDefault();
+      state.tab = 'fix';
+      renderDetails();
+      persist();
+    }
+  }
+
+  // ---------- offenders ----------
+  function sortableHeader(label: string, key: OffenderKey, numeric = false): HTMLElement {
+    const active = state.sort.key === key;
+    return el(
+      'th',
+      {
+        class: (active ? 'sorted ' : '') + (numeric ? 'num' : ''),
+        onclick: () => {
+          state.sort = { key, dir: active ? ((-state.sort.dir) as 1 | -1) : numeric ? -1 : 1 };
+          renderLeft();
+        },
+      },
+      label + (active ? (state.sort.dir < 0 ? ' ▾' : ' ▴') : ''),
+    );
+  }
+
+  function offenderRows(): Offender[] {
+    const byName = new Map<string, Offender>();
+    for (const r of filteredReports()) {
+      let o = byName.get(r.component);
+      if (!o) {
+        o = { component: r.component, total: 0, avoidable: 0, wasted: 0, paths: new Set(), reports: [], fix: '' };
+        byName.set(r.component, o);
+      }
+      o.total++;
+      if (r.avoidable) {
+        o.avoidable++;
+        if (typeof r.selfDuration === 'number') o.wasted += r.selfDuration;
+      }
+      o.paths.add(keyOf(r.path));
+      o.reports.push(r);
+    }
+    const rows = [...byName.values()];
+    for (const o of rows) {
+      const fixes = rankFixes(o.reports);
+      o.fix = fixes.length ? fixes[0]!.label : '';
+    }
+    const { key, dir } = state.sort;
+    rows.sort((a, b) => {
+      const va = a[key];
+      const vb = b[key];
+      const c = typeof va === 'number' && typeof vb === 'number' ? va - vb : String(va).localeCompare(String(vb));
+      return c * dir || b.avoidable - a.avoidable;
+    });
+    return rows;
+  }
+
+  function renderOffenders(): void {
+    table.textContent = '';
+    const rows = offenderRows();
+    if (!rows.length) {
+      table.append(el('div', { class: 'empty', text: 'No re-renders reported yet.' }));
+      return;
+    }
+    const t = el('table', { class: 'grid' });
+    t.append(
+      el('thead', null, el('tr', null, [sortableHeader('Component', 'component'), sortableHeader('Avoidable', 'avoidable', true), sortableHeader('Total', 'total', true), sortableHeader('Wasted', 'wasted', true), el('th', { text: 'Top fix' })])),
+    );
+    const body = el('tbody');
+    for (const o of rows) {
+      body.append(
+        el(
+          'tr',
+          {
+            class: o.avoidable ? 'has-avoid' : '',
+            onclick: () => {
+              const last = o.reports[o.reports.length - 1]!;
+              state.tab = 'fix';
+              select(nodeOfReport(last), last);
+            },
+          },
+          [
+            el('td', { class: 'c' }, [el('span', { class: 'name', text: o.component }), o.paths.size > 1 ? el('span', { class: 'meta', text: ` ×${o.paths.size} places` }) : null]),
+            el('td', { class: 'num' }, o.avoidable ? el('span', { class: 'badge avoid', text: String(o.avoidable) }) : '0'),
+            el('td', { class: 'num', text: String(o.total) }),
+            el('td', { class: 'num', text: o.wasted ? fmtMs(o.wasted) : '' }),
+            el('td', { class: 'fix', text: o.fix }),
+          ],
+        ),
+      );
+    }
+    t.append(body);
+    table.append(t);
+  }
+
+  // ---------- commits ----------
+  function commitSummaries(): { key: number; analysis: CommitAnalysis }[] {
+    const out: { key: number; analysis: CommitAnalysis }[] = [];
+    for (let i = state.commitOrder.length - 1; i >= 0; i--) {
+      const key = state.commitOrder[i]!;
+      const reports = state.commits.get(key);
+      if (!reports || !reports.some(passes)) continue;
+      out.push({ key, analysis: analyzeCommit(reports) });
+    }
+    return out;
+  }
+
+  function showCommit(key: number): void {
+    state.selectedCommit = key;
+    state.tab = 'commit';
+    renderLeft();
+    renderDetails();
+  }
+
+  function showRoot(name: string): void {
+    state.selectedRoot = name;
+    state.tab = 'root';
+    renderDetails();
+  }
+
+  function renderCommits(): void {
+    table.textContent = '';
+    const items = commitSummaries();
+    if (!items.length) {
+      table.append(el('div', { class: 'empty', text: 'No commits yet.' }));
+      return;
+    }
+    const list = el('ul', { class: 'commits' });
+    for (const { key, analysis } of items) {
+      const root = analysis.roots[0];
+      list.append(
+        el('li', { class: (state.selectedCommit === key && state.tab === 'commit' ? 'selected ' : '') + (analysis.avoidable ? 'has-avoid' : ''), onclick: () => showCommit(key) }, [
+          el('span', { class: 'id', text: key > 0 ? `#${key}` : '—' }),
+          el('span', { class: 't', text: fmtTime(analysis.receivedAt) }),
+          el('span', { class: 'n', text: plural(analysis.total, 'render') }),
+          analysis.avoidable ? el('span', { class: 'badge avoid', text: `${analysis.avoidable} avoidable` }) : el('span', { class: 'badge', text: 'ok' }),
+          el('span', { class: 'root', text: root ? `← <${root.name}> (${root.trigger})` : '' }),
+        ]),
+      );
+    }
+    table.append(list);
+  }
+
+  // ---------- fixes ----------
+  function renderFixes(): void {
+    table.textContent = '';
+    const reports = filteredReports();
+    const fixes = rankFixes(reports);
+    const contexts = contextAttribution(reports);
+    if (!fixes.length && !contexts.length) {
+      table.append(el('div', { class: 'empty', text: 'No avoidable re-renders, nothing to fix.' }));
+      return;
+    }
+    if (fixes.length) {
+      const list = el('ol', { class: 'fixes' });
+      for (const f of fixes) {
+        list.append(
+          el(
+            'li',
+            {
+              class: state.selectedFix === f.key && state.tab === 'fixlist' ? 'selected' : '',
+              onclick: () => {
+                state.selectedFix = f.key;
+                state.tab = 'fixlist';
+                renderLeft();
+                renderDetails();
+              },
+            },
+            [
+              el('span', { class: 'badge avoid', title: 'avoidable re-renders removed', text: String(f.count) }),
+              el('span', { class: 'label', text: f.label }),
+              el('span', { class: 'meta', text: componentList(f.components) }),
+            ],
+          ),
+        );
+      }
+      table.append(el('div', { class: 'section-title', text: 'Ranked by avoidable re-renders removed' }), list);
+    }
+    if (contexts.length) {
+      const list = el('ul', { class: 'contexts' });
+      for (const c of contexts) {
+        list.append(
+          el('li', null, [
+            el('span', { class: 'name', text: c.name }),
+            el('span', {
+              class: 'meta',
+              text: ` changed in ${plural(c.commits.size, 'commit')}, ${plural(c.consumers, 'consumer re-render')}${c.avoidable ? `, ${c.avoidable} with an equal value` : ''}: ${componentList(c.components)}`,
+            }),
+          ]),
+        );
+      }
+      table.append(el('div', { class: 'section-title', text: 'Contexts' }), list);
+    }
+  }
+
+  // ---------- details ----------
+  function renderDetails(): void {
+    const openLabels = new Set([...details.querySelectorAll('details.obj[open] > summary')].map((x) => x.textContent));
+    details.textContent = '';
+    if (state.tab === 'commit' && state.selectedCommit !== null) renderCommitDetails();
+    else if (state.tab === 'fixlist' && state.selectedFix) renderFixDetails();
+    else if (state.tab === 'root' && state.selectedRoot) renderRootDetails();
+    else renderNodeDetails(state.selectedKey ? state.nodesByKey.get(state.selectedKey) ?? null : null);
+    if (openLabels.size) {
+      for (const d of details.querySelectorAll<HTMLDetailsElement>('details.obj')) {
+        if (openLabels.has(d.querySelector('summary')!.textContent)) d.open = true;
+      }
+    }
+  }
+
+  const reportActions = (): ReportViewActions => ({
+    openSource: transport.openResource ? (src) => transport.openResource!(src.fileName, src.lineNumber, src.columnNumber) : null,
+    highlight: transport.highlight ? (id) => transport.highlight!(id) : null,
+    copy: copyText,
+  });
+
+  const tabButton = (id: Tab, label: string, onclick: () => void): HTMLButtonElement => el('button', { class: state.tab === id ? 'active' : '', onclick }, label);
+
+  function renderNodeDetails(node: TreeNode | null): void {
+    if (!node) {
+      details.append(el('div', { class: 'empty', text: 'Select a component to see why it re-rendered.' }));
+      return;
+    }
+    const header = el('div', { class: 'details-header' }, [
+      el('span', { class: 'title' }, [el('span', { class: 'bracket', text: '<' }), el('span', { class: 'name', text: node.name }), el('span', { class: 'bracket', text: '>' })]),
+      el('span', { class: 'meta', text: `${plural(node.total, 're-render')}, ${node.avoidable} avoidable${node.wasted ? ', ' + fmtMs(node.wasted) + ' wasted' : ''}` }),
+      el('span', { class: 'tabs' }, [
+        tabButton('latest', 'Report', () => {
+          state.tab = 'latest';
+          state.selectedReport = node.lastReport ?? null;
+          renderDetails();
+          persist();
+        }),
+        tabButton('history', `History (${node.reports.length})`, () => {
+          state.tab = 'history';
+          renderDetails();
+          persist();
+        }),
+        tabButton('fix', 'Fix', () => {
+          state.tab = 'fix';
+          renderDetails();
+          persist();
+        }),
+      ]),
+    ]);
+    details.append(header);
+    const body = el('div', { class: 'details-body' });
+    details.append(body);
+    if (state.tab === 'history') {
+      const list = el('ul', { class: 'history' });
+      for (const r of [...node.reports].reverse()) {
+        list.append(
+          el(
+            'li',
+            {
+              class: state.selectedReport === r ? 'selected' : '',
+              onclick: () => {
+                state.selectedReport = r;
+                state.tab = 'latest';
+                renderDetails();
+              },
+            },
+            [
+              el('span', { class: 't', text: fmtTime(r.receivedAt) }),
+              el('span', { class: 'n', text: '#' + r.renderCount }),
+              el('span', { class: 'verdict ' + (r.avoidable ? 'avoid' : 'ok'), text: r.avoidable ? 'avoidable' : r.trigger }),
+              el('span', { class: 'sum', text: summarize(r) }),
+            ],
+          ),
+        );
+      }
+      body.append(list);
+      return;
+    }
+    if (state.tab === 'fix') {
+      body.append(fixView(rankFixes(node.reports), { copy: copyText }));
+      return;
+    }
+    const r = state.selectedReport || node.lastReport;
+    if (!r) return;
+    body.append(reportView(r, reportActions()));
+  }
+
+  function rootsList(roots: RootCause[]): HTMLElement {
+    return el(
+      'ul',
+      { class: 'roots' },
+      roots.map((root) =>
+        el('li', null, [
+          el('a', { class: 'root-link', href: '#', title: 'Every commit this component started', onclick: (e: Event) => (e.preventDefault(), showRoot(root.name)) }, `<${root.name}>`),
+          ` (${root.trigger}) → ${plural(root.count, 'avoidable re-render')}: `,
+          el('span', { class: 'meta', text: componentList(root.components) }),
+        ]),
+      ),
+    );
+  }
+
+  function renderCommitDetails(): void {
+    const key = state.selectedCommit!;
+    const reports = state.commits.get(key);
+    if (!reports) {
+      details.append(el('div', { class: 'empty', text: 'This commit is no longer buffered.' }));
+      return;
+    }
+    const a = analyzeCommit(reports);
+    details.append(
+      el('div', { class: 'details-header' }, [
+        el('span', { class: 'title', text: key > 0 ? `Commit #${key}` : 'Commit' }),
+        el('span', { class: 'meta', text: `${plural(a.total, 'render')}, ${a.avoidable} avoidable${a.wasted ? ', ' + fmtMs(a.wasted) + ' wasted' : ''} · ${fmtTime(a.receivedAt)}` }),
+      ]),
+    );
+    const body = el('div', { class: 'details-body' });
+    details.append(body);
+    if (a.roots.length) body.append(el('div', { class: 'section' }, [el('h3', { text: 'Root causes' }), rootsList(a.roots)]));
+    if (a.contexts.length) {
+      body.append(
+        el('div', { class: 'section' }, [
+          el('h3', { text: 'Contexts that changed' }),
+          el('ul', { class: 'roots' }, a.contexts.map((c) => el('li', null, [el('b', { text: c.name }), ` → ${plural(c.consumers, 'consumer')} re-rendered${c.avoidable ? ` (${c.avoidable} with an equal value)` : ''}`]))),
+        ]),
+      );
+    }
+    const cascade = el('div', { class: 'cascade' });
+    const walk = (node: CascadeNode, depth: number): void => {
+      for (const child of node.children.values()) {
+        const r = child.report;
+        const line = el(
+          'div',
+          {
+            class: 'cascade-row' + (r ? (r.avoidable ? ' avoid' : ' ok') : ' untracked'),
+            style: `padding-left:${depth * 14}px`,
+            onclick: r ? () => select(nodeOfReport(r), r) : null,
+          },
+          [
+            el('span', { class: 'tag' }, [el('span', { class: 'bracket', text: '<' }), el('span', { class: 'name', text: child.name }), el('span', { class: 'bracket', text: '>' })]),
+            r ? el('span', { class: 'verdict ' + (r.avoidable ? 'avoid' : 'ok'), text: r.avoidable ? 'avoidable' : r.trigger }) : el('span', { class: 'meta', text: 'did not render or untracked' }),
+            child.count && child.count > 1 ? el('span', { class: 'meta', text: ` ×${child.count}` }) : null,
+            r && r.avoidable ? el('span', { class: 'meta', text: ' ' + summarize(r) }) : null,
+          ],
+        );
+        cascade.append(line);
+        walk(child, depth + 1);
+      }
+    };
+    walk(cascadeTree(reports), 0);
+    body.append(el('div', { class: 'section' }, [el('h3', { text: 'Render cascade' }), cascade]));
+    if (a.fixes.length) {
+      body.append(el('div', { class: 'section-title', text: 'Fixes for this commit' }));
+      body.append(fixView(a.fixes, { copy: copyText }));
+    }
+  }
+
+  function affectedList(reports: Report[]): HTMLElement {
+    const list = el('ul', { class: 'history' });
+    for (const r of reports.slice().reverse()) {
+      list.append(
+        el('li', { onclick: () => select(nodeOfReport(r), r) }, [
+          el('span', { class: 't', text: fmtTime(r.receivedAt) }),
+          el('span', { class: 'comp', text: `<${r.component}>` }),
+          el('span', { class: 'sum', text: summarize(r) }),
+        ]),
+      );
+    }
+    return list;
+  }
+
+  function renderFixDetails(): void {
+    const fix = rankFixes(filteredReports()).find((f) => f.key === state.selectedFix);
+    if (!fix) {
+      details.append(el('div', { class: 'empty', text: 'Select a fix.' }));
+      return;
+    }
+    details.append(el('div', { class: 'details-header' }, [el('span', { class: 'title', text: fix.label }), el('span', { class: 'meta', text: `removes ${plural(fix.count, 'avoidable re-render')}` })]));
+    const body = el('div', { class: 'details-body' });
+    details.append(body);
+    body.append(fixView([fix], { copy: copyText }));
+    body.append(el('div', { class: 'section' }, [el('h3', { text: 'Affected re-renders' }), affectedList(fix.reports)]));
+  }
+
+  /** One root cause across every commit it started. */
+  function renderRootDetails(): void {
+    const name = state.selectedRoot!;
+    const s = rootCauseSummary(name, state.commits);
+    details.append(
+      el('div', { class: 'details-header' }, [
+        el('span', { class: 'title' }, ['Root cause ', el('span', { class: 'name', text: `<${name}>` })]),
+        el('span', { class: 'meta', text: s.commits.length ? `started ${plural(s.commits.length, 'commit')} with ${plural(s.total, 'avoidable re-render')} (${s.trigger})` : 'no commits in the buffer' }),
+      ]),
+    );
+    const body = el('div', { class: 'details-body' });
+    details.append(body);
+    if (!s.commits.length) return;
+    body.append(el('div', { class: 'section' }, [el('h3', { text: 'Components that re-rendered avoidably because of it' }), el('div', { class: 'meta', text: componentList(s.components) })]));
+    const list = el('ul', { class: 'commits root-commits' });
+    for (const c of s.commits) {
+      list.append(
+        el('li', { onclick: () => showCommit(c.key) }, [
+          el('span', { class: 'id', text: c.key > 0 ? `#${c.key}` : '—' }),
+          el('span', { class: 't', text: fmtTime(c.analysis.receivedAt) }),
+          el('span', { class: 'badge avoid', text: `${c.count} avoidable` }),
+          el('span', { class: 'root', text: componentList(c.components) }),
+        ]),
+      );
+    }
+    body.append(el('div', { class: 'section' }, [el('h3', { text: 'Commits' }), list]));
+    if (s.fixes.length) {
+      body.append(el('div', { class: 'section-title', text: 'Fixes' }));
+      body.append(fixView(s.fixes, { copy: copyText }));
+    }
+  }
+
+  // ---------- stream (virtualized) ----------
+  const itemEls = new WeakMap<Report, HTMLElement>();
+  const streamItems = virtualList<Report>(streamList, ITEM_H, (r) => {
+    let li = itemEls.get(r);
+    if (!li) {
+      li = el('div', { class: 'stream-item', onclick: () => select(nodeOfReport(r), r) }, [
+        el('span', { class: 't', text: fmtTime(r.receivedAt) }),
+        el('span', { class: 'c', text: r.component }),
+        el('span', { class: 'v ' + (r.avoidable ? 'avoid' : 'ok'), text: r.avoidable ? 'avoidable' : r.trigger }),
+        el('span', { class: 's', text: summarize(r) }),
+      ]);
+      itemEls.set(r, li);
+    }
+    return li;
+  });
+  let streamShown: Report[] = []; // newest first
+
+  /** Rebuild from state (filters, clear) or prepend a batch (live). */
+  function renderStream(batch?: Report[]): void {
+    if (batch) {
+      const fresh = batch.filter(passes).reverse();
+      if (fresh.length) streamShown = fresh.concat(streamShown);
+      if (streamShown.length > MAX_REPORTS) streamShown.length = MAX_REPORTS;
+    } else {
+      streamShown = filteredReports().reverse();
+    }
+    streamCount.textContent = plural(streamShown.length, 'report');
+    streamItems.setItems(streamShown);
+  }
+
+  // ---------- export / import ----------
+  function exportJson(): void {
+    const data = { rerenderLens: true, version: PROTOCOL, exportedAt: new Date().toISOString(), origin: state.origin, reports: state.reports };
+    const text = JSON.stringify(data, null, 2);
+    const name = `rerender-lens-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    if (transport.download) {
+      transport.download(name, text);
+      return;
+    }
+    try {
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = el('a', { href: url, download: name });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      copyText(text);
+    }
+  }
+
+  function importData(data: unknown): number {
+    const reports = Array.isArray(data) ? data : isRecord(data) && Array.isArray(data.reports) ? data.reports : null;
+    if (!reports) throw new Error('not a rerender-lens export');
+    clearAll();
+    let n = 0;
+    for (const p of reports) {
+      const r = normalizeReport(p);
+      if (r) {
+        enqueue(r);
+        n++;
+      }
+    }
+    flush();
+    toast(`Imported ${plural(n, 'report')}`);
+    return n;
+  }
+
+  function importFile(file: File): void {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        importData(JSON.parse(String(reader.result)));
+      } catch (e) {
+        toast(`Import failed: ${(e as Error).message}`);
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  // ---------- status / settings ----------
+  function renderStatus(): void {
+    const lib = state.library;
+    let text: string;
+    let cls = 'none';
+    let title = '';
+    if (lib) {
+      const react = lib.react && lib.react[0];
+      text = `connected · lib ${lib.library || '?'}${react && react.version ? ` · React ${react.version}` : ''}${lib.production ? ' (prod)' : ''}`;
+      cls = 'connected';
+      title = state.relay ? 'live via content script' : 'polling the page';
+    } else if (state.relay || state.polling) {
+      text = 'no library in page';
+      cls = 'partial';
+      title = 'rerender-lens is not running in this page';
+    } else {
+      text = 'no page';
+    }
+    status.className = 'status ' + cls;
+    status.title = title;
+    status.querySelector('.status-text')!.textContent = text;
+    banner.textContent = '';
+    const warnings: string[] = [];
+    if (lib && typeof lib.protocol === 'number' && lib.protocol !== PROTOCOL) {
+      warnings.push(
+        lib.protocol < PROTOCOL
+          ? `The page runs rerender-lens ${lib.library || ''} (protocol ${lib.protocol}); this panel expects protocol ${PROTOCOL}. Update the rerender-lens package for commit grouping, source links and settings.`
+          : `The page runs a newer rerender-lens (protocol ${lib.protocol}) than this panel (${PROTOCOL}). Update the extension.`,
+      );
+    }
+    if (lib && lib.production) warnings.push('Production React build detected: component names may be minified and hooks are unlabeled. Use a development build.');
+    if (lib && lib.injected && lib.source === 'page')
+      warnings.push(`The page runs its own rerender-lens ${lib.library || ''}; the copy injected by the extension stepped aside. Turn injection off for this origin in Settings to avoid loading the library twice.`);
+    if (lib && lib.enabled === false) warnings.push('rerender-lens is present but disabled in this page.');
+    banner.hidden = warnings.length === 0;
+    for (const w of warnings) banner.append(el('div', { text: w }));
+  }
+
+  function setRelay(on: boolean): void {
+    state.relay = on;
+    if (!on) state.library = null;
+    renderStatus();
+  }
+
+  function setLibrary(info: HelloPayload): void {
+    state.library = info;
+    renderStatus();
+    if (state.settingsOpen) void renderSettings();
+    if (state.flashOn) transport.flashAvoidable?.(true);
+  }
+
+  function toggleSettings(open?: boolean): void {
+    state.settingsOpen = open === undefined ? !state.settingsOpen : open;
+    settings.hidden = !state.settingsOpen;
+    settingsBtn.classList.toggle('active', state.settingsOpen);
+    if (state.settingsOpen) void renderSettings();
+  }
+
+  function optionRow(label: string, key: keyof SerializableOptions, current: SerializableOptions, onchange: (patch: SerializableOptions) => void): HTMLElement {
+    const input = el('input', { type: 'checkbox' });
+    input.checked = !!current[key];
+    input.addEventListener('change', () => onchange({ [key]: input.checked }));
+    return el('label', { class: 'opt' }, [input, label]);
+  }
+
+  async function renderSettings(): Promise<void> {
+    settings.textContent = '';
+    settings.append(el('div', { class: 'drawer-header' }, [el('b', { text: 'Settings' }), el('button', { onclick: () => toggleSettings(false) }, '✕')]));
+    const body = el('div', { class: 'drawer-body' });
+    settings.append(body);
+
+    // --- site ---
+    if (transport.originStatus) {
+      const site = el('div', { class: 'section' }, [el('h3', { text: 'This site' }), el('div', { class: 'meta', text: state.origin || '' })]);
+      body.append(site);
+      try {
+        const st = await transport.originStatus();
+        if (st) {
+          const enabled = el('input', { type: 'checkbox' });
+          enabled.checked = st.enabled;
+          enabled.disabled = st.builtIn;
+          const inject = el('input', { type: 'checkbox' });
+          inject.checked = st.inject;
+          inject.disabled = !st.enabled;
+          const defer = el('input', { type: 'checkbox' });
+          defer.checked = !!st.deferHook;
+          defer.disabled = !st.inject;
+          const msg = el('div', { class: 'meta' });
+          const apply = async (): Promise<void> => {
+            try {
+              if (enabled.checked && !st.permitted && transport.requestPermission) {
+                const ok = await transport.requestPermission();
+                if (!ok) {
+                  msg.textContent = 'Permission not granted. You can also enable the site from the toolbar icon.';
+                  enabled.checked = false;
+                  return;
+                }
+              }
+              await transport.setOrigin?.({ enabled: enabled.checked, inject: enabled.checked && inject.checked, deferHook: inject.checked && defer.checked });
+              void renderSettings();
+            } catch (e) {
+              msg.textContent = String((e as Error).message || e);
+            }
+          };
+          enabled.addEventListener('change', () => {
+            if (!enabled.checked) inject.checked = false;
+            void apply();
+          });
+          inject.addEventListener('change', () => void apply());
+          defer.addEventListener('change', () => void apply());
+          site.append(
+            el('label', { class: 'opt' }, [enabled, st.builtIn ? 'Enabled (local development host)' : 'Enable on this site']),
+            el('label', { class: 'opt' }, [inject, 'Inject the library into the page (no app code needed)']),
+            el('label', { class: 'opt', title: 'Only needed when React DevTools is installed and its Components tab comes up empty' }, [defer, 'Let React DevTools create the hook (if both are installed)']),
+            el('div', { class: 'meta', text: st.inject ? 'Injection is on. Reload the page after changing it.' : 'Without injection the page must call init({ notifier: createDevtoolsNotifier() }).' }),
+            msg,
+          );
+        }
+      } catch (e) {
+        site.append(el('div', { class: 'meta', text: String((e as Error).message || e) }));
+      }
+    }
+
+    // --- panel ---
+    const flash = el('input', { type: 'checkbox' });
+    flash.checked = state.flashOn;
+    flash.addEventListener('change', () => {
+      state.flashOn = flash.checked;
+      transport.flashAvoidable?.(state.flashOn);
+      persist();
+    });
+    body.append(
+      el('div', { class: 'section' }, [
+        el('h3', { text: 'Panel' }),
+        el('label', { class: 'opt' }, [flash, 'Flash avoidable re-renders in the page']),
+        el('div', { class: 'meta', text: 'Shortcuts: / search, f fix tab, Esc clear highlight, arrows in the tree.' }),
+      ]),
+    );
+
+    // --- library options ---
+    const lib = state.library;
+    const sec = el('div', { class: 'section' }, [el('h3', { text: 'Library options' })]);
+    body.append(sec);
+    if (!lib || !transport.configure) {
+      sec.append(el('div', { class: 'meta', text: 'Connect to a page running rerender-lens to change its options.' }));
+      return;
+    }
+    if (lib.protocol < PROTOCOL) {
+      sec.append(el('div', { class: 'meta', text: 'The page library is too old to be configured from here.' }));
+      return;
+    }
+    const current: SerializableOptions = Object.assign({}, lib.options || {});
+    const applyOptions = async (patch: SerializableOptions): Promise<void> => {
+      Object.assign(current, patch);
+      try {
+        const applied = await transport.configure!(patch);
+        if (applied && state.library) state.library.options = applied;
+        if (transport.storage && state.library) transport.storage.set('settings', Object.assign({}, state.library.options));
+        toast('Applied');
+      } catch (e) {
+        toast(`Failed: ${(e as Error).message}`);
+      }
+    };
+    sec.append(
+      optionRow('Track every React.memo / PureComponent', 'trackAllMemoized', current, applyOptions),
+      optionRow('Track every component (noisy)', 'trackAllComponents', current, applyOptions),
+      optionRow('Diff hook state and contexts', 'trackHooks', { trackHooks: current.trackHooks !== false }, applyOptions),
+      optionRow('Ignore Fast Refresh commits', 'ignoreHotReload', { ignoreHotReload: current.ignoreHotReload !== false }, applyOptions),
+      optionRow('Print to the page console', 'silent', { silent: !current.silent }, (p) => applyOptions({ silent: !p.silent })),
+      optionRow('Print genuine re-renders too (logAll)', 'logAll', current, applyOptions),
+    );
+    const listInput = (label: string, key: 'include' | 'exclude'): HTMLElement => {
+      const input = el('input', { type: 'text', placeholder: 'Name, /regex/, ...', value: (current[key] || []).join(', ') });
+      input.addEventListener('change', () => void applyOptions({ [key]: input.value.split(',').map((s) => s.trim()).filter(Boolean) }));
+      return el('label', { class: 'opt col' }, [label, input]);
+    };
+    sec.append(listInput('Include (display names)', 'include'), listInput('Exclude', 'exclude'));
+    const max = el('input', { type: 'number', min: '0', value: String(current.maxReportsPerComponent || 0) });
+    max.addEventListener('change', () => void applyOptions({ maxReportsPerComponent: Math.max(0, Number(max.value) || 0) }));
+    sec.append(el('label', { class: 'opt col' }, ['Stop printing a component after N reports (0 = never)', max]));
+  }
+
+  // ---------- transport ----------
+  function handle(message: Message): void {
+    if (!isRecord(message)) return;
+    switch (message.type) {
+      case 'connected':
+        setRelay(true);
+        break;
+      case 'disconnected':
+        setRelay(false);
+        break;
+      case 'polling':
+        state.polling = !!message.on;
+        renderStatus();
+        break;
+      case 'hello':
+        setLibrary(isRecord(message.payload) ? Object.assign({ protocol: message.version || 1 }, message.payload as unknown as HelloPayload) : { protocol: message.version || 1 });
+        break;
+      case 'clear':
+      case 'navigated':
+        clearAll();
+        if (message.type === 'navigated') {
+          state.library = null;
+          renderStatus();
+        }
+        break;
+      case 'report': {
+        if (state.paused) break;
+        const r = normalizeReport(message.payload);
+        if (r) enqueue(r);
+        break;
+      }
+    }
+  }
+
+  if (options.theme === 'dark') document.documentElement.classList.add('theme-dark');
+  state.origin = transport.origin || null;
+  setView(state.view);
+  renderDetails();
+  renderStream();
+  renderStatus();
+  if (transport.storage) {
+    Promise.resolve(transport.storage.get('panel')).then(restore, () => {});
+  }
+  transport.subscribe(handle);
+
+  return {
+    state,
+    handle,
+    flush,
+    clearAll,
+    importData,
+    select: (name: string) => {
+      for (const n of state.nodesByKey.values()) if (n.name === name) return select(n);
+    },
+    setView,
+    openSettings: () => toggleSettings(true),
+  };
+}
+
+// ---------- boot: extension ----------
+interface EvalError {
+  isException?: boolean;
+  isError?: boolean;
+  value?: string;
+  description?: string;
+}
+
+function bootExtension(): void {
+  const tabId = chrome.devtools.inspectedWindow.tabId;
+  let listener: ((m: Message) => void) | null = null;
+  let relayConnected = false;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let since = 0;
+  const evalIn = <T = unknown>(code: string): Promise<T> =>
+    new Promise((resolve, reject) =>
+      chrome.devtools.inspectedWindow.eval(code, (result: unknown, err?: EvalError) => {
+        if (err && (err.isException || err.isError)) reject(new Error(err.value || err.description || 'eval failed'));
+        else resolve(result as T);
+      }),
+    );
+  const bridge = <T = unknown>(expr: string): Promise<T | null> =>
+    evalIn<T | null | { __error: string }>(`(function(){var b=window.__RERENDER_LENS_DEVTOOLS__;if(!b)return null;try{return (${expr});}catch(e){return {__error:String(e)}}})()`).then((r) => {
+      if (isRecord(r) && typeof r.__error === 'string') throw new Error(r.__error);
+      return r as T | null;
+    });
+  const send = <T = unknown>(message: unknown): Promise<T> =>
+    new Promise((resolve, reject) =>
+      chrome.runtime.sendMessage(message, (res: { ok?: boolean; result?: T; error?: string } | undefined) => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else if (!res || !res.ok) reject(new Error((res && res.error) || 'no response'));
+        else resolve(res.result as T);
+      }),
+    );
+  let origin: string | null = null;
+  let panelPort: chrome.runtime.Port | null = null;
+  const emit = (m: Message): void => {
+    if (listener) listener(m);
+  };
+
+  async function resolveOrigin(): Promise<void> {
+    try {
+      origin = await evalIn<string>('location.origin');
+    } catch {
+      origin = null;
+    }
+    transport.origin = origin;
+  }
+
+  /** Ask the page for its hello and, when the relay is down, poll `pull()` for reports. */
+  async function syncWithPage(): Promise<boolean> {
+    try {
+      const info = await bridge<HelloPayload>('b.info?b.info():{count:b.size,protocol:b.version}');
+      if (info) {
+        emit({ type: 'hello', version: info.protocol || 1, payload: info });
+        return true;
+      }
+    } catch {
+      /* page not ready */
+    }
+    return false;
+  }
+
+  interface PullResult {
+    seq: number;
+    reports: unknown[];
+    dropped: boolean;
+  }
+
+  async function pollOnce(): Promise<void> {
+    try {
+      const res = await bridge<PullResult>(`b.pull?b.pull(${since}):null`);
+      if (!res) return;
+      if (res.dropped) emit({ type: 'clear' });
+      for (const p of res.reports) emit({ type: 'report', payload: p });
+      since = res.seq;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function setPolling(on: boolean): void {
+    if (on && !pollTimer) {
+      pollTimer = setInterval(() => void pollOnce(), 500);
+      emit({ type: 'polling', on: true });
+    } else if (!on && pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      emit({ type: 'polling', on: false });
+    }
+  }
+
+  const transport: Transport = {
+    origin,
+    subscribe(fn) {
+      listener = fn;
+      connect();
+      chrome.devtools.network.onNavigated.addListener(() => {
+        since = 0;
+        fn({ type: 'navigated' });
+        void resolveOrigin().then(() => {
+          setTimeout(async () => {
+            if (relayConnected) bridge('b.replay()').catch(() => {});
+            else if (await syncWithPage()) setPolling(true);
+          }, 1200);
+        });
+      });
+      void resolveOrigin().then(async () => {
+        // Late panel: the relay (if any) buffered nothing, so ask the page to replay; otherwise start polling.
+        if (!(await syncWithPage())) return;
+        if (relayConnected) bridge('b.replay()').catch(() => {});
+        else {
+          const res = await bridge<PullResult>('b.pull?b.pull(0):null').catch(() => null);
+          if (res) {
+            for (const p of res.reports) emit({ type: 'report', payload: p });
+            since = res.seq;
+          } else bridge('b.replay()').catch(() => {});
+          setPolling(true);
+        }
+      });
+    },
+    replay() {
+      if (relayConnected) bridge('b.replay()').catch(() => {});
+      else {
+        since = 0;
+        emit({ type: 'clear' });
+        void syncWithPage().then(() => pollOnce());
+      }
+    },
+    clear() {
+      bridge('b.clear()').catch(() => {});
+      since = 0;
+    },
+    configure: (options) => bridge<SerializableOptions>(`b.configure(${JSON.stringify(options)})`).then((r) => r ?? undefined),
+    highlight: (id) => bridge(`b.highlight(${id === null ? 'null' : Number(id)})`).catch(() => {}),
+    flashAvoidable: (on) => bridge(`b.flashAvoidable(${!!on})`).catch(() => {}),
+    openResource(url, line, col) {
+      if (chrome.devtools.panels.openResource) chrome.devtools.panels.openResource(url, Math.max(0, (line || 1) - 1), Math.max(0, (col || 1) - 1), () => {});
+    },
+    originStatus: () => (origin ? send<OriginStatus>({ type: 'origin:status', origin }) : Promise.resolve(null)),
+    setOrigin: (cfg) => send({ type: 'origin:set', origin, enabled: cfg.enabled, inject: cfg.inject, deferHook: cfg.deferHook }),
+    requestPermission: () => chrome.permissions.request({ origins: [origin + '/*'] }),
+    storage: {
+      get: (key) => new Promise((resolve) => chrome.storage.local.get(`${key}:${origin}`, (got) => resolve(got ? got[`${key}:${origin}`] : undefined))),
+      set: (key, value) => new Promise<void>((resolve) => chrome.storage.local.set({ [`${key}:${origin}`]: value }, resolve)),
+    },
+    badge(count) {
+      if (panelPort) panelPort.postMessage({ type: 'badge', count });
+    },
+    copy: (text) => navigator.clipboard.writeText(text).catch(() => {}),
+  };
+
+  function connect(): void {
+    const port = chrome.runtime.connect({ name: 'rerender-lens-panel' });
+    panelPort = port;
+    port.postMessage({ type: 'init', tabId });
+    port.onMessage.addListener((m: Message) => {
+      if (!m) return;
+      if (m.type === 'connected') {
+        relayConnected = true;
+        setPolling(false);
+      } else if (m.type === 'disconnected') {
+        relayConnected = false;
+        void syncWithPage().then((ok) => ok && setPolling(true));
+      }
+      emit(m);
+    });
+    port.onDisconnect.addListener(() => {
+      panelPort = null;
+      setTimeout(connect, 1000);
+    });
+  }
+  const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = chrome.devtools.panels.themeName === 'dark' || prefersDark ? 'dark' : 'light';
+  createPanel(document.getElementById('root')!, transport, { theme });
+}
+
+// ---------- boot: demo ----------
+function sampleReports(): Record<string, unknown>[] {
+  const fn = (name: string): string => FN_PREFIX + name;
+  return [
+    {
+      component: 'ProductRow', path: ['App', 'ProductPage', 'ProductList'], trigger: 'parent', avoidable: true, renderCount: 1, instanceId: 4, commitId: 1, memoized: true,
+      owner: 'ProductList', parent: { name: 'ProductPage', trigger: 'state' }, selfDuration: 0.8, treeDuration: 1.1,
+      source: { fileName: 'http://localhost:5199/src/ProductList.tsx', lineNumber: 14, columnNumber: 7 },
+      props: {
+        prev: { product: { id: 1, name: 'Keyboard', price: 49 }, style: { color: 'red' }, onSelect: fn('onSelect'), selected: false },
+        next: { product: { id: 1, name: 'Keyboard', price: 49 }, style: { color: 'red' }, onSelect: fn('onSelect'), selected: false },
+      },
+      propChanges: [
+        { path: 'style', kind: 'deep-equal', prev: { color: 'red' }, next: { color: 'red' } },
+        { path: 'onSelect', kind: 'function', prev: fn('onSelect'), next: fn('onSelect') },
+      ],
+      stateChanges: [], hookChanges: [],
+      reasons: [
+        'caused by <ProductPage> re-rendering (its state changed).',
+        'prop "style" is a new reference but deep-equal to the previous value: memoize the object with useMemo, or hoist it to module scope if it is constant.',
+        'prop "onSelect" is a new function instance on every render: wrap it in useCallback (or hoist it out of the parent\'s render).',
+      ],
+    },
+    {
+      component: 'Toolbar', path: ['App', 'ProductPage'], trigger: 'parent', avoidable: true, renderCount: 1, instanceId: 2, commitId: 1, memoized: false,
+      owner: 'ProductPage', parent: { name: 'ProductPage', trigger: 'state' }, selfDuration: 0.3,
+      props: { prev: { title: 'Products', count: 3 }, next: { title: 'Products', count: 3 } }, propChanges: [], stateChanges: [], hookChanges: [],
+      reasons: ['re-rendered with identical props because <ProductPage> re-rendered (its state changed). Wrap "Toolbar" in React.memo (or extend PureComponent).'],
+    },
+    {
+      component: 'ProductPage', path: ['App'], trigger: 'state', avoidable: false, renderCount: 1, instanceId: 3, commitId: 1, memoized: false,
+      owner: 'App', parent: null,
+      props: { prev: { placeholder: 'Search', filters: { sort: 'asc', page: 1 } }, next: { placeholder: 'Search', filters: { sort: 'asc', page: 2 } } },
+      propChanges: [{ path: 'filters', kind: 'different', prev: { sort: 'asc', page: 1 }, next: { sort: 'asc', page: 2 } }], stateChanges: [],
+      hookChanges: [{ path: 'useState#0', hook: 'useState', index: 0, kind: 'different', prev: 'ab', next: 'abc' }], reasons: ['useState #0 changed.'],
+    },
+    {
+      component: 'Sidebar', path: ['App'], trigger: 'hooks', avoidable: false, renderCount: 1, instanceId: 5, owner: 'App', parent: null, commitId: 2, memoized: true,
+      props: { prev: {}, next: {} }, propChanges: [], stateChanges: [],
+      hookChanges: [{ path: 'useContext(Theme)', hook: 'useContext', index: 0, kind: 'different', prev: 'light', next: 'dark' }], reasons: ['useContext #0 changed.'],
+    },
+  ];
+}
+
+/** `?demo&flood=N`: N synthetic reports over ~N/10 components in a deep tree, for scale testing. */
+function floodReports(n: number): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  const components = Math.max(10, Math.floor(n / 10));
+  for (let i = 0; i < n; i++) {
+    const id = i % components;
+    const depth = 1 + (id % 6);
+    const path = ['App'];
+    for (let d = 1; d < depth; d++) path.push(`Section${(id * 7 + d) % 40}`);
+    const avoidable = id % 3 !== 0;
+    out.push({
+      component: `Item${id}`, path, trigger: avoidable ? 'parent' : 'props', avoidable, renderCount: Math.floor(i / components) + 1, instanceId: id + 1, commitId: Math.floor(i / 50) + 1,
+      memoized: id % 2 === 0, owner: path[path.length - 1], parent: { name: path[path.length - 1], trigger: 'state' }, selfDuration: (id % 7) / 10,
+      props: { prev: { style: { w: id }, n: i }, next: { style: { w: id }, n: i + (avoidable ? 0 : 1) } },
+      propChanges: avoidable ? [{ path: 'style', kind: 'deep-equal', prev: { w: id }, next: { w: id } }] : [{ path: 'n', kind: 'different', prev: i, next: i + 1 }],
+      stateChanges: [], hookChanges: [], reasons: [avoidable ? 'prop "style" is a new reference but deep-equal to the previous value.' : 'prop "n" changed.'],
+    });
+  }
+  return out;
+}
+
+function bootDemo(): void {
+  const params = new URLSearchParams(location.search);
+  const flood = Number(params.get('flood') || 0);
+  const sample = sampleReports();
+  let i = 0;
+  let commit = 0;
+  const mem: Record<string, unknown> = {};
+  const transport: Transport = {
+    origin: 'http://localhost:5199',
+    subscribe(fn) {
+      fn({ type: 'connected' });
+      fn({ type: 'hello', version: PROTOCOL, payload: { count: 0, library: 'demo', protocol: PROTOCOL, react: [{ version: '19.2.0', bundleType: 1 }], production: false, enabled: true, options: { trackAllMemoized: true, silent: true }, source: 'page', injected: false } });
+      if (flood > 0) {
+        const t0 = performance.now();
+        for (const r of floodReports(flood)) fn({ type: 'report', payload: r });
+        requestAnimationFrame(() => console.log(`[rerender-lens demo] ${flood} reports ingested and rendered in ${(performance.now() - t0).toFixed(0)} ms`));
+        return;
+      }
+      const tick = (): void => {
+        const r = JSON.parse(JSON.stringify(sample[i % sample.length])) as Record<string, unknown>;
+        r.renderCount = Math.floor(i / sample.length) + 1;
+        if (i % sample.length === 0) commit++;
+        r.commitId = commit + (r.commitId === 2 ? 100 : 0);
+        fn({ type: 'report', payload: r });
+        i++;
+        if (i < 14) setTimeout(tick, i < 4 ? 50 : 900);
+      };
+      tick();
+    },
+    replay() {},
+    clear() {},
+    configure: (o) => Promise.resolve(o),
+    highlight() {},
+    flashAvoidable() {},
+    originStatus: () => Promise.resolve({ origin: 'http://localhost:5199', builtIn: true, permitted: true, enabled: true, inject: false, deferHook: false }),
+    setOrigin: () => Promise.resolve(),
+    storage: { get: (k) => Promise.resolve(mem[k]), set: (k, v) => Promise.resolve((mem[k] = v)) },
+  };
+  const dark = /theme=dark/.test(location.search) || (typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches);
+  createPanel(document.getElementById('root')!, transport, { theme: dark ? 'dark' : 'light' });
+}
+
+const api = {
+  PROTOCOL,
+  createPanel,
+  summarize,
+  valueNode,
+  reportView,
+  fixView,
+  normalizeReport,
+  reportToMarkdown,
+  sampleReports,
+  floodReports,
+  analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary },
+};
+window.RerenderLensPanel = api;
+
+const hasDevtools = typeof chrome !== 'undefined' && !!chrome && !!chrome.devtools && !!chrome.devtools.inspectedWindow;
+if (hasDevtools && /panel\.html/.test(String(location && location.pathname))) bootExtension();
+else if (typeof location !== 'undefined' && /[?&]demo/.test(location.search)) bootDemo();
