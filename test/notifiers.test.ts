@@ -49,7 +49,7 @@ describe('serialize', () => {
       inst: new (class Foo { v = 1; })(),
     }) as Record<string, unknown>;
     expect(out.fn).toBe('ƒ handler');
-    expect(out.el).toBe('<El>');
+    expect(out.el).toMatchObject({ $type: 'element', name: 'El' });
     expect(out.date).toEqual({ $type: 'Date', value: '1970-01-01T00:00:00.000Z' });
     expect(out.map).toEqual({ $type: 'Map', entries: [['k', 1]] });
     expect(out.set).toEqual({ $type: 'Set', values: [1] });

@@ -34,6 +34,9 @@ export interface HelloPayload {
   source: 'page' | 'extension';
   /** True when the extension injected a copy of the library into this page (whether or not it is the active one). */
   injected: boolean;
+  /** Roots React scheduled (dev builds) and commits observed since `init`; the gap is work that never committed. */
+  scheduled: number;
+  commits: number;
 }
 
 declare global {
@@ -130,7 +133,13 @@ export function serialize(value: unknown, maxDepth = 6, seen: WeakSet<object> = 
   if (depth >= maxDepth) return '[…]';
   seen.add(obj);
   try {
-    if (isReactElement(obj)) return `<${getDisplayName(obj.type)}>`;
+    if (isReactElement(obj)) {
+      // Keep the props so the panel can diff element trees (children) leaf by leaf.
+      const out: Record<string, unknown> = { $type: 'element', name: getDisplayName(obj.type) };
+      if (obj.key !== null && obj.key !== undefined) out.key = String(obj.key);
+      out.props = serialize(obj.props, maxDepth, seen, depth + 1);
+      return out;
+    }
     if (obj instanceof Date) return { $type: 'Date', value: obj.toISOString() };
     if (obj instanceof RegExp) return { $type: 'RegExp', value: String(obj) };
     if (obj instanceof Map) {
@@ -220,6 +229,8 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     options: serializeOptions(getState().options),
     source,
     injected: typeof window !== 'undefined' && typeof window.__RERENDER_LENS_INJECTED__ === 'string',
+    scheduled: getState().scheduled,
+    commits: getState().commits,
   });
 
   const bridge: DevtoolsBridge = {

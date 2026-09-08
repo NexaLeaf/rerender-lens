@@ -3,7 +3,7 @@
  * hook, exactly like React DevTools itself. Element types are never touched, so
  * Fast Refresh, memo comparators and component identity all stay intact.
  */
-import type { Change, HookChange, ParentInfo, RenderTrigger, SourceLocation } from './types';
+import type { Change, CommitPriority, HookChange, ParentInfo, RenderTrigger, SourceLocation } from './types';
 import { classify, diffRecords } from './diff';
 import { buildReport } from './report';
 import { dispatch, getState, warnOnce } from './state';
@@ -14,6 +14,7 @@ const FunctionComponent = 0;
 const ClassComponent = 1;
 const HostRoot = 3;
 const HostComponent = 5;
+const ContextProvider = 10;
 const ForwardRef = 11;
 const MemoComponent = 14;
 const SimpleMemoComponent = 15;
@@ -141,16 +142,42 @@ export function attach(): () => void {
   const previous = hook.onCommitFiberRoot;
   const patched: DevtoolsHook['onCommitFiberRoot'] = function (this: unknown, id, root, priority, didError) {
     try {
-      onCommit(root);
+      onCommit(root, priorityLabel(priority));
     } catch (err) {
       warnOnce('commit', `failed to inspect a commit: ${String(err)}`);
     }
     if (typeof previous === 'function') return previous.call(this, id, root, priority, didError);
   };
   hook.onCommitFiberRoot = patched;
+  // Dev builds announce every scheduled root; compared with commits it shows work that never committed.
+  const previousSchedule = hook.onScheduleFiberRoot;
+  const patchedSchedule: DevtoolsHook['onScheduleFiberRoot'] = function (this: unknown, id, root, children) {
+    getState().scheduled++;
+    if (typeof previousSchedule === 'function') return previousSchedule.call(this, id, root, children);
+  };
+  hook.onScheduleFiberRoot = patchedSchedule;
   return () => {
     if (hook.onCommitFiberRoot === patched) hook.onCommitFiberRoot = previous;
+    if (hook.onScheduleFiberRoot === patchedSchedule) hook.onScheduleFiberRoot = previousSchedule;
   };
+}
+
+/** React passes a Scheduler priority (1 immediate ... 5 idle) as the third argument of `onCommitFiberRoot`. */
+export function priorityLabel(priority: unknown): CommitPriority | undefined {
+  switch (priority) {
+    case 1:
+      return 'immediate';
+    case 2:
+      return 'user-blocking';
+    case 3:
+      return 'normal';
+    case 4:
+      return 'low';
+    case 5:
+      return 'idle';
+    default:
+      return undefined;
+  }
 }
 
 /** The renderers React registered on the hook (version and dev/prod bundle type). */
@@ -393,6 +420,21 @@ function diffHooks(fiber: Fiber, alt: Fiber): HookChange[] {
   return out;
 }
 
+/** The nearest ancestor Provider fiber of `context` (React <= 18: `type._context`; React 19: the context object itself is the provider type). */
+export function findProvider(fiber: Fiber, context: unknown): Fiber | null {
+  let f: Fiber | null = fiber.return;
+  while (f && f.tag !== HostRoot) {
+    if (f.tag === ContextProvider) {
+      const t = f.type as { _context?: unknown } | null;
+      if (t === context || (t && typeof t === 'object' && t._context === context)) return f;
+    }
+    f = f.return;
+  }
+  return null;
+}
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
+
 /** Diff the contexts this fiber reads. */
 function diffContexts(fiber: Fiber, alt: Fiber): HookChange[] {
   const out: HookChange[] = [];
@@ -402,14 +444,27 @@ function diffContexts(fiber: Fiber, alt: Fiber): HookChange[] {
   while (a && b) {
     if (a.context === b.context && !Object.is(a.memoizedValue, b.memoizedValue)) {
       const name = b.context.displayName ?? 'Context';
-      out.push({
+      const change: HookChange = {
         path: `useContext(${name})`,
         hook: 'useContext',
         index: i,
         kind: classify(a.memoizedValue, b.memoizedValue),
         prev: a.memoizedValue,
         next: b.memoizedValue,
-      });
+      };
+      const provider = findProvider(fiber, b.context);
+      if (provider) {
+        const path = componentPath(provider);
+        change.provider = { component: path[path.length - 1] ?? null, path };
+      }
+      if (isPlainObject(a.memoizedValue) && isPlainObject(b.memoizedValue)) {
+        const prev = a.memoizedValue;
+        const next = b.memoizedValue;
+        const keys = new Set([...Object.keys(prev), ...Object.keys(next)]);
+        change.changedKeys = [...keys].filter((k) => !Object.is(prev[k], next[k]));
+        change.totalKeys = keys.size;
+      }
+      out.push(change);
     }
     a = a.next;
     b = b.next;
@@ -469,9 +524,10 @@ function nearestRenderedAncestor(fiber: Fiber, cache: Map<Fiber, ParentInfo | nu
 }
 
 /** Inspect one committed root. */
-export function onCommit(root: FiberRoot): void {
+export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void {
   const s = getState();
   if (!s.enabled) return;
+  s.commits++;
   const o = s.options;
   const trackHooks = o.trackHooks !== false;
 
@@ -517,6 +573,7 @@ export function onCommit(root: FiberRoot): void {
       selfDuration: durations ? durations.self : undefined,
       treeDuration: durations ? durations.tree : undefined,
       commitId,
+      commitPriority,
       source: sourceOf(fiber),
     });
     dispatch(report);

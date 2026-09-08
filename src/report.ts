@@ -1,4 +1,4 @@
-import type { Change, HookChange, Options, ParentInfo, RenderReport, RenderTrigger, SourceLocation } from './types';
+import type { Change, CommitPriority, HookChange, Options, ParentInfo, RenderReport, RenderTrigger, SourceLocation } from './types';
 
 const now = (): number =>
   typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
@@ -20,12 +20,19 @@ export interface BuildInput {
   selfDuration?: number;
   treeDuration?: number;
   commitId?: number;
+  commitPriority?: CommitPriority;
   source?: SourceLocation;
 }
 
 const isGenuine = (c: Change): boolean => c.kind === 'different' || c.kind === 'added' || c.kind === 'removed';
 
+/** `children` re-created in the parent's render: the classic memo-defeater, with its own advice. */
+const isChildren = (change: Change): boolean => change.path === 'children';
+
 export function fixFor(change: Change): string {
+  if (isChildren(change) && (change.kind === 'element' || change.kind === 'deep-equal')) {
+    return `lift the children out of the parent's render: memoize them with useMemo, hoist static elements to module scope, or render them from a component that does not re-render`;
+  }
   switch (change.kind) {
     case 'function':
       return `wrap it in useCallback (or hoist it out of the parent's render)`;
@@ -41,6 +48,9 @@ export function fixFor(change: Change): string {
 }
 
 function describe(change: Change): string {
+  if (isChildren(change) && (change.kind === 'element' || change.kind === 'deep-equal')) {
+    return `children are new React elements with the same types and props on every render of the parent`;
+  }
   switch (change.kind) {
     case 'deep-equal':
       return `prop "${change.path}" is a new reference but deep-equal to the previous value`;
@@ -95,7 +105,14 @@ export function buildReport(input: BuildInput): RenderReport {
     else reasons.push(`setState was called with a value deep-equal to the current "${c.path}" (new reference, same contents).`);
   }
   for (const c of hookChanges) {
-    if (isGenuine(c)) reasons.push(`${c.hook} #${c.index} changed.`);
+    if (c.hook === 'useContext' && isGenuine(c)) {
+      const where = c.provider && c.provider.component ? ` (provided by <${c.provider.component}>)` : '';
+      const keys =
+        c.changedKeys && typeof c.totalKeys === 'number' && c.changedKeys.length > 0 && c.changedKeys.length < c.totalKeys
+          ? `: only ${c.changedKeys.map((k) => `"${k}"`).join(', ')} of ${c.totalKeys} keys changed, yet every consumer re-renders. Split the context or memoize the slices consumers read`
+          : '';
+      reasons.push(`${c.path} changed${where}${keys}.`);
+    } else if (isGenuine(c)) reasons.push(`${c.hook} #${c.index} changed.`);
     else if (isStateHook(c))
       reasons.push(`${c.hook} #${c.index} was set to a value deep-equal to the current one (new reference, same contents): reuse the existing object or bail out before calling the setter.`);
     else reasons.push(`${c.hook} #${c.index} returned a new reference that is deep-equal to the previous value: memoize the context/store value where it is produced.`);
@@ -121,6 +138,7 @@ export function buildReport(input: BuildInput): RenderReport {
   };
   if (input.selfDuration !== undefined) report.selfDuration = input.selfDuration;
   if (input.treeDuration !== undefined) report.treeDuration = input.treeDuration;
+  if (input.commitPriority) report.commitPriority = input.commitPriority;
   if (input.source) report.source = input.source;
   return report;
 }

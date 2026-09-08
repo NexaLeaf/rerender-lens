@@ -11,6 +11,9 @@ export interface LensState {
   nextInstanceId: number;
   nextCommitId: number;
   warnedOnce: Set<string>;
+  /** Roots React scheduled work for (dev only, via `onScheduleFiberRoot`) and commits observed. Their gap hints at renders that never committed. */
+  scheduled: number;
+  commits: number;
 }
 
 const KEY = Symbol.for('rerender-lens.state');
@@ -20,7 +23,7 @@ export function getState(): LensState {
   const g = globalThis as unknown as Record<symbol, LensState | undefined>;
   let s = g[KEY];
   if (!s) {
-    s = { options: {}, enabled: false, printed: new Map(), detach: null, nextInstanceId: 1, nextCommitId: 1, warnedOnce: new Set() };
+    s = { options: {}, enabled: false, printed: new Map(), detach: null, nextInstanceId: 1, nextCommitId: 1, warnedOnce: new Set(), scheduled: 0, commits: 0 };
     g[KEY] = s;
   }
   return s;

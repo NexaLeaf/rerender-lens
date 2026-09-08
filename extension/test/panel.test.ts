@@ -38,7 +38,7 @@ const report = (over: Record<string, unknown> = {}) => ({
 });
 
 interface Panel {
-  state: { reports: unknown[]; selectedKey: string | null; paused: boolean; view: string; tab: string; library: unknown; relay: boolean; flashOn: boolean };
+  state: { reports: unknown[]; selectedKey: string | null; paused: boolean; view: string; tab: string; library: unknown; relay: boolean; flashOn: boolean; recording: unknown; sessions: { name: string }[] };
   handle(m: unknown): void;
   flush(): void;
   select(name: string): void;
@@ -46,6 +46,8 @@ interface Panel {
   setView(v: string): void;
   importData(d: unknown): number;
   openSettings(): void;
+  startRecording(name?: string): { id: string; name: string };
+  stopRecording(): { id: string; name: string; avoidable: number; fixes: { label: string }[] } | null;
 }
 interface Fix { kind: string; owner: string; prop: string | null; label: string; detail: string; snippet: string; count?: number; key?: string }
 interface Factory {
@@ -141,7 +143,7 @@ describe('devtools panel', () => {
   });
 
   it('toolbar buttons keep their labels; undock buttons appear only with a transport that supports it', () => {
-    expect([...root.querySelectorAll('.toolbar .ib .label')].map((l) => l.textContent)).toEqual(['Pause', 'Clear', 'Replay', 'Export', 'Import', 'Settings']);
+    expect([...root.querySelectorAll('.toolbar .ib .label')].map((l) => l.textContent)).toEqual(['Pause', 'Clear', 'Replay', 'Record', 'Export', 'Import', 'Settings']);
     const calls: unknown[] = [];
     panel = factory.createPanel(root, makeTransport({ undock: (mode: string) => (calls.push(mode), Promise.resolve()) }));
     const labels = [...root.querySelectorAll('.toolbar .ib .label')].map((l) => l.textContent);
@@ -513,6 +515,128 @@ describe('scale and navigation', () => {
     panel.clearAll();
     expect(panel.state.tab).toBe('latest');
     expect(root.querySelector('.details .empty')!.textContent).toBe('Select a component to see why it re-rendered.');
+  });
+});
+
+describe('sessions and deeper analysis', () => {
+  let factory: Factory;
+  let root: HTMLElement;
+  let panel: Panel;
+  let store: Record<string, unknown>;
+  const send = (m: unknown) => {
+    panel.handle(m);
+    panel.flush();
+  };
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="root"></div>';
+    root = document.getElementById('root')!;
+    const w = window as unknown as Record<string, unknown>;
+    delete w.RerenderLensPanel;
+    new Function('window', 'document', 'chrome', source)(window, document, undefined);
+    factory = w.RerenderLensPanel as Factory;
+    store = {};
+    panel = factory.createPanel(root, makeTransport({ storage: { get: (k: string) => Promise.resolve(store[k]), set: (k: string, v: unknown) => Promise.resolve((store[k] = v)) } }));
+  });
+
+  it('records two sessions and compares them: per-component deltas, totals, resolved fixes; summaries persist', async () => {
+    const recordBtn = button(root, '.toolbar .ib', 'Record');
+    recordBtn.click();
+    expect(panel.state.recording).not.toBeNull();
+    expect(recordBtn.querySelector('.label')!.textContent).toBe('Stop');
+    send({ type: 'report', payload: report({ selfDuration: 1 }) });
+    send({ type: 'report', payload: report({ renderCount: 2, selfDuration: 1 }) });
+    send({ type: 'report', payload: report({ component: 'Toolbar', path: ['App'], owner: 'App', propChanges: [] }) });
+    const first = panel.stopRecording()!;
+    expect(first.avoidable).toBe(3);
+    expect(first.fixes.map((f) => f.label)).toEqual(['useMemo(style) in <List>', 'Wrap <Toolbar> in React.memo']);
+    await new Promise((r) => setTimeout(r, 0));
+    expect((store.sessions as unknown[]).length).toBe(1);
+
+    // "after the fix": Row no longer re-renders, Toolbar still does
+    panel.startRecording('After memo');
+    send({ type: 'report', payload: report({ component: 'Toolbar', path: ['App'], owner: 'App', propChanges: [], renderCount: 2 }) });
+    send({ type: 'report', payload: report({ component: 'Row', avoidable: false, trigger: 'props', propChanges: [{ path: 'n', kind: 'different', prev: 1, next: 2 }] }) });
+    const second = panel.stopRecording()!;
+    expect(second.name).toBe('After memo');
+    expect(second.avoidable).toBe(1);
+
+    panel.setView('sessions');
+    const items = [...root.querySelectorAll('.sessions li')];
+    expect(items.map((li) => li.querySelector('.name')!.textContent)).toEqual(['After memo', 'Session 1']);
+    (items[0] as HTMLElement).click();
+    expect(panel.state.tab).toBe('session');
+    expect((root.querySelector('.session-name') as HTMLInputElement).value).toBe('After memo');
+    // baseline defaults to the previous session
+    const select = root.querySelector('.compare-select') as HTMLSelectElement;
+    expect(select.value).toBe(first.id);
+    const rows = [...root.querySelectorAll('.compare-grid tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent));
+    expect(rows[0]).toEqual(['All components', '3', '1', '-2']);
+    expect(rows[1]).toEqual(['Wasted time', '2.0 ms', '0.0 ms', '-2.0 ms']);
+    expect(rows.slice(2)).toEqual([
+      ['Row', '2', '0', '-2'],
+      ['Toolbar', '1', '1', '±0'],
+    ]);
+    expect(root.querySelector('.compare .meta b')!.textContent).toBe('No longer needed: ');
+    expect(root.querySelector('.compare')!.textContent).toContain('useMemo(style) in <List>');
+    // rename persists
+    const name = root.querySelector('.session-name') as HTMLInputElement;
+    name.value = 'Fixed rows';
+    name.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect((store.sessions as { name: string }[]).map((s) => s.name)).toEqual(['Session 1', 'Fixed rows']);
+    // a fresh panel restores the summaries and can still compare
+    document.body.innerHTML = '<div id="root"></div>';
+    const again = factory.createPanel(document.getElementById('root')!, makeTransport({ storage: { get: (k: string) => Promise.resolve(store[k]), set: (k: string, v: unknown) => Promise.resolve((store[k] = v)) } }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(again.state.sessions.map((s) => s.name)).toEqual(['Session 1', 'Fixed rows']);
+  });
+
+  it('shows provider attribution and split advice for partial context changes', () => {
+    send({
+      type: 'report',
+      payload: report({
+        component: 'Themed', path: ['App', 'Shell'], avoidable: false, trigger: 'hooks', propChanges: [],
+        hookChanges: [{ path: 'useContext(Theme)', hook: 'useContext', index: 0, kind: 'different', prev: { mode: 'a', user: 'x' }, next: { mode: 'b', user: 'x' }, provider: { component: 'App', path: ['App'] }, changedKeys: ['mode'], totalKeys: 2 }],
+      }),
+    });
+    panel.setView('fixes');
+    const ctx = root.querySelector('.contexts li')!;
+    expect(ctx.textContent).toContain('Theme (provided by <App>)');
+    expect(ctx.querySelector('.hint')!.textContent).toContain('only mode of 2 keys changed');
+    const fixes = factory.analysis.fixesFor(report({ component: 'Themed', avoidable: false, trigger: 'hooks', propChanges: [], hookChanges: [{ path: 'useContext(Theme)', hook: 'useContext', index: 0, kind: 'different', prev: {}, next: {}, provider: { component: 'App', path: ['App'] }, changedKeys: ['mode'], totalKeys: 2 }] }));
+    expect(fixes.map((f) => [f.kind, f.owner, f.label])).toEqual([['splitContext', 'App', 'split Theme in <App>: only mode changed']]);
+    // no advice when every key changed
+    expect(factory.analysis.fixesFor(report({ avoidable: false, trigger: 'hooks', propChanges: [], hookChanges: [{ path: 'useContext(Theme)', hook: 'useContext', index: 0, kind: 'different', prev: {}, next: {}, changedKeys: ['a', 'b'], totalKeys: 2 }] }))).toEqual([]);
+  });
+
+  it('renders serialized elements with props, diffs children leaf by leaf, and suggests memoizing children', () => {
+    const em = (text: string) => ({ $type: 'element', name: 'em', props: { className: 'x', children: text } });
+    const node = factory.valueNode(em('hi'));
+    expect(node.querySelector('summary')!.textContent).toBe('<em>');
+    expect(factory.valueNode({ $type: 'element', name: 'Icon', key: 'k', props: {} }).textContent).toBe('<Icon key="k">');
+    send({
+      type: 'report',
+      payload: report({
+        component: 'Box', avoidable: false, trigger: 'props',
+        props: { prev: { children: [em('hi')] }, next: { children: [em('hey')] } },
+        propChanges: [{ path: 'children', kind: 'different', prev: [em('hi')], next: [em('hey')] }],
+      }),
+    });
+    panel.select('Box');
+    expect(root.querySelector('.kv tr.changed .kind')!.textContent).toBe('changed at children[0].props.children');
+    expect([...root.querySelectorAll('.kv.leaves td.k')].map((n) => n.textContent)).toEqual(['children[0].props.children']);
+    const fixes = factory.analysis.fixesFor(report({ component: 'Box', propChanges: [{ path: 'children', kind: 'element', prev: em('hi'), next: em('hi') }] }));
+    expect(fixes.map((f) => [f.kind, f.label])).toEqual([['children', 'memoize children of <Box> in <List>']]);
+    expect(fixes[0]!.snippet).toContain('useMemo');
+  });
+
+  it('labels commit priority on the report and in the commits list', () => {
+    send({ type: 'report', payload: report({ commitPriority: 'immediate' }) });
+    send({ type: 'report', payload: report({ commitId: 2, commitPriority: 'normal', renderCount: 2 }) });
+    panel.select('Row');
+    expect(root.textContent).toContain('Commit #2 · transition / async priority');
+    panel.setView('commits');
+    expect([...root.querySelectorAll('.commits li .prio')].map((p) => p.textContent)).toEqual(['transition / async', 'discrete input']);
   });
 });
 

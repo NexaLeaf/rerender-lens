@@ -135,7 +135,7 @@ Every update of a tracked component produces a `RenderReport`:
 | `avoidable` | `true` when nothing genuinely changed |
 | `propChanges` | one entry per changed prop with `path`, `kind`, `prev`, `next` |
 | `stateChanges` | class components: `this.state` diff |
-| `hookChanges` | `useState`, `useReducer`, `useSyncExternalStore` and `useContext` values that changed |
+| `hookChanges` | `useState`, `useReducer`, `useSyncExternalStore` and `useContext` values that changed; context entries carry `provider` (who renders it) and `changedKeys` / `totalKeys` for object values |
 | `parent` | nearest ancestor that rendered in the same commit, and why |
 | `owner` | component that created the element (dev builds) |
 | `path` | component ancestry from the root |
@@ -143,6 +143,7 @@ Every update of a tracked component produces a `RenderReport`:
 | `memoized` | `React.memo` / `PureComponent`: props alone decide whether it re-renders |
 | `selfDuration`, `treeDuration` | own render time, and with everything below that rendered (dev/profiling builds) |
 | `commitId` | shared by every report of one React commit |
+| `commitPriority` | `immediate` (clicks, keys), `user-blocking` (continuous input), `normal` (transitions, async), `low`, `idle` |
 | `source` | file, line and column where the element was created (dev builds) |
 | `reasons` | human-readable explanations with the fix |
 

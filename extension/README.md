@@ -12,7 +12,11 @@ Other views in the left pane:
   (who caused whom), the contexts that changed, and the fixes for that commit. Click a root cause
   to see every commit that component started across the session.
 - **Fixes**: every suggested fix ranked by how many avoidable re-renders it removes
-  ("useCallback(onSelect) in <ProductPage>: 12"), with a snippet to copy.
+  ("useCallback(onSelect) in <ProductPage>: 12"), with a snippet to copy. Contexts are listed
+  with the component that renders their Provider and, for object values, which keys changed.
+- **Sessions**: press *Record*, use the app, press *Stop*. Apply a fix, record again, and the
+  session page compares the two: avoidable re-renders per component with deltas, wasted time,
+  and the fixes that are no longer suggested. Summaries survive reloads and travel with exports.
 
 Also: an **Elements-panel sidebar** ("Re-renders") for the selected DOM node, a toolbar **badge**
 with the avoidable count of the current tab, hover-to-highlight of a component's DOM in the page,

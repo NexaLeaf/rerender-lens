@@ -9,13 +9,14 @@ import {
   getRenderers,
   init,
   isProductionReact,
+  serialize,
   serializeOptions,
   track,
   PROTOCOL_VERSION,
   VERSION,
   type HelloPayload,
 } from '../src/index';
-import { durationsOf, ensureDevtoolsHook, parseStackLocation, sourceOf, type Fiber } from '../src/fiber';
+import { durationsOf, ensureDevtoolsHook, parseStackLocation, priorityLabel, sourceOf, type Fiber } from '../src/fiber';
 import { h, mount } from './helpers';
 
 afterEach(() => {
@@ -145,6 +146,78 @@ describe('memoized flag and timing', () => {
     expect(durationsOf(f)).toEqual({ self: 5, tree: 10 });
     expect(durationsOf({ actualDuration: 1, child: { actualDuration: 4, sibling: null } } as unknown as Fiber)).toEqual({ self: 0, tree: 1 });
     expect(durationsOf({} as Fiber)).toBeNull();
+  });
+});
+
+describe('context providers, children and commit priority', () => {
+  it('attributes a context change to the component rendering its Provider and lists the changed keys', () => {
+    const collector = createCollector();
+    init({ notifier: collector.notifier, silent: true });
+    const Theme = React.createContext<{ mode: string; user: string }>({ mode: 'light', user: 'a' });
+    Theme.displayName = 'Theme';
+    const Consumer = track(function Consumer() {
+      const t = React.useContext(Theme);
+      return h('span', null, t.mode);
+    }, 'Consumer');
+    function Shell(p: { children: React.ReactNode }) {
+      return h('section', null, p.children);
+    }
+    let setMode: (m: string) => void = () => {};
+    function Root() {
+      const [mode, set] = React.useState('light');
+      setMode = set;
+      // new object every render: only `mode` changes, `user` stays
+      return h(Theme.Provider, { value: { mode, user: 'a' } }, h(Shell, null, h(Consumer)));
+    }
+    const hn = mount(h(Root));
+    React.act(() => setMode('dark'));
+    const r = collector.reports.find((x) => x.component === 'Consumer')!;
+    const ctx = r.hookChanges.find((c) => c.hook === 'useContext')!;
+    expect(ctx.provider).toEqual({ component: 'Root', path: ['Root'] });
+    expect(ctx.changedKeys).toEqual(['mode']);
+    expect(ctx.totalKeys).toBe(2);
+    expect(r.reasons.some((x) => /useContext\(Theme\) changed \(provided by <Root>\): only "mode" of 2 keys changed/.test(x))).toBe(true);
+    hn.unmount();
+  });
+
+  it('explains re-created children and serializes elements with their props', () => {
+    const collector = createCollector();
+    init({ notifier: collector.notifier, silent: true, trackAllMemoized: true });
+    const Box = React.memo(function Box(p: { children: React.ReactNode }) {
+      return h('div', null, p.children);
+    });
+    Box.displayName = 'Box';
+    const { Parent, rerender } = makeParent(() => h(Box, null, h('em', { className: 'x' }, 'hi'), h('b', null, 'there')));
+    const hn = mount(h(Parent));
+    rerender();
+    const r = collector.reports.find((x) => x.component === 'Box')!;
+    expect(r.avoidable).toBe(true);
+    expect(r.propChanges[0]!.path).toBe('children');
+    expect(r.reasons.some((x) => /children are new React elements.*lift the children out of the parent's render/.test(x))).toBe(true);
+    const s = serialize(r.propChanges[0]!.next) as { $type: string; name: string; props: { className: string } }[];
+    expect(s[0]).toMatchObject({ $type: 'element', name: 'em', props: { className: 'x', children: 'hi' } });
+    hn.unmount();
+  });
+
+  it('labels the commit priority and counts scheduled roots vs commits', () => {
+    const collector = createCollector();
+    init({ notifier: collector.notifier, silent: true });
+    const Child = track((p: { n: number }) => h('span', null, p.n), 'Child');
+    const { Parent, rerender } = makeParent(() => h(Child, { n: 1 }));
+    const hn = mount(h(Parent));
+    rerender();
+    const r = collector.reports[0]!;
+    // act() flushes with the default scheduler priority; any label is fine, but it must be a known one
+    expect([undefined, 'immediate', 'user-blocking', 'normal', 'low', 'idle']).toContain(r.commitPriority);
+    expect(priorityLabel(1)).toBe('immediate');
+    expect(priorityLabel(3)).toBe('normal');
+    expect(priorityLabel(99)).toBeUndefined();
+    const notify = createDevtoolsNotifier({ target: { postMessage() {} } as unknown as Window });
+    notify(r);
+    const info = window.__RERENDER_LENS_DEVTOOLS__!.info();
+    expect(info.commits).toBeGreaterThan(0);
+    expect(info.scheduled).toBeGreaterThanOrEqual(0);
+    hn.unmount();
   });
 });
 

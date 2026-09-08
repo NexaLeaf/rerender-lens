@@ -13,7 +13,13 @@ export interface Change {
   next: unknown;
   hook?: string;
   index?: number;
+  /** useContext: who renders the Provider. */
+  provider?: { component: string | null; path: string[] };
+  changedKeys?: string[];
+  totalKeys?: number;
 }
+
+export type CommitPriority = 'immediate' | 'user-blocking' | 'normal' | 'low' | 'idle';
 
 export interface SourceLocation {
   fileName: string;
@@ -41,7 +47,44 @@ export interface Report {
   selfDuration?: number;
   treeDuration?: number;
   source?: SourceLocation;
+  commitPriority?: CommitPriority;
   receivedAt: number;
+}
+
+/** A recorded stretch of reports; summaries survive reloads (per origin), reports stay in memory. */
+export interface SessionSummary {
+  id: string;
+  name: string;
+  startedAt: number;
+  endedAt: number | null;
+  total: number;
+  avoidable: number;
+  wasted: number;
+  byComponent: Record<string, { total: number; avoidable: number; wasted: number }>;
+  fixes: { key: string; label: string; count: number }[];
+}
+
+export interface Session extends SessionSummary {
+  reports: Report[];
+}
+
+export interface CompareRow {
+  component: string;
+  before: number;
+  after: number;
+  delta: number;
+}
+
+export interface Comparison {
+  before: SessionSummary;
+  after: SessionSummary;
+  rows: CompareRow[];
+  total: { before: number; after: number; delta: number };
+  avoidable: { before: number; after: number; delta: number };
+  wasted: { before: number; after: number; delta: number };
+  /** Fixes suggested in `before` that no longer appear in `after`. */
+  resolvedFixes: { key: string; label: string; count: number }[];
+  newFixes: { key: string; label: string; count: number }[];
 }
 
 export interface TreeNode {
@@ -60,7 +103,7 @@ export interface TreeNode {
 }
 
 export interface Fix {
-  kind: 'memo' | 'useCallback' | 'useMemo' | 'useMemoElement' | 'contextValue' | 'storeSnapshot' | 'bailout';
+  kind: 'memo' | 'useCallback' | 'useMemo' | 'useMemoElement' | 'children' | 'contextValue' | 'splitContext' | 'storeSnapshot' | 'bailout';
   owner: string;
   target: string;
   prop: string | null;
@@ -89,6 +132,11 @@ export interface ContextStat {
   avoidable: number;
   components: Map<string, number>;
   commits: Set<number>;
+  /** Components rendering the Provider (usually one). */
+  providers: Map<string, number>;
+  /** Keys that changed in object values, and the largest key count seen. */
+  changedKeys: Set<string>;
+  totalKeys: number;
 }
 
 export interface CommitAnalysis {
@@ -190,8 +238,8 @@ interface PersistedState {
   flashOn?: boolean;
 }
 
-type View = 'tree' | 'offenders' | 'commits' | 'fixes';
-type Tab = 'latest' | 'history' | 'fix' | 'commit' | 'fixlist' | 'root';
+type View = 'tree' | 'offenders' | 'commits' | 'fixes' | 'sessions';
+type Tab = 'latest' | 'history' | 'fix' | 'commit' | 'fixlist' | 'root' | 'session';
 
 export interface PanelState {
   tree: TreeNode;
@@ -222,6 +270,10 @@ export interface PanelState {
   treeWidth?: number;
   tabLabel: string | null;
   compact: boolean;
+  sessions: Session[];
+  recording: Session | null;
+  selectedSession: string | null;
+  compareWith: string | null;
 }
 
 export interface Panel {
@@ -233,6 +285,8 @@ export interface Panel {
   select(name: string): void;
   setView(view: View): void;
   openSettings(): void;
+  startRecording(name?: string): Session;
+  stopRecording(): Session | null;
 }
 
 type OffenderKey = 'component' | 'avoidable' | 'total' | 'wasted';
@@ -346,6 +400,7 @@ function normalizeReport(p: unknown): Report | null {
   if (typeof p.selfDuration === 'number') r.selfDuration = p.selfDuration;
   if (typeof p.treeDuration === 'number') r.treeDuration = p.treeDuration;
   if (typeof p.memoized === 'boolean') r.memoized = p.memoized;
+  if (typeof p.commitPriority === 'string') r.commitPriority = p.commitPriority as CommitPriority;
   if (isRecord(p.source) && typeof p.source.fileName === 'string') r.source = p.source as unknown as SourceLocation;
   return r;
 }
@@ -375,6 +430,12 @@ function valueNode(v: unknown, depth = 0): HTMLElement {
     return objectDetails(`Array(${v.length})`, v);
   }
   const o = v as Record<string, unknown>;
+  if (o.$type === 'element') {
+    // Serialized React element: `<Name>` with its props behind a toggle (children diffs read through it).
+    const props = isRecord(o.props) ? o.props : {};
+    const label = `<${String(o.name)}${o.key !== undefined ? ` key=${JSON.stringify(o.key)}` : ''}>`;
+    return Object.keys(props).length ? objectDetails(label, props) : el('span', { class: 'v', text: label });
+  }
   if (o.$type === 'Date') return el('span', { class: 'v', text: `Date(${String(o.value)})` });
   if (o.$type === 'RegExp') return el('span', { class: 'v', text: String(o.value) });
   if (o.$type === 'Map' && Array.isArray(o.entries)) return objectDetails(`Map(${o.entries.length})`, o.entries);
@@ -482,6 +543,20 @@ function fixesFor(r: Report): Fix[] {
     const owner = ownerName || '?';
     const root = c.path.split(/[.[]/)[0] || c.path;
     const id = identifier(root);
+    if (root === 'children' && (c.kind === 'element' || c.kind === 'deep-equal')) {
+      out.push({
+        kind: 'children',
+        owner,
+        target: r.component,
+        prop: 'children',
+        label: `memoize children of <${r.component}> in <${owner}>`,
+        detail: `<${owner}> re-creates the children of <${r.component}> on every render; they have the same types and props each time.`,
+        snippet:
+          `// ${owner}\nimport { useMemo } from 'react';\n\nconst children = useMemo(() => (\n  <>{/* the same elements */}</>\n), [/* deps */]);\n\n<${r.component}>{children}</${r.component}>\n\n` +
+          `// static children: hoist them to module scope\nconst STATIC = <em>hi</em>;`,
+      });
+      continue;
+    }
     if (c.kind === 'function') {
       out.push({
         kind: 'useCallback',
@@ -518,18 +593,35 @@ function fixesFor(r: Report): Fix[] {
     }
   }
   for (const c of ([] as Change[]).concat(r.stateChanges || [], r.hookChanges || [])) {
+    const isContext = c.hook === 'useContext' || /^useContext/.test(c.path);
+    const ctxName = isContext ? (/useContext\((.*)\)/.exec(c.path) || [])[1] || 'Context' : '';
+    const providerOwner = isContext && c.provider && c.provider.component ? c.provider.component : null;
+    // A genuine change of a few keys in an object context still re-renders every consumer.
+    if (isContext && c.kind === 'different' && c.changedKeys && typeof c.totalKeys === 'number' && c.changedKeys.length > 0 && c.changedKeys.length < c.totalKeys) {
+      out.push({
+        kind: 'splitContext',
+        owner: providerOwner || `${ctxName}.Provider`,
+        target: r.component,
+        prop: ctxName,
+        label: `split ${ctxName}${providerOwner ? ` in <${providerOwner}>` : ''}: only ${c.changedKeys.join(', ')} changed`,
+        detail: `${c.changedKeys.map((k) => `"${k}"`).join(', ')} of ${c.totalKeys} keys changed in ${ctxName}, yet every consumer (like <${r.component}>) re-rendered. Consumers that read the other keys re-render for nothing.`,
+        snippet:
+          `// ${providerOwner || 'Provider'}\n// one context per independently-changing slice\nconst ${identifier(ctxName)}Static = createContext(...);\nconst ${identifier(ctxName)}${c.changedKeys.map((k) => k[0]!.toUpperCase() + k.slice(1)).join('')} = createContext(...);\n\n` +
+          `// or keep one context and let consumers select a slice:\nconst ${c.changedKeys[0]} = useContextSelector(${ctxName}, (v) => v.${c.changedKeys[0]});`,
+      });
+      continue;
+    }
     if (!AVOIDABLE_KINDS.has(c.kind)) continue;
-    if (c.hook === 'useContext' || /^useContext/.test(c.path)) {
-      const ctx = /useContext\((.*)\)/.exec(c.path);
-      const name = ctx && ctx[1] ? ctx[1] : 'Context';
+    if (isContext) {
+      const name = ctxName;
       out.push({
         kind: 'contextValue',
-        owner: `${name}.Provider`,
+        owner: providerOwner || `${name}.Provider`,
         target: r.component,
         prop: name,
-        label: `memoize the ${name} provider value`,
-        detail: `<${r.component}> re-rendered because ${name} produced a new value that is deep-equal to the previous one.`,
-        snippet: `// where <${name}.Provider> is rendered\nconst value = useMemo(() => ({ /* ... */ }), [/* deps */]);\n<${name}.Provider value={value}>`,
+        label: `memoize the ${name} provider value${providerOwner ? ` in <${providerOwner}>` : ''}`,
+        detail: `<${r.component}> re-rendered because ${name} produced a new value that is deep-equal to the previous one${providerOwner ? ` (Provider rendered by <${providerOwner}>)` : ''}.`,
+        snippet: `// ${providerOwner || `where <${name}.Provider> is rendered`}\nconst value = useMemo(() => ({ /* ... */ }), [/* deps */]);\n<${name}.Provider value={value}>`,
       });
     } else if (c.hook === 'useSyncExternalStore') {
       out.push({
@@ -639,13 +731,16 @@ function contextAttribution(reports: Report[]): ContextStat[] {
       const name = m && m[1] ? m[1] : c.path;
       let agg = byCtx.get(name);
       if (!agg) {
-        agg = { name, consumers: 0, avoidable: 0, components: new Map(), commits: new Set() };
+        agg = { name, consumers: 0, avoidable: 0, components: new Map(), commits: new Set(), providers: new Map(), changedKeys: new Set(), totalKeys: 0 };
         byCtx.set(name, agg);
       }
       agg.consumers++;
       if (AVOIDABLE_KINDS.has(c.kind)) agg.avoidable++;
       agg.components.set(r.component, (agg.components.get(r.component) || 0) + 1);
       agg.commits.add(r.commitId);
+      if (c.provider && c.provider.component) agg.providers.set(c.provider.component, (agg.providers.get(c.provider.component) || 0) + 1);
+      if (c.changedKeys) for (const k of c.changedKeys) agg.changedKeys.add(k);
+      if (typeof c.totalKeys === 'number') agg.totalKeys = Math.max(agg.totalKeys, c.totalKeys);
     }
   }
   return [...byCtx.values()].sort((a, b) => b.consumers - a.consumers);
@@ -702,6 +797,62 @@ function rootCauseSummary(name: string, commits: Iterable<[number, Report[]]>): 
   out.fixes = rankFixes(affected);
   return out;
 }
+
+// ---------- sessions (pure) ----------
+function summarizeSession(session: Pick<SessionSummary, 'id' | 'name' | 'startedAt' | 'endedAt'>, reports: Report[]): SessionSummary {
+  const byComponent: SessionSummary['byComponent'] = {};
+  let avoidable = 0;
+  let wasted = 0;
+  for (const r of reports) {
+    const c = (byComponent[r.component] ||= { total: 0, avoidable: 0, wasted: 0 });
+    c.total++;
+    if (r.avoidable) {
+      c.avoidable++;
+      avoidable++;
+      if (typeof r.selfDuration === 'number') {
+        c.wasted += r.selfDuration;
+        wasted += r.selfDuration;
+      }
+    }
+  }
+  return {
+    id: session.id,
+    name: session.name,
+    startedAt: session.startedAt,
+    endedAt: session.endedAt,
+    total: reports.length,
+    avoidable,
+    wasted,
+    byComponent,
+    fixes: rankFixes(reports).map((f) => ({ key: f.key, label: f.label, count: f.count })),
+  };
+}
+
+/** Before/after: avoidable re-renders per component, totals, and which fixes went away. */
+function compareSessions(before: SessionSummary, after: SessionSummary): Comparison {
+  const names = new Set([...Object.keys(before.byComponent), ...Object.keys(after.byComponent)]);
+  const rows: CompareRow[] = [];
+  for (const component of names) {
+    const b = before.byComponent[component]?.avoidable || 0;
+    const a = after.byComponent[component]?.avoidable || 0;
+    if (b || a) rows.push({ component, before: b, after: a, delta: a - b });
+  }
+  rows.sort((x, y) => x.delta - y.delta || y.before - x.before || x.component.localeCompare(y.component));
+  const afterKeys = new Set(after.fixes.map((f) => f.key));
+  const beforeKeys = new Set(before.fixes.map((f) => f.key));
+  return {
+    before,
+    after,
+    rows,
+    total: { before: before.total, after: after.total, delta: after.total - before.total },
+    avoidable: { before: before.avoidable, after: after.avoidable, delta: after.avoidable - before.avoidable },
+    wasted: { before: before.wasted, after: after.wasted, delta: after.wasted - before.wasted },
+    resolvedFixes: before.fixes.filter((f) => !afterKeys.has(f.key)),
+    newFixes: after.fixes.filter((f) => !beforeKeys.has(f.key)),
+  };
+}
+
+const PRIORITY_LABEL: Record<string, string> = { immediate: 'discrete input', 'user-blocking': 'continuous input', normal: 'transition / async', low: 'low', idle: 'idle' };
 
 function reportToMarkdown(r: Report): string {
   const lines: string[] = [];
@@ -842,7 +993,7 @@ function reportView(r: Report, actions: ReportViewActions = {}): DocumentFragmen
   if (r.owner) by.append(el('div', { class: 'meta', text: `Created by <${r.owner}>` }));
   if (r.memoized === false) by.append(el('div', { class: 'meta', text: 'Not memoized (re-renders whenever its parent does)' }));
   else if (r.memoized === true) by.append(el('div', { class: 'meta', text: 'Memoized (React.memo / PureComponent)' }));
-  if (r.commitId) by.append(el('div', { class: 'meta', text: `Commit #${r.commitId}` }));
+  if (r.commitId) by.append(el('div', { class: 'meta', text: `Commit #${r.commitId}${r.commitPriority ? ` · ${PRIORITY_LABEL[r.commitPriority] || r.commitPriority} priority` : ''}` }));
   frag.append(by);
   frag.append(kvSection('Props', r.props ? r.props.next : {}, r.propChanges || []));
   const hooks = ([] as Change[]).concat(r.hookChanges || [], r.stateChanges || []);
@@ -972,6 +1123,10 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     legacyCommit: 0,
     tabLabel: transport.tabLabel ?? null,
     compact: false,
+    sessions: [],
+    recording: null,
+    selectedSession: null,
+    compareWith: null,
   };
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let queue: Report[] = [];
@@ -1011,6 +1166,10 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     transport.badge?.(0);
   });
   const replayBtn = iconButton('↻', 'Replay', 'Replay buffered reports from the page', () => transport.replay?.());
+  const recordBtn = iconButton('⏺', 'Record', 'Record a session to compare before and after a fix', () => {
+    if (state.recording) stopRecording();
+    else startRecording();
+  });
   const exportBtn = iconButton('⤓', 'Export', 'Export reports as JSON', exportJson);
   const importInput = el('input', { type: 'file', accept: 'application/json,.json', class: 'hidden-file' });
   importInput.addEventListener('change', () => {
@@ -1044,6 +1203,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     pauseBtn,
     clearBtn,
     replayBtn,
+    recordBtn,
     el('span', { class: 'sep' }),
     exportBtn,
     importBtn,
@@ -1064,6 +1224,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     ['offenders', 'Offenders'],
     ['commits', 'Commits'],
     ['fixes', 'Fixes'],
+    ['sessions', 'Sessions'],
   ];
   const viewButtons = new Map<View, HTMLButtonElement>();
   for (const [id, label] of VIEWS) {
@@ -1208,6 +1369,29 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     }, 150);
   }
 
+  /** Session summaries from storage or an export (no reports); merged by id. */
+  function restoreSessions(raw: unknown): void {
+    if (!Array.isArray(raw)) return;
+    for (const s of raw) {
+      if (!isRecord(s) || typeof s.id !== 'string' || typeof s.name !== 'string' || !isRecord(s.byComponent)) continue;
+      if (state.sessions.some((x) => x.id === s.id)) continue;
+      state.sessions.push({
+        id: s.id,
+        name: s.name,
+        startedAt: typeof s.startedAt === 'number' ? s.startedAt : 0,
+        endedAt: typeof s.endedAt === 'number' ? s.endedAt : 0,
+        total: typeof s.total === 'number' ? s.total : 0,
+        avoidable: typeof s.avoidable === 'number' ? s.avoidable : 0,
+        wasted: typeof s.wasted === 'number' ? s.wasted : 0,
+        byComponent: s.byComponent as SessionSummary['byComponent'],
+        fixes: Array.isArray(s.fixes) ? (s.fixes as SessionSummary['fixes']) : [],
+        reports: [],
+      });
+    }
+    state.sessions.sort((a, b) => a.startedAt - b.startedAt);
+    if (state.view === 'sessions') renderLeft();
+  }
+
   function restore(raw: unknown): void {
     if (!isRecord(raw)) return;
     const saved = raw as PersistedState;
@@ -1304,6 +1488,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     let avoidableCount = 0;
     for (const r of batch) {
       const node = ingest(r);
+      if (state.recording && state.recording.reports.length < MAX_REPORTS) state.recording.reports.push(r);
       if (r.avoidable) avoidableCount++;
       if (state.selectedKey === node.key) {
         touchedSelected = true;
@@ -1313,7 +1498,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     renderLeft();
     renderStream(batch);
     renderSummary();
-    if (touchedSelected || state.view === 'commits' || state.view === 'fixes' || state.tab === 'root') renderDetails();
+    if (touchedSelected || state.view === 'commits' || state.view === 'fixes' || state.tab === 'root' || (state.recording && state.tab === 'session')) renderDetails();
     if (state.polling && avoidableCount) transport.badge?.(state.reports.filter((r) => r.avoidable).length);
   }
 
@@ -1384,6 +1569,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     if (state.view === 'tree') renderTree();
     else if (state.view === 'offenders') renderOffenders();
     else if (state.view === 'commits') renderCommits();
+    else if (state.view === 'sessions') renderSessions();
     else renderFixes();
   }
 
@@ -1668,6 +1854,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
           el('span', { class: 't', text: fmtTime(analysis.receivedAt) }),
           el('span', { class: 'n', text: plural(analysis.total, 'render') }),
           analysis.avoidable ? el('span', { class: 'badge avoid', text: `${analysis.avoidable} avoidable` }) : el('span', { class: 'badge', text: 'ok' }),
+          analysis.reports[0]?.commitPriority ? el('span', { class: 'prio ' + analysis.reports[0].commitPriority, title: 'commit priority', text: PRIORITY_LABEL[analysis.reports[0].commitPriority] || analysis.reports[0].commitPriority }) : null,
           el('span', { class: 'root', text: root ? `← <${root.name}> (${root.trigger})` : '' }),
         ]),
       );
@@ -1713,13 +1900,16 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     if (contexts.length) {
       const list = el('ul', { class: 'contexts' });
       for (const c of contexts) {
+        const partial = c.changedKeys.size > 0 && c.totalKeys > c.changedKeys.size;
         list.append(
           el('li', null, [
             el('span', { class: 'name', text: c.name }),
+            c.providers.size ? el('span', { class: 'meta', text: ` (provided by ${componentList(c.providers)})` }) : null,
             el('span', {
               class: 'meta',
               text: ` changed in ${plural(c.commits.size, 'commit')}, ${plural(c.consumers, 'consumer re-render')}${c.avoidable ? `, ${c.avoidable} with an equal value` : ''}: ${componentList(c.components)}`,
             }),
+            partial ? el('div', { class: 'meta hint', text: `only ${[...c.changedKeys].join(', ')} of ${c.totalKeys} keys changed: consumers of the other keys re-render for nothing. Split the context or select slices.` }) : null,
           ]),
         );
       }
@@ -1734,6 +1924,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     if (state.tab === 'commit' && state.selectedCommit !== null) renderCommitDetails();
     else if (state.tab === 'fixlist' && state.selectedFix) renderFixDetails();
     else if (state.tab === 'root' && state.selectedRoot) renderRootDetails();
+    else if (state.tab === 'session' && state.selectedSession) renderSessionDetails();
     else renderNodeDetails(state.selectedKey ? state.nodesByKey.get(state.selectedKey) ?? null : null);
     if (openLabels.size) {
       for (const d of details.querySelectorAll<HTMLDetailsElement>('details.obj')) {
@@ -1943,6 +2134,200 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     }
   }
 
+  // ---------- sessions ----------
+  const sessionSummary = (s: Session): SessionSummary => summarizeSession(s, s.reports);
+
+  function persistSessions(): void {
+    if (!transport.storage) return;
+    const summaries = state.sessions.filter((s) => s.endedAt).slice(-20).map(sessionSummary);
+    transport.storage.set('sessions', summaries);
+  }
+
+  function startRecording(name?: string): Session {
+    if (state.recording) stopRecording();
+    const startedAt = Date.now();
+    const session: Session = {
+      id: `s${startedAt.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      name: name || `Session ${state.sessions.length + 1}`,
+      startedAt,
+      endedAt: null,
+      total: 0,
+      avoidable: 0,
+      wasted: 0,
+      byComponent: {},
+      fixes: [],
+      reports: [],
+    };
+    state.sessions.push(session);
+    state.recording = session;
+    recordBtn.classList.add('active', 'rec');
+    recordBtn.querySelector('.glyph')!.textContent = '⏹';
+    recordBtn.querySelector('.label')!.textContent = 'Stop';
+    state.selectedSession = session.id;
+    state.tab = 'session';
+    if (state.view === 'sessions') renderLeft();
+    renderDetails();
+    toast(`Recording ${session.name}`);
+    return session;
+  }
+
+  function stopRecording(): Session | null {
+    const session = state.recording;
+    if (!session) return null;
+    session.endedAt = Date.now();
+    Object.assign(session, sessionSummary(session), { reports: session.reports });
+    state.recording = null;
+    recordBtn.classList.remove('active', 'rec');
+    recordBtn.querySelector('.glyph')!.textContent = '⏺';
+    recordBtn.querySelector('.label')!.textContent = 'Record';
+    persistSessions();
+    if (state.view === 'sessions') renderLeft();
+    if (state.tab === 'session') renderDetails();
+    toast(`${session.name}: ${plural(session.avoidable, 'avoidable re-render')}`);
+    return session;
+  }
+
+  const fmtDuration = (s: SessionSummary): string => {
+    const ms = (s.endedAt || Date.now()) - s.startedAt;
+    return ms < 60_000 ? `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s` : `${Math.round(ms / 60_000)} min`;
+  };
+
+  function renderSessions(): void {
+    table.textContent = '';
+    if (!state.sessions.length) {
+      table.append(
+        el('div', { class: 'empty' }, [
+          el('div', { text: 'No sessions yet.' }),
+          el('div', null, ['Press ', el('code', { text: 'Record' }), ', use the app, press ', el('code', { text: 'Stop' }), '. Apply a fix, record again, and compare the two.']),
+        ]),
+      );
+      return;
+    }
+    const list = el('ul', { class: 'sessions' });
+    for (const s of [...state.sessions].reverse()) {
+      const live = s === state.recording;
+      const summary = live ? sessionSummary(s) : s;
+      list.append(
+        el(
+          'li',
+          {
+            class: (state.selectedSession === s.id && state.tab === 'session' ? 'selected ' : '') + (live ? 'live' : ''),
+            onclick: () => {
+              state.selectedSession = s.id;
+              state.tab = 'session';
+              renderLeft();
+              renderDetails();
+            },
+          },
+          [
+            el('span', { class: 'name', text: s.name }),
+            live ? el('span', { class: 'badge rec', text: 'recording' }) : el('span', { class: 't', text: fmtDuration(summary) }),
+            el('span', { class: 'n', text: plural(summary.total, 'render') }),
+            summary.avoidable ? el('span', { class: 'badge avoid', text: `${summary.avoidable} avoidable` }) : el('span', { class: 'badge', text: 'clean' }),
+            summary.wasted ? el('span', { class: 'meta', text: fmtMs(summary.wasted) }) : null,
+          ],
+        ),
+      );
+    }
+    table.append(list);
+  }
+
+  function deltaCell(n: number, suffix = '', decimals?: number): HTMLElement {
+    const cls = n < 0 ? 'good' : n > 0 ? 'bad' : '';
+    const value = decimals !== undefined ? n.toFixed(decimals) : Number.isInteger(n) ? String(n) : n.toFixed(1);
+    return el('td', { class: 'num delta ' + cls, text: n === 0 ? '±0' : `${n > 0 ? '+' : ''}${value}${suffix}` });
+  }
+
+  function renderSessionDetails(): void {
+    const session = state.sessions.find((s) => s.id === state.selectedSession);
+    if (!session) {
+      details.append(el('div', { class: 'empty', text: 'Select a session.' }));
+      return;
+    }
+    const live = session === state.recording;
+    const summary = live ? sessionSummary(session) : session;
+    const nameInput = el('input', { type: 'text', class: 'session-name', value: session.name, title: 'Rename' });
+    nameInput.addEventListener('change', () => {
+      session.name = nameInput.value.trim() || session.name;
+      nameInput.value = session.name;
+      persistSessions();
+      if (state.view === 'sessions') renderLeft();
+    });
+    details.append(
+      el('div', { class: 'details-header' }, [
+        nameInput,
+        el('span', { class: 'meta', text: `${live ? 'recording · ' : ''}${fmtDuration(summary)} · ${plural(summary.total, 'render')}, ${summary.avoidable} avoidable${summary.wasted ? ', ' + fmtMs(summary.wasted) + ' wasted' : ''}` }),
+        live ? el('button', { class: 'ib', onclick: () => stopRecording() }, '⏹ Stop') : null,
+      ]),
+    );
+    const body = el('div', { class: 'details-body' });
+    details.append(body);
+
+    // compare
+    const others = state.sessions.filter((s) => s !== session && s.endedAt);
+    const compareSec = el('div', { class: 'section compare' }, [el('h3', { text: 'Compare' })]);
+    if (!others.length) {
+      compareSec.append(el('div', { class: 'meta', text: 'Record a second session (after a fix) to compare against this one.' }));
+    } else {
+      const select = el('select', { class: 'compare-select' });
+      select.append(el('option', { value: '', text: 'Compare with…' }));
+      for (const o of others) select.append(el('option', { value: o.id, text: o.name }));
+      const baseline = state.compareWith && others.some((o) => o.id === state.compareWith) ? state.compareWith : others[others.length - 1]!.id;
+      select.value = baseline;
+      select.addEventListener('change', () => {
+        state.compareWith = select.value || null;
+        renderDetails();
+      });
+      compareSec.append(el('div', { class: 'meta' }, ['Baseline: ', select, ' → this session']));
+      const before = others.find((o) => o.id === baseline)!;
+      const cmp = compareSessions(before, summary);
+      const t = el('table', { class: 'grid compare-grid' });
+      t.append(el('thead', null, el('tr', null, [el('th', { text: 'Avoidable re-renders' }), el('th', { class: 'num', text: before.name }), el('th', { class: 'num', text: summary.name }), el('th', { class: 'num', text: 'Δ' })])));
+      const tb = el('tbody');
+      const totalRow = el('tr', { class: 'total' }, [el('td', { text: 'All components' }), el('td', { class: 'num', text: String(cmp.avoidable.before) }), el('td', { class: 'num', text: String(cmp.avoidable.after) })]);
+      totalRow.append(deltaCell(cmp.avoidable.delta));
+      tb.append(totalRow);
+      if (cmp.wasted.before || cmp.wasted.after) {
+        const w = el('tr', { class: 'total' }, [el('td', { text: 'Wasted time' }), el('td', { class: 'num', text: fmtMs(cmp.wasted.before) }), el('td', { class: 'num', text: fmtMs(cmp.wasted.after) })]);
+        w.append(deltaCell(cmp.wasted.delta, ' ms', 1));
+        tb.append(w);
+      }
+      for (const row of cmp.rows) {
+        const tr = el('tr', null, [el('td', { class: 'c' }, el('span', { class: 'name', text: row.component })), el('td', { class: 'num', text: String(row.before) }), el('td', { class: 'num', text: String(row.after) })]);
+        tr.append(deltaCell(row.delta));
+        tb.append(tr);
+      }
+      t.append(tb);
+      compareSec.append(t);
+      if (cmp.resolvedFixes.length) compareSec.append(el('div', { class: 'meta' }, [el('b', { text: 'No longer needed: ' }), cmp.resolvedFixes.map((f) => f.label).join(' · ')]));
+      if (cmp.newFixes.length) compareSec.append(el('div', { class: 'meta' }, [el('b', { text: 'New: ' }), cmp.newFixes.map((f) => f.label).join(' · ')]));
+    }
+    body.append(compareSec);
+
+    // offenders of this session
+    const comps = Object.entries(summary.byComponent).sort((a, b) => b[1].avoidable - a[1].avoidable || b[1].total - a[1].total);
+    if (comps.length) {
+      const t = el('table', { class: 'grid' });
+      t.append(el('thead', null, el('tr', null, [el('th', { text: 'Component' }), el('th', { class: 'num', text: 'Avoidable' }), el('th', { class: 'num', text: 'Total' }), el('th', { class: 'num', text: 'Wasted' })])));
+      const tb = el('tbody');
+      for (const [name, c] of comps.slice(0, 50)) {
+        tb.append(
+          el('tr', { onclick: () => panelApi.select(name) }, [
+            el('td', { class: 'c' }, el('span', { class: 'name', text: name })),
+            el('td', { class: 'num' }, c.avoidable ? el('span', { class: 'badge avoid', text: String(c.avoidable) }) : '0'),
+            el('td', { class: 'num', text: String(c.total) }),
+            el('td', { class: 'num', text: c.wasted ? fmtMs(c.wasted) : '' }),
+          ]),
+        );
+      }
+      t.append(tb);
+      body.append(el('div', { class: 'section' }, [el('h3', { text: 'Components in this session' }), t]));
+    }
+    if (summary.fixes.length) {
+      body.append(el('div', { class: 'section' }, [el('h3', { text: 'Fixes suggested' }), el('ol', { class: 'fix-list' }, summary.fixes.slice(0, 10).map((f) => el('li', null, [el('span', { class: 'badge avoid', text: String(f.count) }), ' ', el('span', { class: 'mono', text: f.label })])))]));
+    }
+  }
+
   // ---------- stream (virtualized) ----------
   const itemEls = new WeakMap<Report, HTMLElement>();
   const streamItems = virtualList<Report>(streamList, ITEM_H, (r) => {
@@ -1975,7 +2360,14 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
 
   // ---------- export / import ----------
   function exportJson(): void {
-    const data = { rerenderLens: true, version: PROTOCOL, exportedAt: new Date().toISOString(), origin: state.origin, reports: state.reports };
+    const data = {
+      rerenderLens: true,
+      version: PROTOCOL,
+      exportedAt: new Date().toISOString(),
+      origin: state.origin,
+      reports: state.reports,
+      sessions: state.sessions.filter((s) => s.endedAt).map(sessionSummary),
+    };
     const text = JSON.stringify(data, null, 2);
     const name = `rerender-lens-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     if (transport.download) {
@@ -1999,6 +2391,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     const reports = Array.isArray(data) ? data : isRecord(data) && Array.isArray(data.reports) ? data.reports : null;
     if (!reports) throw new Error('not a rerender-lens export');
     clearAll();
+    if (isRecord(data) && Array.isArray(data.sessions)) restoreSessions(data.sessions);
     let n = 0;
     for (const p of reports) {
       const r = normalizeReport(p);
@@ -2267,6 +2660,8 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     },
     setView,
     openSettings: () => toggleSettings(true),
+    startRecording,
+    stopRecording,
   };
 
   if (options.theme === 'dark') document.documentElement.classList.add('theme-dark');
@@ -2279,6 +2674,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   measure();
   if (transport.storage) {
     Promise.resolve(transport.storage.get('panel')).then(restore, () => {});
+    Promise.resolve(transport.storage.get('sessions')).then(restoreSessions, () => {});
   }
   transport.subscribe(handle);
   return panelApi;
@@ -2668,7 +3064,7 @@ function sampleReports(): Record<string, unknown>[] {
   const fn = (name: string): string => FN_PREFIX + name;
   return [
     {
-      component: 'ProductRow', path: ['App', 'ProductPage', 'ProductList'], trigger: 'parent', avoidable: true, renderCount: 1, instanceId: 4, commitId: 1, memoized: true,
+      component: 'ProductRow', path: ['App', 'ProductPage', 'ProductList'], trigger: 'parent', avoidable: true, renderCount: 1, instanceId: 4, commitId: 1, memoized: true, commitPriority: 'immediate',
       owner: 'ProductList', parent: { name: 'ProductPage', trigger: 'state' }, selfDuration: 0.8, treeDuration: 1.1,
       source: { fileName: 'http://localhost:5199/src/ProductList.tsx', lineNumber: 14, columnNumber: 7 },
       props: {
@@ -2687,7 +3083,7 @@ function sampleReports(): Record<string, unknown>[] {
       ],
     },
     {
-      component: 'Toolbar', path: ['App', 'ProductPage'], trigger: 'parent', avoidable: true, renderCount: 1, instanceId: 2, commitId: 1, memoized: false,
+      component: 'Toolbar', path: ['App', 'ProductPage'], trigger: 'parent', avoidable: true, renderCount: 1, instanceId: 2, commitId: 1, memoized: false, commitPriority: 'immediate',
       owner: 'ProductPage', parent: { name: 'ProductPage', trigger: 'state' }, selfDuration: 0.3,
       props: { prev: { title: 'Products', count: 3 }, next: { title: 'Products', count: 3 } }, propChanges: [], stateChanges: [], hookChanges: [],
       reasons: ['re-rendered with identical props because <ProductPage> re-rendered (its state changed). Wrap "Toolbar" in React.memo (or extend PureComponent).'],
@@ -2700,9 +3096,10 @@ function sampleReports(): Record<string, unknown>[] {
       hookChanges: [{ path: 'useState#0', hook: 'useState', index: 0, kind: 'different', prev: 'ab', next: 'abc' }], reasons: ['useState #0 changed.'],
     },
     {
-      component: 'Sidebar', path: ['App'], trigger: 'hooks', avoidable: false, renderCount: 1, instanceId: 5, owner: 'App', parent: null, commitId: 2, memoized: true,
+      component: 'Sidebar', path: ['App'], trigger: 'hooks', avoidable: false, renderCount: 1, instanceId: 5, owner: 'App', parent: null, commitId: 2, memoized: true, commitPriority: 'normal',
       props: { prev: {}, next: {} }, propChanges: [], stateChanges: [],
-      hookChanges: [{ path: 'useContext(Theme)', hook: 'useContext', index: 0, kind: 'different', prev: 'light', next: 'dark' }], reasons: ['useContext #0 changed.'],
+      hookChanges: [{ path: 'useContext(Theme)', hook: 'useContext', index: 0, kind: 'different', prev: { mode: 'light', user: 'ann' }, next: { mode: 'dark', user: 'ann' }, provider: { component: 'App', path: ['App'] }, changedKeys: ['mode'], totalKeys: 2 }],
+      reasons: ['useContext(Theme) changed (provided by <App>): only "mode" of 2 keys changed, yet every consumer re-renders. Split the context or memoize the slices consumers read.'],
     },
   ];
 }
@@ -2783,7 +3180,7 @@ const api = {
   floodReports,
   bootStandalone,
   createRelayTransport,
-  analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary },
+  analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary, summarizeSession, compareSessions },
 };
 window.RerenderLensPanel = api;
 

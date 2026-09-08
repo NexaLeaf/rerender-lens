@@ -324,6 +324,34 @@ details.obj pre { margin: 4px 0 0 12px; font: 11px/1.4 var(--mono); white-space:
 .opt input[type="text"]:focus, .opt input[type="number"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-bg); }
 .drawer .meta { color: var(--text-dim); margin-top: 4px; }
 
+/* ---------- sessions, compare, commit priority ---------- */
+button.ib.rec .glyph { color: var(--danger); animation: blink 1.2s ease-in-out infinite; }
+@keyframes blink { 50% { opacity: 0.35; } }
+.badge.rec { background: var(--danger-bg); color: var(--danger); font-weight: 600; }
+.sessions { list-style: none; margin: 0; padding: 0; }
+.sessions li { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--border); cursor: pointer; white-space: nowrap; font-size: 11px; }
+.sessions li:hover { background: var(--hover); }
+.sessions li.selected { background: var(--selected); color: var(--selected-text); box-shadow: inset 2px 0 0 var(--accent); }
+.sessions li.live .name::before { content: "●"; color: var(--danger); margin-right: 5px; font-size: 8px; vertical-align: middle; }
+.sessions .name { font-weight: 600; flex: none; }
+.sessions .t, .sessions .n { color: var(--text-dim); flex: none; font-variant-numeric: tabular-nums; }
+.session-name { font: 600 13px var(--font); color: var(--text); background: transparent; border: 1px solid transparent; border-radius: var(--radius); padding: 2px 6px; margin-left: -6px; min-width: 120px; }
+.session-name:hover { border-color: var(--border-strong); }
+.session-name:focus { outline: none; border-color: var(--accent); background: var(--bg); }
+.compare-select { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border-strong); border-radius: var(--radius); height: 24px; padding: 0 6px; }
+.compare-grid { margin-top: 8px; }
+.compare-grid tr.total td { font-weight: 600; background: var(--bg-alt); }
+.compare-grid td.delta.good { color: var(--ok); font-weight: 600; }
+.compare-grid td.delta.bad { color: var(--danger); font-weight: 600; }
+.compare .meta b { color: var(--text); }
+.fix-list { margin: 0; padding-left: 18px; }
+.fix-list li { margin: 4px 0; }
+.fix-list .mono, .summary .mono { font-family: var(--mono); }
+.prio { font-size: 10px; padding: 0 6px; border-radius: 8px; background: var(--bg-inset); color: var(--text-dim); flex: none; }
+.prio.immediate { background: var(--accent-bg); color: var(--accent); }
+.prio.normal { background: var(--warn-bg); color: var(--warn); }
+.contexts .hint { white-space: normal; margin-top: 3px; padding-left: 8px; border-left: 2px solid var(--warn); }
+
 /* ---------- compact layout (side panel, narrow windows) ---------- */
 .compact .toolbar { flex-wrap: wrap; gap: 3px; }
 .compact .toolbar input[type="search"] { min-width: 120px; flex-basis: 100%; max-width: none; order: -1; margin-bottom: 3px; }

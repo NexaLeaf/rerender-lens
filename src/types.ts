@@ -39,7 +39,15 @@ export interface HookChange extends Change {
   hook: string;
   /** Position of the hook in call order (0-based). */
   index: number;
+  /** `useContext` only: the component that renders the nearest matching Provider, and its ancestry. */
+  provider?: { component: string | null; path: string[] };
+  /** `useContext` only, object values: top-level keys whose value changed (shallow), and how many keys the value has. */
+  changedKeys?: string[];
+  totalKeys?: number;
 }
+
+/** Scheduler priority of the commit, as React reports it to the DevTools hook (transitions run at `normal`). */
+export type CommitPriority = 'immediate' | 'user-blocking' | 'normal' | 'low' | 'idle';
 
 export interface ParentInfo {
   /** Display name of the nearest ancestor component that also rendered in this commit. */
@@ -62,6 +70,8 @@ export interface RenderReport {
   instanceId: number;
   /** Monotonic id of the React commit that produced this report. Reports from one commit share it. 0 for `useWhyRerender`. */
   commitId: number;
+  /** Priority React assigned to the commit: `immediate` for discrete input (clicks, keys), `user-blocking` for continuous input, `normal` for transitions and async updates. */
+  commitPriority?: CommitPriority;
   /** Monotonic per-instance update count (1 = first update; mount is never reported). */
   renderCount: number;
   trigger: RenderTrigger;

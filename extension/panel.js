@@ -82,6 +82,7 @@
     if (typeof p.selfDuration === "number") r.selfDuration = p.selfDuration;
     if (typeof p.treeDuration === "number") r.treeDuration = p.treeDuration;
     if (typeof p.memoized === "boolean") r.memoized = p.memoized;
+    if (typeof p.commitPriority === "string") r.commitPriority = p.commitPriority;
     if (isRecord(p.source) && typeof p.source.fileName === "string") r.source = p.source;
     return r;
   }
@@ -109,6 +110,11 @@
       return objectDetails(`Array(${v.length})`, v);
     }
     const o = v;
+    if (o.$type === "element") {
+      const props = isRecord(o.props) ? o.props : {};
+      const label2 = `<${String(o.name)}${o.key !== void 0 ? ` key=${JSON.stringify(o.key)}` : ""}>`;
+      return Object.keys(props).length ? objectDetails(label2, props) : el("span", { class: "v", text: label2 });
+    }
     if (o.$type === "Date") return el("span", { class: "v", text: `Date(${String(o.value)})` });
     if (o.$type === "RegExp") return el("span", { class: "v", text: String(o.value) });
     if (o.$type === "Map" && Array.isArray(o.entries)) return objectDetails(`Map(${o.entries.length})`, o.entries);
@@ -202,6 +208,28 @@ export const ${r.component} = memo(function ${r.component}(props) {
       const owner = ownerName || "?";
       const root = c.path.split(/[.[]/)[0] || c.path;
       const id = identifier(root);
+      if (root === "children" && (c.kind === "element" || c.kind === "deep-equal")) {
+        out.push({
+          kind: "children",
+          owner,
+          target: r.component,
+          prop: "children",
+          label: `memoize children of <${r.component}> in <${owner}>`,
+          detail: `<${owner}> re-creates the children of <${r.component}> on every render; they have the same types and props each time.`,
+          snippet: `// ${owner}
+import { useMemo } from 'react';
+
+const children = useMemo(() => (
+  <>{/* the same elements */}</>
+), [/* deps */]);
+
+<${r.component}>{children}</${r.component}>
+
+// static children: hoist them to module scope
+const STATIC = <em>hi</em>;`
+        });
+        continue;
+      }
       if (c.kind === "function") {
         out.push({
           kind: "useCallback",
@@ -253,18 +281,38 @@ const ${id.toUpperCase()} = ${shortValue(c.next, 80)};`
       }
     }
     for (const c of [].concat(r.stateChanges || [], r.hookChanges || [])) {
+      const isContext = c.hook === "useContext" || /^useContext/.test(c.path);
+      const ctxName = isContext ? (/useContext\((.*)\)/.exec(c.path) || [])[1] || "Context" : "";
+      const providerOwner = isContext && c.provider && c.provider.component ? c.provider.component : null;
+      if (isContext && c.kind === "different" && c.changedKeys && typeof c.totalKeys === "number" && c.changedKeys.length > 0 && c.changedKeys.length < c.totalKeys) {
+        out.push({
+          kind: "splitContext",
+          owner: providerOwner || `${ctxName}.Provider`,
+          target: r.component,
+          prop: ctxName,
+          label: `split ${ctxName}${providerOwner ? ` in <${providerOwner}>` : ""}: only ${c.changedKeys.join(", ")} changed`,
+          detail: `${c.changedKeys.map((k) => `"${k}"`).join(", ")} of ${c.totalKeys} keys changed in ${ctxName}, yet every consumer (like <${r.component}>) re-rendered. Consumers that read the other keys re-render for nothing.`,
+          snippet: `// ${providerOwner || "Provider"}
+// one context per independently-changing slice
+const ${identifier(ctxName)}Static = createContext(...);
+const ${identifier(ctxName)}${c.changedKeys.map((k) => k[0].toUpperCase() + k.slice(1)).join("")} = createContext(...);
+
+// or keep one context and let consumers select a slice:
+const ${c.changedKeys[0]} = useContextSelector(${ctxName}, (v) => v.${c.changedKeys[0]});`
+        });
+        continue;
+      }
       if (!AVOIDABLE_KINDS.has(c.kind)) continue;
-      if (c.hook === "useContext" || /^useContext/.test(c.path)) {
-        const ctx = /useContext\((.*)\)/.exec(c.path);
-        const name = ctx && ctx[1] ? ctx[1] : "Context";
+      if (isContext) {
+        const name = ctxName;
         out.push({
           kind: "contextValue",
-          owner: `${name}.Provider`,
+          owner: providerOwner || `${name}.Provider`,
           target: r.component,
           prop: name,
-          label: `memoize the ${name} provider value`,
-          detail: `<${r.component}> re-rendered because ${name} produced a new value that is deep-equal to the previous one.`,
-          snippet: `// where <${name}.Provider> is rendered
+          label: `memoize the ${name} provider value${providerOwner ? ` in <${providerOwner}>` : ""}`,
+          detail: `<${r.component}> re-rendered because ${name} produced a new value that is deep-equal to the previous one${providerOwner ? ` (Provider rendered by <${providerOwner}>)` : ""}.`,
+          snippet: `// ${providerOwner || `where <${name}.Provider> is rendered`}
 const value = useMemo(() => ({ /* ... */ }), [/* deps */]);
 <${name}.Provider value={value}>`
         });
@@ -368,13 +416,16 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         const name = m && m[1] ? m[1] : c.path;
         let agg = byCtx.get(name);
         if (!agg) {
-          agg = { name, consumers: 0, avoidable: 0, components: /* @__PURE__ */ new Map(), commits: /* @__PURE__ */ new Set() };
+          agg = { name, consumers: 0, avoidable: 0, components: /* @__PURE__ */ new Map(), commits: /* @__PURE__ */ new Set(), providers: /* @__PURE__ */ new Map(), changedKeys: /* @__PURE__ */ new Set(), totalKeys: 0 };
           byCtx.set(name, agg);
         }
         agg.consumers++;
         if (AVOIDABLE_KINDS.has(c.kind)) agg.avoidable++;
         agg.components.set(r.component, (agg.components.get(r.component) || 0) + 1);
         agg.commits.add(r.commitId);
+        if (c.provider && c.provider.component) agg.providers.set(c.provider.component, (agg.providers.get(c.provider.component) || 0) + 1);
+        if (c.changedKeys) for (const k of c.changedKeys) agg.changedKeys.add(k);
+        if (typeof c.totalKeys === "number") agg.totalKeys = Math.max(agg.totalKeys, c.totalKeys);
       }
     }
     return [...byCtx.values()].sort((a, b) => b.consumers - a.consumers);
@@ -418,6 +469,58 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     out.fixes = rankFixes(affected);
     return out;
   }
+  function summarizeSession(session, reports) {
+    var _a;
+    const byComponent = {};
+    let avoidable = 0;
+    let wasted = 0;
+    for (const r of reports) {
+      const c = byComponent[_a = r.component] || (byComponent[_a] = { total: 0, avoidable: 0, wasted: 0 });
+      c.total++;
+      if (r.avoidable) {
+        c.avoidable++;
+        avoidable++;
+        if (typeof r.selfDuration === "number") {
+          c.wasted += r.selfDuration;
+          wasted += r.selfDuration;
+        }
+      }
+    }
+    return {
+      id: session.id,
+      name: session.name,
+      startedAt: session.startedAt,
+      endedAt: session.endedAt,
+      total: reports.length,
+      avoidable,
+      wasted,
+      byComponent,
+      fixes: rankFixes(reports).map((f) => ({ key: f.key, label: f.label, count: f.count }))
+    };
+  }
+  function compareSessions(before, after) {
+    const names = /* @__PURE__ */ new Set([...Object.keys(before.byComponent), ...Object.keys(after.byComponent)]);
+    const rows = [];
+    for (const component of names) {
+      const b = before.byComponent[component]?.avoidable || 0;
+      const a = after.byComponent[component]?.avoidable || 0;
+      if (b || a) rows.push({ component, before: b, after: a, delta: a - b });
+    }
+    rows.sort((x, y) => x.delta - y.delta || y.before - x.before || x.component.localeCompare(y.component));
+    const afterKeys = new Set(after.fixes.map((f) => f.key));
+    const beforeKeys = new Set(before.fixes.map((f) => f.key));
+    return {
+      before,
+      after,
+      rows,
+      total: { before: before.total, after: after.total, delta: after.total - before.total },
+      avoidable: { before: before.avoidable, after: after.avoidable, delta: after.avoidable - before.avoidable },
+      wasted: { before: before.wasted, after: after.wasted, delta: after.wasted - before.wasted },
+      resolvedFixes: before.fixes.filter((f) => !afterKeys.has(f.key)),
+      newFixes: after.fixes.filter((f) => !beforeKeys.has(f.key))
+    };
+  }
+  var PRIORITY_LABEL = { immediate: "discrete input", "user-blocking": "continuous input", normal: "transition / async", low: "low", idle: "idle" };
   function reportToMarkdown(r) {
     const lines = [];
     lines.push(`### <${r.component}> ${r.avoidable ? "avoidable re-render" : `re-render (${r.trigger})`} #${r.renderCount}`);
@@ -541,7 +644,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     if (r.owner) by.append(el("div", { class: "meta", text: `Created by <${r.owner}>` }));
     if (r.memoized === false) by.append(el("div", { class: "meta", text: "Not memoized (re-renders whenever its parent does)" }));
     else if (r.memoized === true) by.append(el("div", { class: "meta", text: "Memoized (React.memo / PureComponent)" }));
-    if (r.commitId) by.append(el("div", { class: "meta", text: `Commit #${r.commitId}` }));
+    if (r.commitId) by.append(el("div", { class: "meta", text: `Commit #${r.commitId}${r.commitPriority ? ` \xB7 ${PRIORITY_LABEL[r.commitPriority] || r.commitPriority} priority` : ""}` }));
     frag.append(by);
     frag.append(kvSection("Props", r.props ? r.props.next : {}, r.propChanges || []));
     const hooks = [].concat(r.hookChanges || [], r.stateChanges || []);
@@ -652,7 +755,11 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       origin: null,
       legacyCommit: 0,
       tabLabel: transport.tabLabel ?? null,
-      compact: false
+      compact: false,
+      sessions: [],
+      recording: null,
+      selectedSession: null,
+      compareWith: null
     };
     let persistTimer = null;
     let queue = [];
@@ -688,6 +795,10 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       transport.badge?.(0);
     });
     const replayBtn = iconButton("\u21BB", "Replay", "Replay buffered reports from the page", () => transport.replay?.());
+    const recordBtn = iconButton("\u23FA", "Record", "Record a session to compare before and after a fix", () => {
+      if (state.recording) stopRecording();
+      else startRecording();
+    });
     const exportBtn = iconButton("\u2913", "Export", "Export reports as JSON", exportJson);
     const importInput = el("input", { type: "file", accept: "application/json,.json", class: "hidden-file" });
     importInput.addEventListener("change", () => {
@@ -719,6 +830,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       pauseBtn,
       clearBtn,
       replayBtn,
+      recordBtn,
       el("span", { class: "sep" }),
       exportBtn,
       importBtn,
@@ -738,7 +850,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       ["tree", "Tree"],
       ["offenders", "Offenders"],
       ["commits", "Commits"],
-      ["fixes", "Fixes"]
+      ["fixes", "Fixes"],
+      ["sessions", "Sessions"]
     ];
     const viewButtons = /* @__PURE__ */ new Map();
     for (const [id, label] of VIEWS) {
@@ -874,6 +987,27 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         transport.storage.set("panel", saved);
       }, 150);
     }
+    function restoreSessions(raw) {
+      if (!Array.isArray(raw)) return;
+      for (const s of raw) {
+        if (!isRecord(s) || typeof s.id !== "string" || typeof s.name !== "string" || !isRecord(s.byComponent)) continue;
+        if (state.sessions.some((x) => x.id === s.id)) continue;
+        state.sessions.push({
+          id: s.id,
+          name: s.name,
+          startedAt: typeof s.startedAt === "number" ? s.startedAt : 0,
+          endedAt: typeof s.endedAt === "number" ? s.endedAt : 0,
+          total: typeof s.total === "number" ? s.total : 0,
+          avoidable: typeof s.avoidable === "number" ? s.avoidable : 0,
+          wasted: typeof s.wasted === "number" ? s.wasted : 0,
+          byComponent: s.byComponent,
+          fixes: Array.isArray(s.fixes) ? s.fixes : [],
+          reports: []
+        });
+      }
+      state.sessions.sort((a, b) => a.startedAt - b.startedAt);
+      if (state.view === "sessions") renderLeft();
+    }
     function restore(raw) {
       if (!isRecord(raw)) return;
       const saved = raw;
@@ -961,6 +1095,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       let avoidableCount = 0;
       for (const r of batch) {
         const node = ingest(r);
+        if (state.recording && state.recording.reports.length < MAX_REPORTS) state.recording.reports.push(r);
         if (r.avoidable) avoidableCount++;
         if (state.selectedKey === node.key) {
           touchedSelected = true;
@@ -970,7 +1105,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       renderLeft();
       renderStream(batch);
       renderSummary();
-      if (touchedSelected || state.view === "commits" || state.view === "fixes" || state.tab === "root") renderDetails();
+      if (touchedSelected || state.view === "commits" || state.view === "fixes" || state.tab === "root" || state.recording && state.tab === "session") renderDetails();
       if (state.polling && avoidableCount) transport.badge?.(state.reports.filter((r) => r.avoidable).length);
     }
     function enqueue(report) {
@@ -1031,6 +1166,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       if (state.view === "tree") renderTree();
       else if (state.view === "offenders") renderOffenders();
       else if (state.view === "commits") renderCommits();
+      else if (state.view === "sessions") renderSessions();
       else renderFixes();
     }
     const rowEls = /* @__PURE__ */ new Map();
@@ -1289,6 +1425,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
             el("span", { class: "t", text: fmtTime(analysis.receivedAt) }),
             el("span", { class: "n", text: plural(analysis.total, "render") }),
             analysis.avoidable ? el("span", { class: "badge avoid", text: `${analysis.avoidable} avoidable` }) : el("span", { class: "badge", text: "ok" }),
+            analysis.reports[0]?.commitPriority ? el("span", { class: "prio " + analysis.reports[0].commitPriority, title: "commit priority", text: PRIORITY_LABEL[analysis.reports[0].commitPriority] || analysis.reports[0].commitPriority }) : null,
             el("span", { class: "root", text: root2 ? `\u2190 <${root2.name}> (${root2.trigger})` : "" })
           ])
         );
@@ -1332,13 +1469,16 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       if (contexts.length) {
         const list = el("ul", { class: "contexts" });
         for (const c of contexts) {
+          const partial = c.changedKeys.size > 0 && c.totalKeys > c.changedKeys.size;
           list.append(
             el("li", null, [
               el("span", { class: "name", text: c.name }),
+              c.providers.size ? el("span", { class: "meta", text: ` (provided by ${componentList(c.providers)})` }) : null,
               el("span", {
                 class: "meta",
                 text: ` changed in ${plural(c.commits.size, "commit")}, ${plural(c.consumers, "consumer re-render")}${c.avoidable ? `, ${c.avoidable} with an equal value` : ""}: ${componentList(c.components)}`
-              })
+              }),
+              partial ? el("div", { class: "meta hint", text: `only ${[...c.changedKeys].join(", ")} of ${c.totalKeys} keys changed: consumers of the other keys re-render for nothing. Split the context or select slices.` }) : null
             ])
           );
         }
@@ -1351,6 +1491,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       if (state.tab === "commit" && state.selectedCommit !== null) renderCommitDetails();
       else if (state.tab === "fixlist" && state.selectedFix) renderFixDetails();
       else if (state.tab === "root" && state.selectedRoot) renderRootDetails();
+      else if (state.tab === "session" && state.selectedSession) renderSessionDetails();
       else renderNodeDetails(state.selectedKey ? state.nodesByKey.get(state.selectedKey) ?? null : null);
       if (openLabels.size) {
         for (const d of details.querySelectorAll("details.obj")) {
@@ -1550,6 +1691,187 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         body.append(fixView(s.fixes, { copy: copyText }));
       }
     }
+    const sessionSummary = (s) => summarizeSession(s, s.reports);
+    function persistSessions() {
+      if (!transport.storage) return;
+      const summaries = state.sessions.filter((s) => s.endedAt).slice(-20).map(sessionSummary);
+      transport.storage.set("sessions", summaries);
+    }
+    function startRecording(name) {
+      if (state.recording) stopRecording();
+      const startedAt = Date.now();
+      const session = {
+        id: `s${startedAt.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+        name: name || `Session ${state.sessions.length + 1}`,
+        startedAt,
+        endedAt: null,
+        total: 0,
+        avoidable: 0,
+        wasted: 0,
+        byComponent: {},
+        fixes: [],
+        reports: []
+      };
+      state.sessions.push(session);
+      state.recording = session;
+      recordBtn.classList.add("active", "rec");
+      recordBtn.querySelector(".glyph").textContent = "\u23F9";
+      recordBtn.querySelector(".label").textContent = "Stop";
+      state.selectedSession = session.id;
+      state.tab = "session";
+      if (state.view === "sessions") renderLeft();
+      renderDetails();
+      toast(`Recording ${session.name}`);
+      return session;
+    }
+    function stopRecording() {
+      const session = state.recording;
+      if (!session) return null;
+      session.endedAt = Date.now();
+      Object.assign(session, sessionSummary(session), { reports: session.reports });
+      state.recording = null;
+      recordBtn.classList.remove("active", "rec");
+      recordBtn.querySelector(".glyph").textContent = "\u23FA";
+      recordBtn.querySelector(".label").textContent = "Record";
+      persistSessions();
+      if (state.view === "sessions") renderLeft();
+      if (state.tab === "session") renderDetails();
+      toast(`${session.name}: ${plural(session.avoidable, "avoidable re-render")}`);
+      return session;
+    }
+    const fmtDuration = (s) => {
+      const ms = (s.endedAt || Date.now()) - s.startedAt;
+      return ms < 6e4 ? `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s` : `${Math.round(ms / 6e4)} min`;
+    };
+    function renderSessions() {
+      table.textContent = "";
+      if (!state.sessions.length) {
+        table.append(
+          el("div", { class: "empty" }, [
+            el("div", { text: "No sessions yet." }),
+            el("div", null, ["Press ", el("code", { text: "Record" }), ", use the app, press ", el("code", { text: "Stop" }), ". Apply a fix, record again, and compare the two."])
+          ])
+        );
+        return;
+      }
+      const list = el("ul", { class: "sessions" });
+      for (const s of [...state.sessions].reverse()) {
+        const live = s === state.recording;
+        const summary2 = live ? sessionSummary(s) : s;
+        list.append(
+          el(
+            "li",
+            {
+              class: (state.selectedSession === s.id && state.tab === "session" ? "selected " : "") + (live ? "live" : ""),
+              onclick: () => {
+                state.selectedSession = s.id;
+                state.tab = "session";
+                renderLeft();
+                renderDetails();
+              }
+            },
+            [
+              el("span", { class: "name", text: s.name }),
+              live ? el("span", { class: "badge rec", text: "recording" }) : el("span", { class: "t", text: fmtDuration(summary2) }),
+              el("span", { class: "n", text: plural(summary2.total, "render") }),
+              summary2.avoidable ? el("span", { class: "badge avoid", text: `${summary2.avoidable} avoidable` }) : el("span", { class: "badge", text: "clean" }),
+              summary2.wasted ? el("span", { class: "meta", text: fmtMs(summary2.wasted) }) : null
+            ]
+          )
+        );
+      }
+      table.append(list);
+    }
+    function deltaCell(n, suffix = "", decimals) {
+      const cls = n < 0 ? "good" : n > 0 ? "bad" : "";
+      const value = decimals !== void 0 ? n.toFixed(decimals) : Number.isInteger(n) ? String(n) : n.toFixed(1);
+      return el("td", { class: "num delta " + cls, text: n === 0 ? "\xB10" : `${n > 0 ? "+" : ""}${value}${suffix}` });
+    }
+    function renderSessionDetails() {
+      const session = state.sessions.find((s) => s.id === state.selectedSession);
+      if (!session) {
+        details.append(el("div", { class: "empty", text: "Select a session." }));
+        return;
+      }
+      const live = session === state.recording;
+      const summary2 = live ? sessionSummary(session) : session;
+      const nameInput = el("input", { type: "text", class: "session-name", value: session.name, title: "Rename" });
+      nameInput.addEventListener("change", () => {
+        session.name = nameInput.value.trim() || session.name;
+        nameInput.value = session.name;
+        persistSessions();
+        if (state.view === "sessions") renderLeft();
+      });
+      details.append(
+        el("div", { class: "details-header" }, [
+          nameInput,
+          el("span", { class: "meta", text: `${live ? "recording \xB7 " : ""}${fmtDuration(summary2)} \xB7 ${plural(summary2.total, "render")}, ${summary2.avoidable} avoidable${summary2.wasted ? ", " + fmtMs(summary2.wasted) + " wasted" : ""}` }),
+          live ? el("button", { class: "ib", onclick: () => stopRecording() }, "\u23F9 Stop") : null
+        ])
+      );
+      const body = el("div", { class: "details-body" });
+      details.append(body);
+      const others = state.sessions.filter((s) => s !== session && s.endedAt);
+      const compareSec = el("div", { class: "section compare" }, [el("h3", { text: "Compare" })]);
+      if (!others.length) {
+        compareSec.append(el("div", { class: "meta", text: "Record a second session (after a fix) to compare against this one." }));
+      } else {
+        const select2 = el("select", { class: "compare-select" });
+        select2.append(el("option", { value: "", text: "Compare with\u2026" }));
+        for (const o of others) select2.append(el("option", { value: o.id, text: o.name }));
+        const baseline = state.compareWith && others.some((o) => o.id === state.compareWith) ? state.compareWith : others[others.length - 1].id;
+        select2.value = baseline;
+        select2.addEventListener("change", () => {
+          state.compareWith = select2.value || null;
+          renderDetails();
+        });
+        compareSec.append(el("div", { class: "meta" }, ["Baseline: ", select2, " \u2192 this session"]));
+        const before = others.find((o) => o.id === baseline);
+        const cmp = compareSessions(before, summary2);
+        const t = el("table", { class: "grid compare-grid" });
+        t.append(el("thead", null, el("tr", null, [el("th", { text: "Avoidable re-renders" }), el("th", { class: "num", text: before.name }), el("th", { class: "num", text: summary2.name }), el("th", { class: "num", text: "\u0394" })])));
+        const tb = el("tbody");
+        const totalRow = el("tr", { class: "total" }, [el("td", { text: "All components" }), el("td", { class: "num", text: String(cmp.avoidable.before) }), el("td", { class: "num", text: String(cmp.avoidable.after) })]);
+        totalRow.append(deltaCell(cmp.avoidable.delta));
+        tb.append(totalRow);
+        if (cmp.wasted.before || cmp.wasted.after) {
+          const w = el("tr", { class: "total" }, [el("td", { text: "Wasted time" }), el("td", { class: "num", text: fmtMs(cmp.wasted.before) }), el("td", { class: "num", text: fmtMs(cmp.wasted.after) })]);
+          w.append(deltaCell(cmp.wasted.delta, " ms", 1));
+          tb.append(w);
+        }
+        for (const row of cmp.rows) {
+          const tr = el("tr", null, [el("td", { class: "c" }, el("span", { class: "name", text: row.component })), el("td", { class: "num", text: String(row.before) }), el("td", { class: "num", text: String(row.after) })]);
+          tr.append(deltaCell(row.delta));
+          tb.append(tr);
+        }
+        t.append(tb);
+        compareSec.append(t);
+        if (cmp.resolvedFixes.length) compareSec.append(el("div", { class: "meta" }, [el("b", { text: "No longer needed: " }), cmp.resolvedFixes.map((f) => f.label).join(" \xB7 ")]));
+        if (cmp.newFixes.length) compareSec.append(el("div", { class: "meta" }, [el("b", { text: "New: " }), cmp.newFixes.map((f) => f.label).join(" \xB7 ")]));
+      }
+      body.append(compareSec);
+      const comps = Object.entries(summary2.byComponent).sort((a, b) => b[1].avoidable - a[1].avoidable || b[1].total - a[1].total);
+      if (comps.length) {
+        const t = el("table", { class: "grid" });
+        t.append(el("thead", null, el("tr", null, [el("th", { text: "Component" }), el("th", { class: "num", text: "Avoidable" }), el("th", { class: "num", text: "Total" }), el("th", { class: "num", text: "Wasted" })])));
+        const tb = el("tbody");
+        for (const [name, c] of comps.slice(0, 50)) {
+          tb.append(
+            el("tr", { onclick: () => panelApi.select(name) }, [
+              el("td", { class: "c" }, el("span", { class: "name", text: name })),
+              el("td", { class: "num" }, c.avoidable ? el("span", { class: "badge avoid", text: String(c.avoidable) }) : "0"),
+              el("td", { class: "num", text: String(c.total) }),
+              el("td", { class: "num", text: c.wasted ? fmtMs(c.wasted) : "" })
+            ])
+          );
+        }
+        t.append(tb);
+        body.append(el("div", { class: "section" }, [el("h3", { text: "Components in this session" }), t]));
+      }
+      if (summary2.fixes.length) {
+        body.append(el("div", { class: "section" }, [el("h3", { text: "Fixes suggested" }), el("ol", { class: "fix-list" }, summary2.fixes.slice(0, 10).map((f) => el("li", null, [el("span", { class: "badge avoid", text: String(f.count) }), " ", el("span", { class: "mono", text: f.label })])))]));
+      }
+    }
     const itemEls = /* @__PURE__ */ new WeakMap();
     const streamItems = virtualList(streamList, ITEM_H, (r) => {
       let li = itemEls.get(r);
@@ -1577,7 +1899,14 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       streamItems.setItems(streamShown);
     }
     function exportJson() {
-      const data = { rerenderLens: true, version: PROTOCOL, exportedAt: (/* @__PURE__ */ new Date()).toISOString(), origin: state.origin, reports: state.reports };
+      const data = {
+        rerenderLens: true,
+        version: PROTOCOL,
+        exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        origin: state.origin,
+        reports: state.reports,
+        sessions: state.sessions.filter((s) => s.endedAt).map(sessionSummary)
+      };
       const text = JSON.stringify(data, null, 2);
       const name = `rerender-lens-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`;
       if (transport.download) {
@@ -1600,6 +1929,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       const reports = Array.isArray(data) ? data : isRecord(data) && Array.isArray(data.reports) ? data.reports : null;
       if (!reports) throw new Error("not a rerender-lens export");
       clearAll();
+      if (isRecord(data) && Array.isArray(data.sessions)) restoreSessions(data.sessions);
       let n = 0;
       for (const p of reports) {
         const r = normalizeReport(p);
@@ -1846,7 +2176,9 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         for (const n of state.nodesByKey.values()) if (n.name === name) return select(n);
       },
       setView,
-      openSettings: () => toggleSettings(true)
+      openSettings: () => toggleSettings(true),
+      startRecording,
+      stopRecording
     };
     if (options.theme === "dark") document.documentElement.classList.add("theme-dark");
     state.origin = transport.origin || null;
@@ -1858,6 +2190,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     measure();
     if (transport.storage) {
       Promise.resolve(transport.storage.get("panel")).then(restore, () => {
+      });
+      Promise.resolve(transport.storage.get("sessions")).then(restoreSessions, () => {
       });
     }
     transport.subscribe(handle);
@@ -2196,6 +2530,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         instanceId: 4,
         commitId: 1,
         memoized: true,
+        commitPriority: "immediate",
         owner: "ProductList",
         parent: { name: "ProductPage", trigger: "state" },
         selfDuration: 0.8,
@@ -2226,6 +2561,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         instanceId: 2,
         commitId: 1,
         memoized: false,
+        commitPriority: "immediate",
         owner: "ProductPage",
         parent: { name: "ProductPage", trigger: "state" },
         selfDuration: 0.3,
@@ -2263,11 +2599,12 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         parent: null,
         commitId: 2,
         memoized: true,
+        commitPriority: "normal",
         props: { prev: {}, next: {} },
         propChanges: [],
         stateChanges: [],
-        hookChanges: [{ path: "useContext(Theme)", hook: "useContext", index: 0, kind: "different", prev: "light", next: "dark" }],
-        reasons: ["useContext #0 changed."]
+        hookChanges: [{ path: "useContext(Theme)", hook: "useContext", index: 0, kind: "different", prev: { mode: "light", user: "ann" }, next: { mode: "dark", user: "ann" }, provider: { component: "App", path: ["App"] }, changedKeys: ["mode"], totalKeys: 2 }],
+        reasons: ['useContext(Theme) changed (provided by <App>): only "mode" of 2 keys changed, yet every consumer re-renders. Split the context or memoize the slices consumers read.']
       }
     ];
   }
@@ -2359,7 +2696,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     floodReports,
     bootStandalone,
     createRelayTransport,
-    analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary }
+    analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary, summarizeSession, compareSessions }
   };
   window.RerenderLensPanel = api;
   var hasChrome = typeof chrome !== "undefined" && !!chrome && !!chrome.runtime && !!chrome.runtime.id;

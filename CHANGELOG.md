@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Sessions.** Record, use the app, Stop; apply a fix; record again. The Sessions view compares
+  two sessions: avoidable re-renders per component with deltas, totals, wasted time, and which
+  suggested fixes went away. Summaries persist per origin; exports include them.
+- **Provider attribution.** A `useContext` change now names the component that renders the
+  Provider and, for object values, which keys changed. When only some keys changed the reason
+  and the Fixes view say so and suggest splitting the context or selecting slices.
+- **Children diffs.** Elements are serialized with their props, so a changed `children` prop
+  shows the differing leaf (`children[0].props.label`); re-created children get their own advice
+  and fix snippet (memoize or hoist them).
+- **Commit priority.** Every report carries the priority React gave the commit (discrete input,
+  continuous input, transition / async, low, idle); the Commits list and report show it. The
+  bridge `info()` also counts scheduled roots vs commits.
+- Not done: custom hook names for hook changes. React DevTools gets them by re-running the
+  component with a fake dispatcher; doing that from a commit hook is too invasive.
 - The panel outside DevTools: **Open side panel** shows it in Chrome's side panel next to the
   page, **Open in window** in its own window (toolbar popup, or the new buttons in the DevTools
   panel). Both use the background relay plus `chrome.scripting` instead of DevTools APIs, follow
