@@ -8,6 +8,8 @@ React re-render debugger. See README.md for the public API.
 - `npm run build:ext` packages `extension/` into `dist-extension/` (Chrome/Edge/Firefox zips; syncs the manifest version from package.json).
 - `npm run check` runs all of the above and is `prepublishOnly`.
 - `npm run e2e` (Playwright, Chromium with the extension loaded against the example app; needs `npm run build` and `npm --prefix examples/vite-react install` first).
+- `npm run lint:ext` (web-ext lint on the Firefox package), `npm run build:docs`, `npm run docs:media`.
+- `npm run check` runs the tests before `build`; after changing `extension/src/panel.ts` run `npx tsup` first or the jsdom tests read a stale `extension/panel.js`.
 - `npm run dev:example` builds the library and starts `examples/vite-react` on port 5199 (`/` runs the library itself, `/plain.html` does not, for testing injection).
 
 ## Layout
@@ -21,6 +23,9 @@ React re-render debugger. See README.md for the public API.
 - `src/hook.ts` — `useWhyRerender`. `src/notifiers.ts` — collector. `src/overlay.ts` — in-page highlight/flash DOM.
 - `src/devtools.ts` — postMessage bridge (protocol 2): `createDevtoolsNotifier`, `window.__RERENDER_LENS_DEVTOOLS__` (`replay`, `pull`, `info`, `configure`, `highlight`, `inspect`, ...), `serializeOptions`.
 - `src/inject.ts` — entry of the IIFE bundle (everything but `useWhyRerender`, which needs `react` as a module). `src/version.ts` — `VERSION` from a build define.
+- `src/hookNames.ts` — opt-in custom hook name replay. `src/fixes.ts`, `src/sessions.ts`, `src/budget.ts` — pure ranking, summary/compare and budget helpers (the panel keeps its own typed copy of the ranking logic). `src/cli.ts` — the `rerender-lens` bin (`fixes`, `summary`, `compare`, `budget`).
+- `src/vite.ts` — `rerender-lens/vite` plugin (virtual setup module + `<script type="module">` prepended in dev). `src/setup.ts` — `rerender-lens/setup` side-effect entry (Next.js `instrumentation-client`, Webpack entry arrays).
+- `scripts/build-docs.mjs` renders README + extension README to `docs-site/` (GitHub Pages workflow); `scripts/docs-media.mjs` captures `docs/media/*` with Playwright (its ffmpeg cannot encode GIF, so the recording stays webm).
 - `examples/vite-react` — dogfood app (links the library via `file:../..`, so `npm run build` first).
 - `extension/` — MV3 DevTools extension. The panel is TypeScript (`extension/src/panel.ts`, one file, `export {}`-free module via `declare global`); `npm run build` (tsup, third entry) writes the committed `extension/panel.js`, which tests and load-unpacked use, and CI fails if it is stale. Everything else in `extension/` is plain JS. `panel.js` exposes `RerenderLensPanel.createPanel(root, transport)` plus pure `analysis` helpers (`fixesFor`, `rankFixes`, `rootCauseOf`, `analyzeCommit`, `rootCauseSummary`, `diffLeaves`); `panel.html?demo` runs it with sample data, `?demo&flood=N` with N synthetic reports; `background.js` routes messages, keeps the badge and registers per-origin scripts (`shared.js`); `inject.js` bootstraps the injected library; `sidebar.*` is the Elements sidebar; `popup.*` enables origins; `store/` holds listing/privacy/publishing docs.
 - `scripts/` — `build-extension.mjs` (+ `zip.mjs`, dependency-free zip writer), `sync-version.mjs`.
