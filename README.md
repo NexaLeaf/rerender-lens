@@ -15,7 +15,61 @@ Nothing in React is patched or wrapped, so it works with Fast Refresh, `React.me
     at App > ProductPage > ProductRow
 ```
 
-## Install
+Two ways to use it: the **DevTools extension** (a "Re-renders" panel next to Elements and
+Console, no app code needed) or the **npm package** (console output, test assertions, and the
+bridge the extension reads).
+
+## Chrome extension
+
+The extension adds a **Re-renders** panel to DevTools: a component tree with avoidable counts,
+why each component rendered, which ancestor started the cascade, the props and hooks that
+changed, and the fix as a snippet you can copy. Other views rank components by wasted renders
+(Offenders), group renders by React commit with their root cause (Commits), and rank every fix
+by how many re-renders it removes (Fixes). It also gives you an Elements-panel sidebar for the
+selected node, a badge with the avoidable count of the tab, hover-to-highlight in the page, and
+"open source" links into the Sources panel.
+
+### Install
+
+Until the Web Store listing is live, install it unpacked:
+
+1. Download `rerender-lens-chrome-<version>.zip` from the
+   [latest release](https://github.com/NexaLeaf/rerender-lens/releases) and unzip it, or build it
+   from a clone with `npm install && npm run build` and use the `extension/` folder.
+2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, pick the folder.
+3. Open your app, open DevTools, pick the **Re-renders** tab.
+
+Edge loads the same folder from `edge://extensions`. Firefox 128+ uses the `firefox` zip from the
+release, via `about:debugging`.
+
+### Connect a page
+
+Local development hosts (`localhost`, `127.0.0.1`, `*.localhost`, `*.local`) work out of the box.
+Any other site: click the toolbar icon and **Enable on this site** (a one-time host permission
+for that origin only).
+
+Then pick one of two modes:
+
+- **Inject the library** (no app code): tick *Inject the library* in the toolbar popup or in the
+  panel's Settings and reload. The extension loads rerender-lens into the page before React,
+  tracking every `React.memo` / `PureComponent` by default. Change what is tracked from
+  Settings; the choice is saved per origin.
+- **The page runs the library**: install the package and pass the DevTools notifier (see below).
+  This is the way to go when you also want console output or want to commit the setup.
+
+```ts
+import { init, createDevtoolsNotifier } from 'rerender-lens';
+init({ trackAllMemoized: true, silent: true, notifier: createDevtoolsNotifier() });
+```
+
+Production React builds are detected and flagged (names may be minified, hooks unlabeled). If
+React DevTools is also installed and its Components tab comes up empty with injection on, tick
+*Let React DevTools create the hook* for that origin.
+
+`extension/README.md` has the details: keyboard shortcuts, how the transport works, Firefox and
+Edge packaging, and the store listing.
+
+## Install the package
 
 ```sh
 npm i -D rerender-lens
@@ -166,9 +220,8 @@ reports are buffered. The bridge at `window.__RERENDER_LENS_DEVTOOLS__` exposes:
 | `highlight(instanceId)` / `flashAvoidable(on)` | outline a component's DOM in the page, or flash avoidable renders |
 | `inspect(node)` | component, instance id and recent reports for a DOM node (DevTools `$0`) |
 
-The Chrome extension in `extension/` consumes this. With the extension you do not even need the
-`init` call: enable *Inject the library* for an origin and the extension loads rerender-lens into
-the page before React (see `extension/README.md`).
+The DevTools extension consumes this (see [Chrome extension](#chrome-extension) above); with
+injection enabled it needs no `init` call at all.
 
 Every report also carries `commitId` (shared by all reports of one React commit) and, in dev
 builds, `source` (where the element was created).
@@ -236,6 +289,10 @@ npm install
 npm --prefix examples/vite-react install
 npm run dev:example
 ```
+
+`http://localhost:5199/` runs the library itself and reports to the console and the extension.
+`http://localhost:5199/plain.html` is the same app without the library, for trying the
+extension's *Inject the library* mode.
 
 ## Migrating from why-did-you-render
 
