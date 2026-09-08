@@ -3,11 +3,12 @@
  * hook, exactly like React DevTools itself. Element types are never touched, so
  * Fast Refresh, memo comparators and component identity all stay intact.
  */
-import type { Change, CommitPriority, HookChange, HookSnapshot, ParentInfo, RenderTrigger, SourceLocation } from './types';
+import type { Change, CommitCause, CommitPriority, HookChange, HookSnapshot, ParentInfo, RenderTrigger, SourceLocation } from './types';
 import { classify, diffRecords } from './diff';
 import { buildReport } from './report';
 import { dispatch, getState, warnOnce } from './state';
 import { getDisplayName, shouldTrack } from './tracker';
+import { resolveHookNames, type DispatcherRef } from './hookNames';
 
 // React work tags (stable since 16.9).
 const FunctionComponent = 0;
@@ -16,6 +17,7 @@ const HostRoot = 3;
 const HostComponent = 5;
 const ContextProvider = 10;
 const ForwardRef = 11;
+const SuspenseComponent = 13;
 const MemoComponent = 14;
 const SimpleMemoComponent = 15;
 const PerformedWork = 1;
@@ -59,6 +61,8 @@ export interface Fiber {
 
 export interface FiberRoot {
   current: Fiber;
+  /** Dev builds with a DevTools hook present: fibers that scheduled the update being committed. */
+  memoizedUpdaters?: Set<Fiber>;
 }
 
 /** What `react-dom` passes to `hook.inject`. */
@@ -116,6 +120,7 @@ export function ensureDevtoolsHook(): DevtoolsHook {
  * fill `hook.renderers`, so `attach` wraps `inject` and records what react-dom registers.
  */
 const capturedRenderers = new Map<number, RendererInfo>();
+const dispatcherRefs = new Map<number, DispatcherRef>();
 const INJECT_WRAPPED = Symbol.for('rerender-lens.injectWrapped');
 
 function pickRenderer(r: unknown): RendererInfo {
@@ -129,10 +134,28 @@ function wrapInject(hook: DevtoolsHook): void {
   const original = hook.inject;
   hook.inject = function (this: unknown, renderer: unknown) {
     const id = original.call(this, renderer);
-    capturedRenderers.set(typeof id === 'number' ? id : capturedRenderers.size + 1, pickRenderer(renderer));
+    const key = typeof id === 'number' ? id : capturedRenderers.size + 1;
+    capturedRenderers.set(key, pickRenderer(renderer));
+    const ref = (renderer as { currentDispatcherRef?: DispatcherRef } | null)?.currentDispatcherRef;
+    if (ref && typeof ref === 'object') dispatcherRefs.set(key, ref);
     return id;
   };
   h[INJECT_WRAPPED] = true;
+}
+
+/** The dispatcher ref react-dom injected (needed to replay hooks for custom hook names). */
+export function getDispatcherRef(): DispatcherRef | null {
+  for (const ref of dispatcherRefs.values()) return ref;
+  const g = globalThis as unknown as Record<string, DevtoolsHook | undefined>;
+  const hook = g[HOOK];
+  let found: DispatcherRef | null = null;
+  if (hook && hook.renderers && typeof hook.renderers.forEach === 'function') {
+    hook.renderers.forEach((r) => {
+      const ref = (r as { currentDispatcherRef?: DispatcherRef } | null)?.currentDispatcherRef;
+      if (!found && ref && typeof ref === 'object') found = ref;
+    });
+  }
+  return found;
 }
 
 /** Start observing commits. Returns a function that stops observing. */
@@ -552,6 +575,27 @@ function nearestRenderedAncestor(fiber: Fiber, cache: Map<Fiber, ParentInfo | nu
   return null;
 }
 
+/** Names of the component fibers that scheduled this commit (React's updater tracking, dev builds). */
+function updatersOf(root: FiberRoot): string[] {
+  const set = root.memoizedUpdaters;
+  if (!set || typeof set.forEach !== 'function') return [];
+  const names: string[] = [];
+  set.forEach((f) => {
+    const comp = nearestComponent(f);
+    if (comp) {
+      const name = fiberName(comp);
+      if (!names.includes(name)) names.push(name);
+    }
+  });
+  return names;
+}
+
+/** The previous commit, to spot effect → setState loops. */
+let lastCommit: { id: number; at: number; rendered: Set<string> } | null = null;
+const EFFECT_LOOP_WINDOW_MS = 50;
+
+const nowMs = (): number => (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now());
+
 /** Inspect one committed root. */
 export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void {
   const s = getState();
@@ -561,15 +605,20 @@ export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void
   const trackHooks = o.trackHooks !== false;
 
   const rendered: Fiber[] = [];
+  const renderedNames = new Set<string>();
   let hot = false;
+  let suspenseResolved = false;
   const stack: Fiber[] = [root.current];
   while (stack.length) {
     const fiber = stack.pop()!;
     const alt = fiber.alternate;
     if (alt && isComponentTag(fiber.tag) && didRender(fiber)) {
       if (isHotSwapped(fiber, alt)) hot = true;
+      renderedNames.add(fiberName(fiber));
       if (shouldTrack(fiberType(fiber), o)) rendered.push(fiber);
     }
+    // A Suspense boundary whose memoizedState went from "showing fallback" (non-null) to content.
+    if (fiber.tag === SuspenseComponent && alt && alt.memoizedState !== null && fiber.memoizedState === null) suspenseResolved = true;
     // A bailed-out subtree keeps the same child fiber objects; nothing below it rendered.
     if (!alt || fiber.child !== alt.child) {
       for (let c = fiber.child; c; c = c.sibling) stack.push(c);
@@ -579,13 +628,35 @@ export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void
 
   // Depth-first pop order is reversed; restore document order for readable output.
   rendered.reverse();
-  if (rendered.length === 0) return;
+  const at = nowMs();
+  const updaters = updatersOf(root);
+  // Effect loop: the update was scheduled by something that rendered in the previous commit, right after it.
+  let commitCause: CommitCause | undefined;
+  let afterCommit: number | undefined;
+  if (lastCommit && at - lastCommit.at < EFFECT_LOOP_WINDOW_MS && updaters.some((u) => lastCommit!.rendered.has(u))) {
+    commitCause = 'effect-after-commit';
+    afterCommit = lastCommit.id;
+  } else if (suspenseResolved) commitCause = 'suspense-resolved';
+  if (rendered.length === 0) {
+    lastCommit = { id: s.nextCommitId, at, rendered: renderedNames };
+    return;
+  }
   const commitId = s.nextCommitId++;
+  lastCommit = { id: commitId, at, rendered: renderedNames };
+  const dispatcherRef = o.resolveHookNames ? getDispatcherRef() : null;
   const parentCache = new Map<Fiber, ParentInfo | null>();
   for (const fiber of rendered) {
     const alt = fiber.alternate!;
     const a = analyze(fiber, alt, trackHooks);
     const durations = durationsOf(fiber);
+    let hookState = o.includeState !== false && trackHooks ? snapshotHooks(fiber) : undefined;
+    if (dispatcherRef && fiber.tag !== ClassComponent && (a.hookChanges.length || (hookState && hookState.length))) {
+      const names = resolveHookNames(fiber, dispatcherRef);
+      if (names.size) {
+        for (const c of a.hookChanges) if (c.hook !== 'useContext' && names.has(c.index)) c.custom = names.get(c.index);
+        if (hookState) hookState = hookState.map((h) => (names.has(h.index) ? { ...h, custom: names.get(h.index) } : h));
+      }
+    }
     const report = buildReport({
       component: fiberName(fiber),
       instanceId: instanceId(fiber),
@@ -597,11 +668,15 @@ export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void
       hookChanges: a.hookChanges,
       ...(o.includeState !== false
         ? {
-            hookState: trackHooks ? snapshotHooks(fiber) : undefined,
+            hookState,
             contexts: trackHooks ? snapshotContexts(fiber) : undefined,
             state: fiber.tag === ClassComponent && fiber.memoizedState && typeof fiber.memoizedState === 'object' ? (fiber.memoizedState as Record<string, unknown>) : undefined,
           }
         : {}),
+      updaters,
+      commitCause,
+      afterCommit,
+      key: fiber.key === null || fiber.key === undefined ? null : String(fiber.key),
       parent: a.trigger === 'parent' ? nearestRenderedAncestor(fiber, parentCache, trackHooks) : null,
       owner: ownerName(fiber),
       path: componentPath(fiber),

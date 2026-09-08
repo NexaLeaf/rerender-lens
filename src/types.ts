@@ -44,6 +44,8 @@ export interface HookChange extends Change {
   /** `useContext` only, object values: top-level keys whose value changed (shallow), and how many keys the value has. */
   changedKeys?: string[];
   totalKeys?: number;
+  /** Custom hooks between the component and this primitive, innermost first (`resolveHookNames` option). */
+  custom?: string[];
 }
 
 /** Current value of one state-bearing hook (`useState`, `useReducer`, `useSyncExternalStore`) after the render. */
@@ -53,7 +55,16 @@ export interface HookSnapshot {
   hook: string;
   index: number;
   value: unknown;
+  /** Custom hooks between the component and this primitive, innermost first (`resolveHookNames` option). */
+  custom?: string[];
 }
+
+/** What made React commit, beyond the usual state/props story. */
+export type CommitCause =
+  /** State was set right after the previous commit by a component that rendered in it: an effect → setState loop. */
+  | 'effect-after-commit'
+  /** A Suspense boundary switched from its fallback to content. */
+  | 'suspense-resolved';
 
 /** Scheduler priority of the commit, as React reports it to the DevTools hook (transitions run at `normal`). */
 export type CommitPriority = 'immediate' | 'user-blocking' | 'normal' | 'low' | 'idle';
@@ -81,6 +92,13 @@ export interface RenderReport {
   commitId: number;
   /** Priority React assigned to the commit: `immediate` for discrete input (clicks, keys), `user-blocking` for continuous input, `normal` for transitions and async updates. */
   commitPriority?: CommitPriority;
+  /** Components that scheduled the update (`setState`, dispatch) for this commit, from React's updater tracking (dev builds). */
+  updaters?: string[];
+  commitCause?: CommitCause;
+  /** For `effect-after-commit`: the commit whose effects set the state. */
+  afterCommit?: number;
+  /** The element's `key`, when it has one. */
+  key?: string | null;
   /** Monotonic per-instance update count (1 = first update; mount is never reported). */
   renderCount: number;
   trigger: RenderTrigger;
@@ -135,6 +153,12 @@ export interface Options {
   trackHooks?: boolean;
   /** Put the current values of every state hook, context and class state on each report (`hookState`, `contexts`, `state`). Default true. */
   includeState?: boolean;
+  /**
+   * Resolve custom hook names (`useCart › useState#0`) by re-running each reported component type once
+   * with a stand-in dispatcher, as React DevTools does. Off by default: the extra render is visible to
+   * anything the component does during render (logging, counters). Dev builds only.
+   */
+  resolveHookNames?: boolean;
   /** Report re-renders caused by genuine changes too, not only avoidable ones. Default false. */
   logAll?: boolean;
   /** Do not print to the console. Reports still reach `notifier`. Default false. */

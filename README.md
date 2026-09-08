@@ -172,6 +172,9 @@ Every update of a tracked component produces a `RenderReport`:
 | `stateChanges` | class components: `this.state` diff |
 | `hookChanges` | `useState`, `useReducer`, `useSyncExternalStore` and `useContext` values that changed; context entries carry `provider` (who renders it) and `changedKeys` / `totalKeys` for object values |
 | `hookState`, `contexts`, `state` | current value of every state hook, every context read, and class `this.state` (off with `includeState: false`) |
+| `updaters` | components that scheduled the commit (`setState`, dispatch), from React's updater tracking |
+| `commitCause`, `afterCommit` | `effect-after-commit` (an effect of the previous commit set state) or `suspense-resolved` |
+| `key` | the element's `key`, when it has one |
 | `parent` | nearest ancestor that rendered in the same commit, and why |
 | `owner` | component that created the element (dev builds) |
 | `path` | component ancestry from the root |
@@ -219,6 +222,26 @@ test('typing in the search box does not re-render the grid rows', async () => {
 
 In Vitest or Jest, call `ensureDevtoolsHook()` (or `init`) from a `setupFiles` entry so the hook
 exists before `react-dom` is imported by your tests.
+
+### Budgets and comparisons in CI
+
+```ts
+// allow known offenders, fail on anything new or worse
+collector.assertWithinBudget(JSON.parse(readFileSync('rerender-budget.json', 'utf8')));
+// produce the baseline once: writeFileSync('rerender-budget.json', JSON.stringify(toBudget(collector.reports)))
+collector.fixes();            // ranked fixes, most re-renders removed first
+collector.summary('after');   // a session summary, comparable with compareSummaries()
+```
+
+The `rerender-lens` CLI does the same with files from the extension (Export) or from `summary()`:
+
+```sh
+npx rerender-lens fixes export.json                 # ranked fixes
+npx rerender-lens summary export.json --out before.json
+npx rerender-lens compare before.json after.json    # per-component deltas; exit 1 on regressions
+npx rerender-lens budget export.json --init > rerender-budget.json
+npx rerender-lens budget export.json rerender-budget.json   # exit 1 when a component exceeds its budget
+```
 
 ## Track a single component from the inside
 
@@ -275,7 +298,10 @@ ensureDevtoolsHook(): hook              // create the global hook early (test se
 // 'rerender-lens/vite': rerenderLens(options), renderSetupModule(options)
 // 'rerender-lens/setup': side-effect entry (init with defaults outside production)
 useWhyRerender(name, values, options?)
-createCollector(): { reports, avoidable, notifier, clear, assertNoAvoidable }
+createCollector(): { reports, avoidable, notifier, clear, assertNoAvoidable, fixes, summary, assertWithinBudget }
+rankFixes(reports), formatFixes(reports)          // ranked fixes
+summarizeReports(reports), compareSummaries(a, b), formatComparison(c), parseExport(json)
+checkBudget(reports, budget), toBudget(reports), assertWithinBudget(reports, budget)
 combineNotifiers(...notifiers): Notifier
 createDevtoolsNotifier({ bufferSize?, target?, maxDepth?, flashAvoidable? }): Notifier
 getRenderers(), isProductionReact()       // what react-dom registered on the DevTools hook
@@ -293,6 +319,7 @@ deepEqual(a, b), diffRecords(prev, next), classify(prev, next)
 | `include` / `exclude` | | display-name matchers |
 | `trackHooks` | `true` | diff hook state and contexts |
 | `includeState` | `true` | put every hook, context and class state value on each report |
+| `resolveHookNames` | `false` | label hooks with the custom hooks that own them (`useCart › useState#0`); re-runs each component type once |
 | `logAll` | `false` | print non-avoidable reports too |
 | `silent` | `false` | never print; notifier still runs |
 | `notifier` | | receives every `RenderReport` |

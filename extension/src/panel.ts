@@ -17,6 +17,8 @@ export interface Change {
   provider?: { component: string | null; path: string[] };
   changedKeys?: string[];
   totalKeys?: number;
+  /** Custom hooks between the component and the primitive (resolveHookNames). */
+  custom?: string[];
 }
 
 export type CommitPriority = 'immediate' | 'user-blocking' | 'normal' | 'low' | 'idle';
@@ -40,9 +42,13 @@ export interface Report {
   stateChanges: Change[];
   hookChanges: Change[];
   /** Current values (protocol 2 libraries with `includeState`). */
-  hookState?: { path: string; hook: string; index: number; value: unknown }[];
+  hookState?: { path: string; hook: string; index: number; value: unknown; custom?: string[] }[];
   contexts?: { name: string; value: unknown }[];
   state?: Record<string, unknown>;
+  updaters?: string[];
+  commitCause?: 'effect-after-commit' | 'suspense-resolved';
+  afterCommit?: number;
+  key?: string | null;
   parent: { name: string; trigger: string } | null;
   owner: string | null;
   path: string[];
@@ -182,6 +188,7 @@ export interface SerializableOptions {
   exclude?: string[];
   trackHooks?: boolean;
   includeState?: boolean;
+  resolveHookNames?: boolean;
   logAll?: boolean;
   silent?: boolean;
   collapse?: boolean;
@@ -226,6 +233,10 @@ export interface Transport {
   undock?(mode: 'sidepanel' | 'window'): Promise<unknown>;
   /** Standalone mode: which tab the panel follows (shown as a chip in the toolbar). */
   tabLabel?: string | null;
+  /** Text of a page resource (the module that created an element), for source context. */
+  readSource?(url: string): Promise<string | null>;
+  /** Absolute URL of this panel page, for shareable report links. */
+  panelUrl?: string;
 }
 
 export interface PanelOptions {
@@ -241,6 +252,7 @@ interface PersistedState {
   collapsed?: string[];
   treeWidth?: number;
   flashOn?: boolean;
+  byInstance?: boolean;
 }
 
 type View = 'tree' | 'offenders' | 'commits' | 'fixes' | 'sessions';
@@ -279,6 +291,7 @@ export interface PanelState {
   recording: Session | null;
   selectedSession: string | null;
   compareWith: string | null;
+  byInstance: boolean;
 }
 
 export interface Panel {
@@ -409,6 +422,10 @@ function normalizeReport(p: unknown): Report | null {
   if (Array.isArray(p.hookState)) r.hookState = p.hookState.filter((h): h is Report['hookState'] extends (infer T)[] | undefined ? T : never => isRecord(h) && typeof h.path === 'string');
   if (Array.isArray(p.contexts)) r.contexts = p.contexts.filter((c): c is { name: string; value: unknown } => isRecord(c) && typeof c.name === 'string');
   if (isRecord(p.state)) r.state = p.state;
+  if (Array.isArray(p.updaters)) r.updaters = p.updaters.filter((u): u is string => typeof u === 'string');
+  if (p.commitCause === 'effect-after-commit' || p.commitCause === 'suspense-resolved') r.commitCause = p.commitCause;
+  if (typeof p.afterCommit === 'number') r.afterCommit = p.afterCommit;
+  if (typeof p.key === 'string') r.key = p.key;
   if (isRecord(p.source) && typeof p.source.fileName === 'string') r.source = p.source as unknown as SourceLocation;
   return r;
 }
@@ -632,14 +649,26 @@ function fixesFor(r: Report): Fix[] {
         snippet: `// ${providerOwner || `where <${name}.Provider> is rendered`}\nconst value = useMemo(() => ({ /* ... */ }), [/* deps */]);\n<${name}.Provider value={value}>`,
       });
     } else if (c.hook === 'useSyncExternalStore') {
+      const chain = c.custom || [];
+      const redux = chain.some((n) => /^use(App)?Selector$/.test(n));
+      const zustand = !redux && chain.some((n) => /^use[A-Z]\w*Store$/.test(n) || n === 'useStore' || n === 'useBoundStore');
+      const via = chain.length ? ` via ${chain.join(' › ')}` : '';
       out.push({
         kind: 'storeSnapshot',
         owner: r.component,
         target: r.component,
         prop: c.path,
-        label: `stable getSnapshot in <${r.component}>`,
-        detail: `${c.path} returned a new reference with the same contents; getSnapshot must return a cached value.`,
-        snippet: `// ${r.component}\n// getSnapshot must return the same reference while the data is unchanged\nconst snapshot = useSyncExternalStore(subscribe, store.getSnapshot /* cached */);`,
+        label: redux ? `memoize the selector in <${r.component}>` : zustand ? `useShallow in <${r.component}>` : `stable getSnapshot in <${r.component}>`,
+        detail: redux
+          ? `the selector${via} returns a new object on every call, so the component re-renders on every store change.`
+          : zustand
+            ? `the store selector${via} returns a new object on every call, so the component re-renders on every store change.`
+            : `${c.path}${via} returned a new reference with the same contents; getSnapshot must return a cached value.`,
+        snippet: redux
+          ? `// ${r.component}\nimport { shallowEqual } from 'react-redux';\nconst slice = useSelector(selectSlice, shallowEqual);\n// or memoize: const selectSlice = createSelector([selectA, selectB], (a, b) => ({ a, b }));`
+          : zustand
+            ? `// ${r.component}\nimport { useShallow } from 'zustand/react/shallow';\nconst { a, b } = useStore(useShallow((s) => ({ a: s.a, b: s.b })));\n// or select a primitive: const a = useStore((s) => s.a);`
+            : `// ${r.component}\n// getSnapshot must return the same reference while the data is unchanged\nconst snapshot = useSyncExternalStore(subscribe, store.getSnapshot /* cached */);`,
       });
     } else {
       out.push({
@@ -862,6 +891,83 @@ function compareSessions(before: SessionSummary, after: SessionSummary): Compari
 
 const PRIORITY_LABEL: Record<string, string> = { immediate: 'discrete input', 'user-blocking': 'continuous input', normal: 'transition / async', low: 'low', idle: 'idle' };
 
+// ---------- shareable links ----------
+const b64url = (bytes: Uint8Array): string => {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+};
+const unb64url = (s: string): Uint8Array => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+
+/** Pipe bytes through a (de)compression stream; works in browsers and in Node's web streams alike. */
+async function transformBytes(bytes: Uint8Array, transform: ReadableWritablePair<Uint8Array, Uint8Array>): Promise<Uint8Array> {
+  const source = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+  const reader = source.pipeThrough(transform).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.length;
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
+  }
+  return out;
+}
+
+/** `report=` query value: deflated + base64url JSON when the browser can compress, plain base64url JSON otherwise. */
+async function encodeShare(report: Report): Promise<string> {
+  const json = JSON.stringify(report);
+  const bytes = new TextEncoder().encode(json);
+  if (typeof CompressionStream === 'function') {
+    try {
+      return 'd.' + b64url(await transformBytes(bytes, new CompressionStream('deflate-raw') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>));
+    } catch {
+      /* fall back to plain */
+    }
+  }
+  return 'j.' + b64url(bytes);
+}
+
+async function decodeShare(value: string): Promise<Report | null> {
+  const [kind, data] = value.split('.', 2);
+  if (!data) return null;
+  let bytes = unb64url(data);
+  if (kind === 'd') {
+    if (typeof DecompressionStream !== 'function') return null;
+    try {
+      bytes = await transformBytes(bytes, new DecompressionStream('deflate-raw') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>);
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return normalizeReport(JSON.parse(new TextDecoder().decode(bytes)));
+  } catch {
+    return null;
+  }
+}
+
+/** Lines around a location in a module's source, for the "where the element was created" box. */
+function sourceContext(text: string, line: number, around = 3): { n: number; text: string; hit: boolean }[] {
+  const lines = text.split('\n');
+  const from = Math.max(1, line - around);
+  const to = Math.min(lines.length, line + around);
+  const out: { n: number; text: string; hit: boolean }[] = [];
+  for (let n = from; n <= to; n++) out.push({ n, text: lines[n - 1] ?? '', hit: n === line });
+  return out;
+}
+
 function reportToMarkdown(r: Report): string {
   const lines: string[] = [];
   lines.push(`### <${r.component}> ${r.avoidable ? 'avoidable re-render' : `re-render (${r.trigger})`} #${r.renderCount}`);
@@ -960,6 +1066,10 @@ export interface ReportViewActions {
   openSource?: ((src: SourceLocation) => void) | null;
   highlight?: ((id: number) => void) | null;
   copy?: ((text: string) => void) | null;
+  /** Copy a link that opens this report in the panel. */
+  share?: ((r: Report) => void) | null;
+  /** Source text of a module, for the context box under the actions. */
+  readSource?: ((url: string) => Promise<string | null>) | null;
   compact?: boolean;
 }
 
@@ -992,7 +1102,31 @@ function reportView(r: Report, actions: ReportViewActions = {}): DocumentFragmen
       const copy = actions.copy;
       bar.append(el('button', { onclick: () => copy(reportToMarkdown(r)) }, '⎘ Copy as Markdown'));
     }
+    if (actions.share) {
+      const share = actions.share;
+      bar.append(el('button', { title: 'Copy a link that opens this report in the panel', onclick: () => share(r) }, '🔗 Copy link'));
+    }
     if (bar.children.length) head.append(bar);
+    // Source context: the lines around where the element was created, loaded lazily.
+    const loc = r.source;
+    if (loc && loc.lineNumber && actions.readSource) {
+      const box = el('pre', { class: 'source-context', text: 'loading source…' });
+      head.append(box);
+      const line = loc.lineNumber;
+      void actions
+        .readSource(loc.fileName)
+        .then((text) => {
+          box.textContent = '';
+          if (!text) {
+            box.textContent = 'source not available';
+            return;
+          }
+          for (const l of sourceContext(text, line)) box.append(el('span', { class: 'line' + (l.hit ? ' hit' : '') }, [el('span', { class: 'ln', text: String(l.n).padStart(4) }), ' ', l.text, '\n']));
+        })
+        .catch(() => {
+          box.textContent = 'source not available';
+        });
+    }
   }
   frag.append(head);
   const by = el('div', { class: 'section' }, [el('h3', { text: 'Rendered by' })]);
@@ -1010,6 +1144,9 @@ function reportView(r: Report, actions: ReportViewActions = {}): DocumentFragmen
   if (r.owner) by.append(el('div', { class: 'meta', text: `Created by <${r.owner}>` }));
   if (r.memoized === false) by.append(el('div', { class: 'meta', text: 'Not memoized (re-renders whenever its parent does)' }));
   else if (r.memoized === true) by.append(el('div', { class: 'meta', text: 'Memoized (React.memo / PureComponent)' }));
+  if (r.updaters && r.updaters.length) by.append(el('div', { text: `Update scheduled by ${r.updaters.map((u) => `<${u}>`).join(', ')}` }));
+  if (r.commitCause === 'effect-after-commit') by.append(el('div', { class: 'cause effect', text: `Effect loop: state set right after commit #${r.afterCommit ?? '?'}` }));
+  else if (r.commitCause === 'suspense-resolved') by.append(el('div', { class: 'cause suspense', text: 'Suspense boundary resolved in this commit' }));
   if (r.commitId) by.append(el('div', { class: 'meta', text: `Commit #${r.commitId}${r.commitPriority ? ` · ${PRIORITY_LABEL[r.commitPriority] || r.commitPriority} priority` : ''}` }));
   frag.append(by);
   frag.append(kvSection('Props', r.props ? r.props.next : {}, r.propChanges || []));
@@ -1021,10 +1158,11 @@ function reportView(r: Report, actions: ReportViewActions = {}): DocumentFragmen
       const table = el('table', { class: 'kv' });
       for (const h of r.hookState) {
         const c = hookChanges.get(h.path);
-        if (c) table.append(changeRow(h.path, c));
+        const label = h.custom && h.custom.length ? `${h.custom.join(' › ')} › ${h.path}` : h.path;
+        if (c) table.append(changeRow(label, c));
         else {
           const tr = el('tr');
-          tr.append(el('td', { class: 'k', text: h.path }));
+          tr.append(el('td', { class: 'k', text: label }));
           const td = el('td');
           td.append(valueNode(h.value));
           tr.append(td);
@@ -1062,7 +1200,7 @@ function reportView(r: Report, actions: ReportViewActions = {}): DocumentFragmen
   const hooks = ([] as Change[]).concat(r.hookChanges || [], stateChanges);
   if (hooks.length) {
     const table = el('table', { class: 'kv' });
-    for (const c of hooks) table.append(changeRow(c.path, c));
+    for (const c of hooks) table.append(changeRow(c.custom && c.custom.length ? `${c.custom.join(' › ')} › ${c.path}` : c.path, c));
     frag.append(el('div', { class: 'section' }, [el('h3', { text: 'State & hooks that changed' }), table]));
   }
   return frag;
@@ -1190,6 +1328,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     recording: null,
     selectedSession: null,
     compareWith: null,
+    byInstance: false,
   };
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let queue: Report[] = [];
@@ -1295,6 +1434,21 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     viewButtons.set(id, b);
     viewsBar.append(b);
   }
+  const instancesBtn = el(
+    'button',
+    {
+      class: 'instances',
+      title: 'Group the tree by instance (key or id) instead of by component name',
+      onclick: () => {
+        state.byInstance = !state.byInstance;
+        instancesBtn.classList.toggle('active', state.byInstance);
+        rebuildTree();
+        persist();
+      },
+    },
+    '⁝ Instances',
+  );
+  viewsBar.append(el('span', { class: 'spacer' }), instancesBtn);
   const tree = el('div', { class: 'tree', tabindex: '0', onkeydown: onTreeKey, role: 'tree' });
   const table = el('div', { class: 'table-wrap', hidden: true });
   const left = el('div', { class: 'left' }, [viewsBar, tree, table]);
@@ -1427,6 +1581,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         collapsed: [...state.collapsed],
         treeWidth: state.treeWidth,
         flashOn: state.flashOn,
+        byInstance: state.byInstance,
       };
       transport.storage!.set('panel', saved);
     }, 150);
@@ -1476,6 +1631,11 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       left.style.width = saved.treeWidth + 'px';
     }
     if (typeof saved.flashOn === 'boolean') state.flashOn = saved.flashOn;
+    if (typeof saved.byInstance === 'boolean' && saved.byInstance !== state.byInstance) {
+      state.byInstance = saved.byInstance;
+      instancesBtn.classList.toggle('active', state.byInstance);
+      rebuildTree();
+    }
     if (saved.tab === 'history' || saved.tab === 'fix') state.tab = saved.tab;
     if (saved.view && viewButtons.has(saved.view)) state.view = saved.view;
     for (const n of state.nodesByKey.values()) n.expanded = !state.collapsed.has(n.key);
@@ -1505,7 +1665,30 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     return parent;
   }
 
-  const nodeOfReport = (r: Report): TreeNode => nodeFor(r.path.concat([r.component]));
+  /** Tree placement: by component name, or per instance (`<Row key="a">`, `<Row #12>`) when `byInstance` is on. */
+  const instanceLabel = (r: Report): string => (r.key ? `${r.component} key=${JSON.stringify(r.key)}` : `${r.component} #${r.instanceId}`);
+  const nodeOfReport = (r: Report): TreeNode => nodeFor(r.path.concat([state.byInstance ? instanceLabel(r) : r.component]));
+
+  /** Rebuild the tree from the buffered reports (after switching grouping). */
+  function rebuildTree(): void {
+    state.tree.children.clear();
+    state.nodesByKey.clear();
+    rowEls.clear();
+    state.selectedKey = null;
+    for (const r of state.reports) {
+      const node = nodeOfReport(r);
+      node.reports.push(r);
+      if (node.reports.length > MAX_PER_NODE) node.reports.shift();
+      node.total++;
+      if (r.avoidable) {
+        node.avoidable++;
+        if (typeof r.selfDuration === 'number') node.wasted += r.selfDuration;
+      }
+      node.lastReport = r;
+    }
+    renderLeft();
+    renderDetails();
+  }
 
   function commitKeyFor(report: Report): number {
     if (report.commitId > 0) return report.commitId;
@@ -1918,7 +2101,15 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
           el('span', { class: 'n', text: plural(analysis.total, 'render') }),
           analysis.avoidable ? el('span', { class: 'badge avoid', text: `${analysis.avoidable} avoidable` }) : el('span', { class: 'badge', text: 'ok' }),
           analysis.reports[0]?.commitPriority ? el('span', { class: 'prio ' + analysis.reports[0].commitPriority, title: 'commit priority', text: PRIORITY_LABEL[analysis.reports[0].commitPriority] || analysis.reports[0].commitPriority }) : null,
-          el('span', { class: 'root', text: root ? `← <${root.name}> (${root.trigger})` : '' }),
+          analysis.reports[0]?.commitCause === 'effect-after-commit'
+            ? el('span', { class: 'cause effect', title: 'state set right after the previous commit (effect → setState)', text: `effect loop ← #${analysis.reports[0].afterCommit ?? '?'}` })
+            : analysis.reports[0]?.commitCause === 'suspense-resolved'
+              ? el('span', { class: 'cause suspense', text: 'suspense resolved' })
+              : null,
+          el('span', {
+            class: 'root',
+            text: root ? `← <${root.name}> (${root.trigger})` : analysis.reports[0]?.updaters?.length ? `← set by ${analysis.reports[0].updaters.map((u) => `<${u}>`).join(', ')}` : '',
+          }),
         ]),
       );
     }
@@ -2000,6 +2191,12 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     openSource: transport.openResource ? (src) => transport.openResource!(src.fileName, src.lineNumber, src.columnNumber) : null,
     highlight: transport.highlight ? (id) => transport.highlight!(id) : null,
     copy: copyText,
+    share: transport.panelUrl
+      ? (r) => {
+          void encodeShare(r).then((code) => copyText(`${transport.panelUrl}?report=${code}`));
+        }
+      : null,
+    readSource: transport.readSource ? (url) => transport.readSource!(url) : null,
   });
 
   const tabButton = (id: Tab, label: string, onclick: () => void): HTMLButtonElement => el('button', { class: state.tab === id ? 'active' : '', onclick }, label);
@@ -2650,6 +2847,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       optionRow('Track every component (noisy)', 'trackAllComponents', current, applyOptions),
       optionRow('Diff hook state and contexts', 'trackHooks', { trackHooks: current.trackHooks !== false }, applyOptions),
       optionRow('Include current hooks, state and contexts in every report', 'includeState', { includeState: current.includeState !== false }, applyOptions),
+      optionRow('Resolve custom hook names (re-runs each component type once)', 'resolveHookNames', current, applyOptions),
       optionRow('Ignore Fast Refresh commits', 'ignoreHotReload', { ignoreHotReload: current.ignoreHotReload !== false }, applyOptions),
       optionRow('Print to the page console', 'silent', { silent: !current.silent }, (p) => applyOptions({ silent: !p.silent })),
       optionRow('Print genuine re-renders too (logAll)', 'logAll', current, applyOptions),
@@ -2761,6 +2959,7 @@ export interface TransportIO {
   openResource?(url: string, line?: number, col?: number): void;
   undock?(mode: 'sidepanel' | 'window'): Promise<unknown>;
   tabLabel?: string | null;
+  readSource?(url: string): Promise<string | null>;
 }
 
 interface PullResult {
@@ -2937,6 +3136,8 @@ function createRelayTransport(io: TransportIO): Transport {
   };
   if (io.openResource) transport.openResource = io.openResource;
   if (io.undock) transport.undock = io.undock;
+  if (io.readSource) transport.readSource = io.readSource;
+  transport.panelUrl = chrome.runtime.getURL('panel.html');
   return transport;
 }
 
@@ -2979,6 +3180,15 @@ function devtoolsIO(): TransportIO {
       if (chrome.devtools.panels.openResource) chrome.devtools.panels.openResource(url, Math.max(0, (line || 1) - 1), Math.max(0, (col || 1) - 1), () => {});
     },
     undock: (mode) => openOutside(mode, tabId),
+    readSource: (url) =>
+      new Promise((resolve) => {
+        const bare = url.replace(/\?.*$/, '');
+        chrome.devtools.inspectedWindow.getResources((resources) => {
+          const res = resources.find((x) => x.url === url) || resources.find((x) => x.url.replace(/\?.*$/, '') === bare);
+          if (!res) return resolve(null);
+          res.getContent((content) => resolve(typeof content === 'string' ? content : null));
+        });
+      }),
   };
 }
 
@@ -3108,6 +3318,8 @@ function standaloneIO(opts: StandaloneOptions = {}): TransportIO {
     },
     openResource: (url) => void chrome.tabs.create({ url }),
     undock: (mode) => (tabId === null ? Promise.reject(new Error('no tab')) : openOutside(mode, tabId)),
+    // Dev servers serve the module source; host permission for the origin is required (and present when the panel works at all).
+    readSource: (url) => fetch(url).then((res) => (res.ok ? res.text() : null)).catch(() => null),
   };
   return io;
 }
@@ -3195,6 +3407,19 @@ function floodReports(n: number): Record<string, unknown>[] {
   return out;
 }
 
+/** `panel.html?report=…`: a single shared report, no page. */
+async function bootShared(code: string): Promise<void> {
+  const report = await decodeShare(code);
+  const transport: Transport = { subscribe() {}, panelUrl: location.origin + location.pathname };
+  const panel = createPanel(document.getElementById('root')!, transport, { theme: typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light' });
+  if (!report) {
+    panel.handle({ type: 'hello', version: PROTOCOL, payload: { protocol: PROTOCOL, library: 'shared link', react: [], enabled: false } });
+    return;
+  }
+  panel.importData([report]);
+  panel.select(report.component);
+}
+
 function bootDemo(): void {
   const params = new URLSearchParams(location.search);
   const flood = Number(params.get('flood') || 0);
@@ -3232,6 +3457,8 @@ function bootDemo(): void {
     originStatus: () => Promise.resolve({ origin: 'http://localhost:5199', builtIn: true, permitted: true, enabled: true, inject: false, deferHook: false }),
     setOrigin: () => Promise.resolve(),
     storage: { get: (k) => Promise.resolve(mem[k]), set: (k, v) => Promise.resolve((mem[k] = v)) },
+    panelUrl: location.origin + location.pathname,
+    readSource: () => Promise.resolve("import { memo } from 'react';\n\nexport const ProductList = memo(function ProductList(props) {\n  const [selected, setSelected] = useState(null);\n  return (\n    <ul>\n      {props.products.map((p) => (\n        <ProductRow key={p.id} product={p} style={{ color: 'red' }} onSelect={(id) => props.onSelect(id)} />\n      ))}\n    </ul>\n  );\n});\n"),
   };
   const dark = /theme=dark/.test(location.search) || (typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches);
   createPanel(document.getElementById('root')!, transport, { theme: dark ? 'dark' : 'light' });
@@ -3250,6 +3477,9 @@ const api = {
   floodReports,
   bootStandalone,
   createRelayTransport,
+  encodeShare,
+  decodeShare,
+  sourceContext,
   analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary, summarizeSession, compareSessions },
 };
 window.RerenderLensPanel = api;
@@ -3258,6 +3488,7 @@ const hasChrome = typeof chrome !== 'undefined' && !!chrome && !!chrome.runtime 
 const hasDevtools = hasChrome && !!chrome.devtools && !!chrome.devtools.inspectedWindow;
 const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
 const pathname = typeof location !== 'undefined' ? String(location.pathname) : '';
-if (hasDevtools && /panel\.html/.test(pathname) && !params.has('tabId')) bootExtension();
+if (params.has('report')) void bootShared(params.get('report') || '');
+else if (hasDevtools && /panel\.html/.test(pathname) && !params.has('tabId')) bootExtension();
 else if (hasChrome && (/sidepanel\.html/.test(pathname) || params.has('tabId'))) bootStandalone({ tabId: params.has('tabId') ? Number(params.get('tabId')) : null });
 else if (params.has('demo')) bootDemo();

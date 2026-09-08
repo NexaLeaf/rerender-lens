@@ -1,4 +1,4 @@
-import type { Change, CommitPriority, HookChange, HookSnapshot, Options, ParentInfo, RenderReport, RenderTrigger, SourceLocation } from './types';
+import type { Change, CommitCause, CommitPriority, HookChange, HookSnapshot, Options, ParentInfo, RenderReport, RenderTrigger, SourceLocation } from './types';
 
 const now = (): number =>
   typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
@@ -25,6 +25,26 @@ export interface BuildInput {
   commitId?: number;
   commitPriority?: CommitPriority;
   source?: SourceLocation;
+  updaters?: string[];
+  commitCause?: CommitCause;
+  afterCommit?: number;
+  key?: string | null;
+}
+
+/** `useCart › useState#0` when custom hook names are known, else `useState #0`. */
+export const hookLabel = (c: { hook: string; index: number; custom?: string[] }): string =>
+  c.custom && c.custom.length ? `${c.custom.join(' › ')} › ${c.hook}#${c.index}` : `${c.hook} #${c.index}`;
+
+/** Store-specific advice for a `useSyncExternalStore` snapshot that is a new reference with equal contents. */
+export function storeAdvice(custom: string[] | undefined): string {
+  const chain = custom ?? [];
+  if (chain.some((n) => /^useSelector$/.test(n)))
+    return 'the Redux selector returns a new object on every call: return a stored slice, pass shallowEqual as the equality function, or memoize it with createSelector';
+  if (chain.some((n) => /^useAppSelector$/.test(n)))
+    return 'the selector returns a new object on every call: return a stored slice, pass shallowEqual, or memoize it with createSelector';
+  if (chain.some((n) => /^use[A-Z]\w*Store$/.test(n) || n === 'useStore' || n === 'useBoundStore'))
+    return 'the store selector returns a new object on every call: select a primitive, or wrap the selector with useShallow (Zustand) / an equality function';
+  return 'getSnapshot returns a new reference with the same contents: cache the snapshot in the store and return the same object while the data is unchanged';
 }
 
 const isGenuine = (c: Change): boolean => c.kind === 'different' || c.kind === 'added' || c.kind === 'removed';
@@ -115,10 +135,17 @@ export function buildReport(input: BuildInput): RenderReport {
           ? `: only ${c.changedKeys.map((k) => `"${k}"`).join(', ')} of ${c.totalKeys} keys changed, yet every consumer re-renders. Split the context or memoize the slices consumers read`
           : '';
       reasons.push(`${c.path} changed${where}${keys}.`);
-    } else if (isGenuine(c)) reasons.push(`${c.hook} #${c.index} changed.`);
+    } else if (isGenuine(c)) reasons.push(`${hookLabel(c)} changed.`);
     else if (isStateHook(c))
-      reasons.push(`${c.hook} #${c.index} was set to a value deep-equal to the current one (new reference, same contents): reuse the existing object or bail out before calling the setter.`);
-    else reasons.push(`${c.hook} #${c.index} returned a new reference that is deep-equal to the previous value: memoize the context/store value where it is produced.`);
+      reasons.push(`${hookLabel(c)} was set to a value deep-equal to the current one (new reference, same contents): reuse the existing object or bail out before calling the setter.`);
+    else if (c.hook === 'useSyncExternalStore') reasons.push(`${hookLabel(c)} returned a new reference that is deep-equal to the previous value: ${storeAdvice(c.custom)}.`);
+    else reasons.push(`${hookLabel(c)} returned a new reference that is deep-equal to the previous value: memoize the context/store value where it is produced.`);
+  }
+  if (input.commitCause === 'effect-after-commit') {
+    const who = input.updaters && input.updaters.length ? input.updaters.map((u) => `<${u}>`).join(', ') : 'a component that rendered in it';
+    reasons.push(`this commit was scheduled right after commit #${input.afterCommit ?? '?'} by ${who}: an effect there set state (effect → setState loop). Derive the value during render or compute it before setting state.`);
+  } else if (input.commitCause === 'suspense-resolved') {
+    reasons.push('this commit shows content that was suspended (a Suspense boundary resolved).');
   }
 
   const report: RenderReport = {
@@ -146,6 +173,10 @@ export function buildReport(input: BuildInput): RenderReport {
   if (input.hookState) report.hookState = input.hookState;
   if (input.contexts) report.contexts = input.contexts;
   if (input.state) report.state = input.state;
+  if (input.updaters && input.updaters.length) report.updaters = input.updaters;
+  if (input.commitCause) report.commitCause = input.commitCause;
+  if (input.afterCommit !== undefined) report.afterCommit = input.afterCommit;
+  if (input.key !== undefined) report.key = input.key;
   return report;
 }
 

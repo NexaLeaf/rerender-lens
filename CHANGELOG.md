@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **CI tooling.** `rankFixes` / `formatFixes`, `summarizeReports` / `compareSummaries`, and
+  `checkBudget` / `toBudget` / `assertWithinBudget` in the package; the collector gains
+  `fixes()`, `summary()` and `assertWithinBudget()`, and `assertNoAvoidable()` now ends with the
+  ranked fixes. A `rerender-lens` CLI (`fixes`, `summary --out`, `compare`, `budget --init`)
+  works on panel exports and session files and exits non-zero on regressions or violations.
+- **Source context.** The report shows the lines around where the element was created (DevTools
+  resources or a fetch of the module in side-panel mode).
+- **Shareable links.** *Copy link* puts the report into a `panel.html?report=…` URL (deflated when
+  the browser can); anyone with the extension opens it without the page.
+- **Custom hook names, opt-in** (`resolveHookNames`, also in Settings): hook changes and
+  snapshots read `useCounter › useCart › useState#0`. Like React DevTools, the library re-runs a
+  component type once with a stand-in dispatcher and reads the custom hooks off the call stack;
+  results are cached per type and a failing replay yields no names.
+- **Updaters.** Every report names the components that scheduled the commit (`updaters`, from
+  React's updater tracking), so the Commits view shows "set by <X>" even when X is untracked.
+- **Effect loops.** A commit scheduled right after the previous one by a component that rendered
+  in it is flagged `effect-after-commit` with the offending commit id; the report explains the
+  effect → setState pattern. Suspense boundaries resolving are labelled `suspense-resolved`.
+- **Store advice.** A `useSyncExternalStore` snapshot with equal contents now gets Redux
+  (`shallowEqual` / `createSelector`) or Zustand (`useShallow`) advice when the hook chain
+  identifies the store hook.
+- **Instances.** Reports carry the element `key`; the tree can group by instance
+  (`<Row key="a">`, `<Row #12>`) via the Instances toggle.
 - **`rerender-lens/vite`**: a Vite plugin that starts the library before React in dev, with the
   DevTools notifier, from one line in `vite.config.ts`. **`rerender-lens/setup`**: a side-effect
   entry for Next.js `instrumentation-client.ts`, Webpack entry arrays and the like.

@@ -54,6 +54,7 @@ export interface SerializableOptions {
   exclude?: string[];
   trackHooks?: boolean;
   includeState?: boolean;
+  resolveHookNames?: boolean;
   logAll?: boolean;
   silent?: boolean;
   collapse?: boolean;
@@ -177,7 +178,7 @@ const stringToMatcher = (s: string): ComponentMatcher => {
 /** The current options in a JSON-safe form (function matchers and custom consoles are dropped). */
 export function serializeOptions(o: Options): SerializableOptions {
   const out: SerializableOptions = {};
-  const bools = ['trackAllMemoized', 'trackAllComponents', 'trackHooks', 'includeState', 'logAll', 'silent', 'collapse', 'ignoreHotReload'] as const;
+  const bools = ['trackAllMemoized', 'trackAllComponents', 'trackHooks', 'includeState', 'resolveHookNames', 'logAll', 'silent', 'collapse', 'ignoreHotReload'] as const;
   for (const k of bools) if (typeof o[k] === 'boolean') out[k] = o[k];
   if (typeof o.maxReportsPerComponent === 'number') out.maxReportsPerComponent = o.maxReportsPerComponent;
   if (o.include) out.include = o.include.map(matcherToString).filter((x): x is string => x !== null);
@@ -187,7 +188,7 @@ export function serializeOptions(o: Options): SerializableOptions {
 
 export function deserializeOptions(o: SerializableOptions): Options {
   const out: Options = {};
-  const bools = ['trackAllMemoized', 'trackAllComponents', 'trackHooks', 'includeState', 'logAll', 'silent', 'collapse', 'ignoreHotReload'] as const;
+  const bools = ['trackAllMemoized', 'trackAllComponents', 'trackHooks', 'includeState', 'resolveHookNames', 'logAll', 'silent', 'collapse', 'ignoreHotReload'] as const;
   for (const k of bools) if (typeof o[k] === 'boolean') out[k] = o[k];
   if (typeof o.maxReportsPerComponent === 'number') out.maxReportsPerComponent = o.maxReportsPerComponent;
   if (Array.isArray(o.include)) out.include = o.include.filter((s) => typeof s === 'string' && s).map(stringToMatcher);

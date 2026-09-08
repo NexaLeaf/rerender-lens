@@ -58,6 +58,9 @@ interface Factory {
   reportToMarkdown(r: unknown): string;
   sampleReports(): Record<string, unknown>[];
   floodReports(n: number): Record<string, unknown>[];
+  encodeShare(r: unknown): Promise<string>;
+  decodeShare(code: string): Promise<unknown>;
+  sourceContext(text: string, line: number, around?: number): { n: number; text: string; hit: boolean }[];
   analysis: {
     firstDifferentPath(a: unknown, b: unknown): string | null;
     diffLeaves(a: unknown, b: unknown, limit?: number): { path: string; prev: unknown; next: unknown }[];
@@ -657,6 +660,91 @@ describe('sessions and deeper analysis', () => {
     expect([...root.querySelectorAll('.section h3')].map((h) => h.textContent)).toContain('State');
     expect(root.querySelector('.kv tr.changed td.k')!.textContent).toBe('count');
     expect(factory.reportToMarkdown(report({ hookState: [{ path: 'useState#0', hook: 'useState', index: 0, value: 'abc' }] }))).toContain('- useState#0: `"abc"`');
+  });
+
+  it('shows updaters, effect loops, Suspense and custom hook chains; store advice follows the chain', () => {
+    send({ type: 'report', payload: report({ commitId: 1, updaters: ['Page'] }) });
+    send({ type: 'report', payload: report({ commitId: 2, renderCount: 2, updaters: ['Page'], commitCause: 'effect-after-commit', afterCommit: 1 }) });
+    send({ type: 'report', payload: report({ commitId: 3, renderCount: 3, avoidable: false, trigger: 'props', propChanges: [], commitCause: 'suspense-resolved' }) });
+    panel.select('Row');
+    expect(root.textContent).toContain('Suspense boundary resolved in this commit');
+    panel.setView('commits');
+    const items = [...root.querySelectorAll('.commits li')];
+    expect(items[0]!.querySelector('.cause')!.textContent).toBe('suspense resolved');
+    expect(items[1]!.querySelector('.cause')!.textContent).toBe('effect loop ← #1');
+    expect(items[2]!.querySelector('.root')!.textContent).toBe('← <App> (state)');
+    (items[1] as HTMLElement).click();
+    (root.querySelector('.cascade-row.avoid') as HTMLElement).click();
+    expect(root.querySelector('.section .cause.effect')!.textContent).toBe('Effect loop: state set right after commit #1');
+    expect(root.textContent).toContain('Update scheduled by <Page>');
+    // hook chains in the Hooks table and in changes
+    send({
+      type: 'report',
+      payload: report({
+        component: 'Cart', avoidable: true, trigger: 'parent', propChanges: [],
+        hookChanges: [{ path: 'useSyncExternalStore#2', hook: 'useSyncExternalStore', index: 2, kind: 'deep-equal', prev: { a: 1 }, next: { a: 1 }, custom: ['useSelector'] }],
+        hookState: [{ path: 'useState#0', hook: 'useState', index: 0, value: 1, custom: ['useCounter', 'useCart'] }],
+      }),
+    });
+    panel.setView('tree');
+    panel.select('Cart');
+    expect([...root.querySelectorAll('.kv td.k')].map((k) => k.textContent)).toContain('useCounter › useCart › useState#0');
+    const fixes = factory.analysis.fixesFor(report({ component: 'Cart', propChanges: [], hookChanges: [{ path: 'useSyncExternalStore#2', hook: 'useSyncExternalStore', index: 2, kind: 'deep-equal', prev: {}, next: {}, custom: ['useSelector'] }] }));
+    expect(fixes.map((f) => f.label)).toEqual(['memoize the selector in <Cart>']);
+    expect(fixes[0]!.snippet).toContain('shallowEqual');
+    expect(factory.analysis.fixesFor(report({ component: 'Cart', propChanges: [], hookChanges: [{ path: 'useSyncExternalStore#2', hook: 'useSyncExternalStore', index: 2, kind: 'deep-equal', prev: {}, next: {}, custom: ['useCartStore'] }] }))[0]!.snippet).toContain('useShallow');
+  });
+
+  it('groups the tree by instance when asked, using keys or ids, and remembers the choice', async () => {
+    send({ type: 'report', payload: report({ instanceId: 1, key: 'a' }) });
+    send({ type: 'report', payload: report({ instanceId: 2, key: 'b' }) });
+    send({ type: 'report', payload: report({ component: 'Other', path: ['App'], instanceId: 3 }) });
+    expect(names(root)).toEqual(['App', 'List', 'Row', 'Other']);
+    const toggle = root.querySelector('.views button.instances') as HTMLButtonElement;
+    toggle.click();
+    expect(names(root)).toEqual(['App', 'List', 'Row key="a"', 'Row key="b"', 'Other #3']);
+    expect(toggle.classList.contains('active')).toBe(true);
+    // new reports land in the per-instance nodes
+    send({ type: 'report', payload: report({ instanceId: 1, key: 'a', renderCount: 2 }) });
+    const rowA = [...root.querySelectorAll('.row')].find((r) => r.querySelector('.name')!.textContent === 'Row key="a"')!;
+    expect(rowA.querySelector('.badge.avoid')!.textContent).toBe('2');
+    toggle.click();
+    expect(names(root)).toEqual(['App', 'List', 'Row', 'Other']);
+  });
+
+  it('share links round-trip a report and the shared page shows it; source context loads around the element', async () => {
+    const r = factory.normalizeReport(report({ source: { fileName: 'http://localhost:5199/src/List.tsx?t=1', lineNumber: 4, columnNumber: 5 } }))!;
+    const code = await factory.encodeShare(r as never);
+    expect(code.startsWith('j.') || code.startsWith('d.')).toBe(true);
+    const back = await factory.decodeShare(code);
+    expect(back).toEqual(r);
+    expect(await factory.decodeShare('x.nope')).toBeNull();
+    expect(await factory.decodeShare('')).toBeNull();
+    // the panel's Copy link button copies panelUrl?report=<code>
+    const copied: string[] = [];
+    const reads: string[] = [];
+    panel = factory.createPanel(root, makeTransport({
+      panelUrl: 'chrome-extension://id/panel.html',
+      copy: (t: string) => copied.push(t),
+      readSource: (url: string) => (reads.push(url), Promise.resolve('line1\nline2\nline3\nconst x = <Row />;\nline5\nline6\nline7\nline8')),
+    }));
+    send({ type: 'report', payload: r });
+    panel.select('Row');
+    button(root, '.actions button', 'Copy link').click();
+    await new Promise((res) => setTimeout(res, 0));
+    expect(copied[0]).toMatch(/^chrome-extension:\/\/id\/panel\.html\?report=[jd]\./);
+    // the panel stamps receivedAt on ingest; everything else round-trips
+    expect({ ...(await factory.decodeShare(copied[0]!.split('report=')[1]!) as object), receivedAt: 0 }).toEqual(r);
+    // source context: ±3 lines with the element line highlighted
+    await new Promise((res) => setTimeout(res, 0));
+    expect(reads).toEqual(['http://localhost:5199/src/List.tsx?t=1']);
+    const lines = [...root.querySelectorAll('.source-context .line')].map((l) => (l.classList.contains('hit') ? '*' : '') + l.querySelector('.ln')!.textContent!.trim());
+    expect(lines).toEqual(['1', '2', '3', '*4', '5', '6', '7']);
+    expect(factory.sourceContext('a\nb\nc', 2, 1)).toEqual([
+      { n: 1, text: 'a', hit: false },
+      { n: 2, text: 'b', hit: true },
+      { n: 3, text: 'c', hit: false },
+    ]);
   });
 
   it('labels commit priority on the report and in the commits list', () => {
