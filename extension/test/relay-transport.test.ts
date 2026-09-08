@@ -83,6 +83,9 @@ describe('relay client transport', () => {
     expect(transport.tabLabel).toBe('relay 127.0.0.1:4141');
     const panel = factory.createPanel(root, transport);
     expect(FakeEventSource.instances[0]!.url).toBe('http://127.0.0.1:4141/events?role=panel');
+    // Nothing is sent until the relay's first message says the stream is up (a reply before that would be lost).
+    expect(posted).toHaveLength(0);
+    FakeEventSource.instances[0]!.push({ __rerenderLens: true, version: 2, type: 'relay', payload: { apps: 1 } });
     for (let i = 0; i < 50 && panel.state.reports.length === 0; i++) {
       await new Promise((r) => setTimeout(r, 10));
       panel.flush();

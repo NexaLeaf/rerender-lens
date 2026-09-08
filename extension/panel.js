@@ -1,8 +1,372 @@
 /* Built from extension/src/panel.ts by `npm run build`; do not edit by hand. */
 "use strict";
 (() => {
-  // extension/src/panel.ts
-  var PROTOCOL = 2;
+  // src/diff.ts
+  var REACT_ELEMENT = /* @__PURE__ */ Symbol.for("react.element");
+  var REACT_TRANSITIONAL_ELEMENT = /* @__PURE__ */ Symbol.for("react.transitional.element");
+  function isReactElement(v) {
+    if (typeof v !== "object" || v === null) return false;
+    const t = v.$$typeof;
+    return t === REACT_ELEMENT || t === REACT_TRANSITIONAL_ELEMENT;
+  }
+  function isPlainObject(v) {
+    if (typeof v !== "object" || v === null) return false;
+    const proto = Object.getPrototypeOf(v);
+    return proto === Object.prototype || proto === null;
+  }
+  function remember(seen, a, b) {
+    let set = seen.get(a);
+    if (!set) {
+      set = /* @__PURE__ */ new Set();
+      seen.set(a, set);
+    }
+    if (set.has(b)) return true;
+    set.add(b);
+    return false;
+  }
+  var scope = null;
+  var DEFAULT_DIFF_BUDGET = 5e4;
+  function beginDiffScope(budget = 2e5) {
+    const previous = scope;
+    scope = { cache: /* @__PURE__ */ new WeakMap(), remaining: budget, exhausted: false };
+    return () => {
+      scope = previous;
+    };
+  }
+  function deepEqual(a, b, seen = /* @__PURE__ */ new Map()) {
+    if (Object.is(a, b)) return true;
+    if (typeof a !== typeof b) return false;
+    if (typeof a !== "object" || a === null || b === null) return false;
+    if (!scope) {
+      const end = beginDiffScope(DEFAULT_DIFF_BUDGET);
+      try {
+        return deepEqual(a, b, seen);
+      } finally {
+        end();
+      }
+    }
+    const sc = scope;
+    const objA = a;
+    const objB = b;
+    const hit = sc.cache.get(objA)?.get(objB);
+    if (hit !== void 0) return hit;
+    if (--sc.remaining < 0) {
+      sc.exhausted = true;
+      return false;
+    }
+    const result = deepEqualObjects(objA, objB, seen);
+    let m = sc.cache.get(objA);
+    if (!m) {
+      m = /* @__PURE__ */ new WeakMap();
+      sc.cache.set(objA, m);
+    }
+    m.set(objB, result);
+    return result;
+  }
+  function deepEqualObjects(a, b, seen) {
+    const objA = a;
+    const objB = b;
+    if (remember(seen, objA, objB)) return true;
+    if (a instanceof Date) return b instanceof Date && a.getTime() === b.getTime();
+    if (a instanceof RegExp) return b instanceof RegExp && a.source === b.source && a.flags === b.flags;
+    if (Array.isArray(a)) {
+      if (!Array.isArray(b) || a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) if (!deepEqual(a[i], b[i], seen)) return false;
+      return true;
+    }
+    if (Array.isArray(b)) return false;
+    if (ArrayBuffer.isView(a)) {
+      if (!ArrayBuffer.isView(b) || a.constructor !== b.constructor) return false;
+      const ta = a;
+      const tb = b;
+      if (ta.length !== tb.length) return false;
+      for (let i = 0; i < ta.length; i++) if (ta[i] !== tb[i]) return false;
+      return true;
+    }
+    if (a instanceof Map) {
+      if (!(b instanceof Map) || a.size !== b.size) return false;
+      for (const [k, v] of a) {
+        if (!b.has(k) || !deepEqual(v, b.get(k), seen)) return false;
+      }
+      return true;
+    }
+    if (a instanceof Set) {
+      if (!(b instanceof Set) || a.size !== b.size) return false;
+      if (a.size > 50) {
+        for (const v of a) if (!b.has(v)) return false;
+        return true;
+      }
+      outer: for (const v of a) {
+        if (b.has(v)) continue;
+        for (const w of b) if (deepEqual(v, w, seen)) continue outer;
+        return false;
+      }
+      return true;
+    }
+    if (isReactElement(a)) {
+      if (!isReactElement(b)) return false;
+      return a.type === b.type && a.key === b.key && deepEqual(a.props, b.props, seen);
+    }
+    if (isPlainObject(a) && isPlainObject(b)) {
+      const ka = Object.keys(a);
+      const kb = Object.keys(b);
+      if (ka.length !== kb.length) return false;
+      const rb = b;
+      for (const k of ka) {
+        if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+        if (!deepEqual(a[k], rb[k], seen)) return false;
+      }
+      return true;
+    }
+    return false;
+  }
+  function joinPath(base, key) {
+    if (typeof key === "number") return `${base}[${key}]`;
+    if (base === "") return key;
+    return /^[A-Za-z_$][\w$]*$/.test(key) ? `${base}.${key}` : `${base}[${JSON.stringify(key)}]`;
+  }
+  function firstDifferentPath(a, b, path = "", depth = 0) {
+    if (depth > 8) return path || "(value)";
+    if (Array.isArray(a) && Array.isArray(b)) {
+      if (a.length !== b.length) return path ? `${path}.length` : "length";
+      for (let i = 0; i < a.length; i++) {
+        if (!deepEqual(a[i], b[i])) return firstDifferentPath(a[i], b[i], joinPath(path, i), depth + 1);
+      }
+      return null;
+    }
+    if (isPlainObject(a) && isPlainObject(b)) {
+      const keys = /* @__PURE__ */ new Set([...Object.keys(a), ...Object.keys(b)]);
+      for (const k of keys) {
+        if (!deepEqual(a[k], b[k])) return firstDifferentPath(a[k], b[k], joinPath(path, k), depth + 1);
+      }
+      return null;
+    }
+    return deepEqual(a, b) ? null : path || "(value)";
+  }
+  function diffLeaves(a, b, limit = 20, path = "", out = []) {
+    if (out.length >= limit || Object.is(a, b)) return out;
+    if (Array.isArray(a) && Array.isArray(b)) {
+      const n = Math.max(a.length, b.length);
+      for (let i = 0; i < n && out.length < limit; i++) diffLeaves(a[i], b[i], limit, joinPath(path, i), out);
+      return out;
+    }
+    if (isPlainObject(a) && isPlainObject(b)) {
+      for (const k of /* @__PURE__ */ new Set([...Object.keys(a), ...Object.keys(b)])) {
+        if (out.length >= limit) break;
+        diffLeaves(a[k], b[k], limit, joinPath(path, k), out);
+      }
+      return out;
+    }
+    if (!deepEqual(a, b)) out.push({ path: path || "(value)", prev: a, next: b });
+    return out;
+  }
+
+  // src/fixes.ts
+  var AVOIDABLE_KINDS = /* @__PURE__ */ new Set(["deep-equal", "function", "element"]);
+  var MAX_FIX_REPORTS = 50;
+  var rootOf = (path) => path.split(/[.[]/)[0] || path;
+  var identifier = (name) => /^[A-Za-z_$][\w$]*$/.test(name) ? name : "value";
+  function shortValue(v, max = 60) {
+    let s;
+    try {
+      s = JSON.stringify(v);
+    } catch {
+      s = String(v);
+    }
+    if (s === void 0) s = String(v);
+    return s.length > max ? s.slice(0, max - 3) + "..." : s;
+  }
+  function fixesFor(r) {
+    const out = [];
+    const ownerName = r.owner || r.parent && r.parent.name || null;
+    const propChanges = r.propChanges || [];
+    const changes = [...propChanges, ...r.stateChanges || [], ...r.hookChanges || []];
+    if (r.avoidable && (changes.length === 0 || r.memoized === false)) {
+      const identical = changes.length === 0;
+      out.push({
+        kind: "memo",
+        owner: r.component,
+        target: r.component,
+        prop: null,
+        label: `Wrap <${r.component}> in React.memo`,
+        detail: identical ? `<${r.component}> re-rendered with identical props because <${r.parent && r.parent.name || "its parent"}> re-rendered.` : `<${r.component}> is not memoized: fixing its props alone will not stop the re-render.`,
+        snippet: `// ${r.component}
+import { memo } from 'react';
+
+export const ${r.component} = memo(function ${r.component}(props) {
+  // ...
+});
+// class components: extend PureComponent instead`
+      });
+    }
+    for (const c of propChanges) {
+      if (!AVOIDABLE_KINDS.has(c.kind)) continue;
+      const owner = ownerName || "?";
+      const root = rootOf(c.path);
+      const id = identifier(root);
+      if (root === "children" && (c.kind === "element" || c.kind === "deep-equal")) {
+        out.push({
+          kind: "children",
+          owner,
+          target: r.component,
+          prop: "children",
+          label: `memoize children of <${r.component}> in <${owner}>`,
+          detail: `<${owner}> re-creates the children of <${r.component}> on every render; they have the same types and props each time.`,
+          snippet: `// ${owner}
+import { useMemo } from 'react';
+
+const children = useMemo(() => (
+  <>{/* the same elements */}</>
+), [/* deps */]);
+
+<${r.component}>{children}</${r.component}>
+
+// static children: hoist them to module scope
+const STATIC = <em>hi</em>;`
+        });
+      } else if (c.kind === "function") {
+        out.push({
+          kind: "useCallback",
+          owner,
+          target: r.component,
+          prop: root,
+          label: `useCallback(${root}) in <${owner}>`,
+          detail: `prop "${c.path}" of <${r.component}> is a new function on every render of <${owner}>.`,
+          snippet: `// ${owner}
+import { useCallback } from 'react';
+
+const ${id} = useCallback((/* args */) => {
+  // ...
+}, [/* deps */]);
+
+<${r.component} ${root}={${id}} />`
+        });
+      } else if (c.kind === "element") {
+        out.push({
+          kind: "useMemoElement",
+          owner,
+          target: r.component,
+          prop: root,
+          label: `memoize element prop ${root} in <${owner}>`,
+          detail: `prop "${c.path}" of <${r.component}> is a new element with the same type and props on every render of <${owner}>.`,
+          snippet: `// ${owner}
+import { useMemo } from 'react';
+
+const ${id} = useMemo(() => ${shortValue(c.next, 40)}, [/* deps */]);
+// or pass it as children from a component that does not re-render`
+        });
+      } else {
+        const isArray = Array.isArray(c.next);
+        out.push({
+          kind: "useMemo",
+          owner,
+          target: r.component,
+          prop: root,
+          label: `useMemo(${root}) in <${owner}>`,
+          detail: `prop "${c.path}" of <${r.component}> is a new ${isArray ? "array" : "object"} with the same contents on every render of <${owner}>.`,
+          snippet: `// ${owner}
+import { useMemo } from 'react';
+
+const ${id} = useMemo(() => (${shortValue(c.next, 80)}), [/* deps */]);
+
+// or, when it never changes, hoist it to module scope:
+const ${id.toUpperCase()} = ${shortValue(c.next, 80)};`
+        });
+      }
+    }
+    for (const c of [...r.stateChanges || [], ...r.hookChanges || []]) {
+      const isContext = c.hook === "useContext" || /^useContext/.test(c.path);
+      const ctxName = isContext ? (/useContext\((.*)\)/.exec(c.path) || [])[1] || "Context" : "";
+      const providerOwner = isContext && c.provider && c.provider.component ? c.provider.component : null;
+      if (isContext && c.kind === "different" && c.changedKeys && typeof c.totalKeys === "number" && c.changedKeys.length > 0 && c.changedKeys.length < c.totalKeys) {
+        out.push({
+          kind: "splitContext",
+          owner: providerOwner || `${ctxName}.Provider`,
+          target: r.component,
+          prop: ctxName,
+          label: `split ${ctxName}${providerOwner ? ` in <${providerOwner}>` : ""}: only ${c.changedKeys.join(", ")} changed`,
+          detail: `${c.changedKeys.map((k) => `"${k}"`).join(", ")} of ${c.totalKeys} keys changed in ${ctxName}, yet every consumer (like <${r.component}>) re-rendered. Consumers that read the other keys re-render for nothing.`,
+          snippet: `// ${providerOwner || "Provider"}
+// one context per independently-changing slice
+const ${identifier(ctxName)}Static = createContext(...);
+const ${identifier(ctxName)}${c.changedKeys.map((k) => k[0].toUpperCase() + k.slice(1)).join("")} = createContext(...);
+
+// or keep one context and let consumers select a slice:
+const ${c.changedKeys[0]} = useContextSelector(${ctxName}, (v) => v.${c.changedKeys[0]});`
+        });
+        continue;
+      }
+      if (!AVOIDABLE_KINDS.has(c.kind)) continue;
+      if (isContext) {
+        out.push({
+          kind: "contextValue",
+          owner: providerOwner || `${ctxName}.Provider`,
+          target: r.component,
+          prop: ctxName,
+          label: `memoize the ${ctxName} provider value${providerOwner ? ` in <${providerOwner}>` : ""}`,
+          detail: `<${r.component}> re-rendered because ${ctxName} produced a new value that is deep-equal to the previous one${providerOwner ? ` (Provider rendered by <${providerOwner}>)` : ""}.`,
+          snippet: `// ${providerOwner || `where <${ctxName}.Provider> is rendered`}
+const value = useMemo(() => ({ /* ... */ }), [/* deps */]);
+<${ctxName}.Provider value={value}>`
+        });
+      } else if (c.hook === "useSyncExternalStore") {
+        const chain = c.custom || [];
+        const redux = chain.some((n) => /^use(App)?Selector$/.test(n));
+        const zustand = !redux && chain.some((n) => /^use[A-Z]\w*Store$/.test(n) || n === "useStore" || n === "useBoundStore");
+        const via = chain.length ? ` via ${chain.join(" \u203A ")}` : "";
+        out.push({
+          kind: "storeSnapshot",
+          owner: r.component,
+          target: r.component,
+          prop: c.path,
+          label: redux ? `memoize the selector in <${r.component}>` : zustand ? `useShallow in <${r.component}>` : `stable getSnapshot in <${r.component}>`,
+          detail: redux ? `the selector${via} returns a new object on every call, so the component re-renders on every store change.` : zustand ? `the store selector${via} returns a new object on every call, so the component re-renders on every store change.` : `${c.path}${via} returned a new reference with the same contents; getSnapshot must return a cached value.`,
+          snippet: redux ? `// ${r.component}
+import { shallowEqual } from 'react-redux';
+const slice = useSelector(selectSlice, shallowEqual);
+// or memoize: const selectSlice = createSelector([selectA, selectB], (a, b) => ({ a, b }));` : zustand ? `// ${r.component}
+import { useShallow } from 'zustand/react/shallow';
+const { a, b } = useStore(useShallow((s) => ({ a: s.a, b: s.b })));
+// or select a primitive: const a = useStore((s) => s.a);` : `// ${r.component}
+// getSnapshot must return the same reference while the data is unchanged
+const snapshot = useSyncExternalStore(subscribe, store.getSnapshot /* cached */);`
+        });
+      } else {
+        out.push({
+          kind: "bailout",
+          owner: r.component,
+          target: r.component,
+          prop: c.path,
+          label: `bail out before setting ${c.path} in <${r.component}>`,
+          detail: `${c.path} was set to a value deep-equal to the current one (new reference).`,
+          snippet: `// ${r.component}
+setState((prev) => (deepEqual(prev, next) ? prev : next));`
+        });
+      }
+    }
+    return out;
+  }
+  var fixKey = (f) => `${f.kind}|${f.owner}|${f.prop || f.target}`;
+  function rankFixes(reports) {
+    const byKey = /* @__PURE__ */ new Map();
+    for (const r of reports) {
+      if (!r.avoidable) continue;
+      for (const f of fixesFor(r)) {
+        const key = fixKey(f);
+        let agg = byKey.get(key);
+        if (!agg) {
+          agg = { ...f, key, count: 0, components: {}, reports: [] };
+          byKey.set(key, agg);
+        }
+        agg.count++;
+        agg.components[r.component] = (agg.components[r.component] || 0) + 1;
+        if (agg.reports.length < MAX_FIX_REPORTS) agg.reports.push(r);
+      }
+    }
+    return [...byKey.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  }
+
+  // src/report.ts
   var KIND_LABEL = {
     "deep-equal": "equal by value",
     function: "new function",
@@ -11,7 +375,74 @@
     added: "added",
     removed: "removed"
   };
-  var AVOIDABLE_KINDS = /* @__PURE__ */ new Set(["deep-equal", "function", "element"]);
+  function summarize(report) {
+    const counts = /* @__PURE__ */ new Map();
+    for (const c of [...report.propChanges || [], ...report.stateChanges || [], ...report.hookChanges || []]) {
+      counts.set(c.kind, (counts.get(c.kind) ?? 0) + 1);
+    }
+    const parts = [...counts].map(([kind, n]) => `${n} ${KIND_LABEL[kind] || kind}`);
+    if (parts.length === 0) parts.push("no changes");
+    return parts.join(", ");
+  }
+
+  // src/sessions.ts
+  function summarizeReports(reports, meta = {}) {
+    var _a;
+    const byComponent = {};
+    let avoidable = 0;
+    let wasted = 0;
+    for (const r of reports) {
+      const c = byComponent[_a = r.component] || (byComponent[_a] = { total: 0, avoidable: 0, wasted: 0 });
+      c.total++;
+      if (r.avoidable) {
+        c.avoidable++;
+        avoidable++;
+        if (typeof r.selfDuration === "number") {
+          c.wasted += r.selfDuration;
+          wasted += r.selfDuration;
+        }
+      }
+    }
+    return {
+      id: meta.id ?? `s${Date.now().toString(36)}`,
+      name: meta.name ?? "session",
+      startedAt: meta.startedAt ?? (reports[0]?.time ?? 0),
+      endedAt: meta.endedAt ?? (reports[reports.length - 1]?.time ?? null),
+      total: reports.length,
+      avoidable,
+      wasted,
+      byComponent,
+      fixes: rankFixes(reports).map((f) => ({ key: f.key, label: f.label, count: f.count }))
+    };
+  }
+  function compareSummaries(before, after) {
+    const names = /* @__PURE__ */ new Set([...Object.keys(before.byComponent), ...Object.keys(after.byComponent)]);
+    const rows = [];
+    for (const component of names) {
+      const b = before.byComponent[component]?.avoidable || 0;
+      const a = after.byComponent[component]?.avoidable || 0;
+      if (b || a) rows.push({ component, before: b, after: a, delta: a - b });
+    }
+    rows.sort((x, y) => x.delta - y.delta || y.before - x.before || x.component.localeCompare(y.component));
+    const afterKeys = new Set(after.fixes.map((f) => f.key));
+    const beforeKeys = new Set(before.fixes.map((f) => f.key));
+    return {
+      before,
+      after,
+      rows,
+      total: { before: before.total, after: after.total, delta: after.total - before.total },
+      avoidable: { before: before.avoidable, after: after.avoidable, delta: after.avoidable - before.avoidable },
+      wasted: { before: before.wasted, after: after.wasted, delta: after.wasted - before.wasted },
+      resolvedFixes: before.fixes.filter((f) => !afterKeys.has(f.key)),
+      newFixes: after.fixes.filter((f) => !beforeKeys.has(f.key)),
+      regressions: rows.filter((r) => r.delta > 0)
+    };
+  }
+  var summarizeSession = (session, reports) => summarizeReports(reports, session);
+  var compareSessions = compareSummaries;
+
+  // extension/src/panel.ts
+  var PROTOCOL = 2;
   var FN_PREFIX = "\u0192 ";
   var MAX_REPORTS = 2e3;
   var MAX_PER_NODE = 200;
@@ -53,15 +484,9 @@
   }
   var fmtMs = (n) => typeof n === "number" && Number.isFinite(n) ? `${n.toFixed(1)} ms` : "";
   var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-  var componentList = (m) => [...m].map(([c, n]) => `<${c}>${n > 1 ? " \xD7" + n : ""}`).join(", ");
+  var componentList = (m) => (m instanceof Map ? [...m] : Object.entries(m)).map(([c, n]) => `<${c}>${n > 1 ? " \xD7" + n : ""}`).join(", ");
   function changesOf(report) {
     return [].concat(report.propChanges || [], report.stateChanges || [], report.hookChanges || []);
-  }
-  function summarize(report) {
-    const counts = /* @__PURE__ */ new Map();
-    for (const c of changesOf(report)) counts.set(c.kind, (counts.get(c.kind) || 0) + 1);
-    if (counts.size === 0) return "no changes";
-    return [...counts].map(([k, n]) => `${n} ${KIND_LABEL[k] || k}`).join(", ");
   }
   var isRecord = (v) => typeof v === "object" && v !== null;
   function normalizeReport(p) {
@@ -148,244 +573,6 @@
       { once: true }
     );
     return d;
-  }
-  function firstDifferentPath(a, b, base = "") {
-    if (a === b) return null;
-    if (!isRecord(a) || !isRecord(b)) return base || "(value)";
-    if (Array.isArray(a) !== Array.isArray(b)) return base || "(value)";
-    if (Array.isArray(a) && Array.isArray(b)) {
-      if (a.length !== b.length) return base ? `${base}.length` : "length";
-      for (let i = 0; i < a.length; i++) {
-        const p = firstDifferentPath(a[i], b[i], `${base}[${i}]`);
-        if (p) return p;
-      }
-      return null;
-    }
-    const keys = /* @__PURE__ */ new Set([...Object.keys(a), ...Object.keys(b)]);
-    for (const k of keys) {
-      const p = firstDifferentPath(a[k], b[k], base ? `${base}.${k}` : k);
-      if (p) return p;
-    }
-    return null;
-  }
-  function diffLeaves(a, b, limit = 20, base = "", out = []) {
-    if (out.length >= limit || a === b) return out;
-    if (!isRecord(a) || !isRecord(b) || Array.isArray(a) !== Array.isArray(b)) {
-      out.push({ path: base || "(value)", prev: a, next: b });
-      return out;
-    }
-    if (Array.isArray(a) && Array.isArray(b)) {
-      const n = Math.max(a.length, b.length);
-      for (let i = 0; i < n && out.length < limit; i++) diffLeaves(a[i], b[i], limit, `${base}[${i}]`, out);
-      return out;
-    }
-    for (const k of /* @__PURE__ */ new Set([...Object.keys(a), ...Object.keys(b)])) {
-      if (out.length >= limit) break;
-      diffLeaves(a[k], b[k], limit, base ? `${base}.${k}` : k, out);
-    }
-    return out;
-  }
-  function shortValue(v, max = 60) {
-    let s;
-    try {
-      s = JSON.stringify(v);
-    } catch {
-      s = String(v);
-    }
-    if (s === void 0) s = String(v);
-    return s.length > max ? s.slice(0, max - 3) + "..." : s;
-  }
-  var identifier = (name) => /^[A-Za-z_$][\w$]*$/.test(name) ? name : "value";
-  function fixesFor(r) {
-    const out = [];
-    const ownerName = r.owner || r.parent && r.parent.name || null;
-    const changes = changesOf(r);
-    const avoidableProps = (r.propChanges || []).filter((c) => AVOIDABLE_KINDS.has(c.kind));
-    if (r.avoidable && (changes.length === 0 || r.memoized === false)) {
-      const identical = changes.length === 0;
-      out.push({
-        kind: "memo",
-        owner: r.component,
-        target: r.component,
-        prop: null,
-        label: `Wrap <${r.component}> in React.memo`,
-        detail: identical ? `<${r.component}> re-rendered with identical props because <${r.parent && r.parent.name || "its parent"}> re-rendered.` : `<${r.component}> is not memoized: fixing its props alone will not stop the re-render.`,
-        snippet: `// ${r.component}
-import { memo } from 'react';
-
-export const ${r.component} = memo(function ${r.component}(props) {
-  // ...
-});
-// class components: extend PureComponent instead`
-      });
-    }
-    for (const c of avoidableProps) {
-      const owner = ownerName || "?";
-      const root = c.path.split(/[.[]/)[0] || c.path;
-      const id = identifier(root);
-      if (root === "children" && (c.kind === "element" || c.kind === "deep-equal")) {
-        out.push({
-          kind: "children",
-          owner,
-          target: r.component,
-          prop: "children",
-          label: `memoize children of <${r.component}> in <${owner}>`,
-          detail: `<${owner}> re-creates the children of <${r.component}> on every render; they have the same types and props each time.`,
-          snippet: `// ${owner}
-import { useMemo } from 'react';
-
-const children = useMemo(() => (
-  <>{/* the same elements */}</>
-), [/* deps */]);
-
-<${r.component}>{children}</${r.component}>
-
-// static children: hoist them to module scope
-const STATIC = <em>hi</em>;`
-        });
-        continue;
-      }
-      if (c.kind === "function") {
-        out.push({
-          kind: "useCallback",
-          owner,
-          target: r.component,
-          prop: root,
-          label: `useCallback(${root}) in <${owner}>`,
-          detail: `prop "${c.path}" of <${r.component}> is a new function on every render of <${owner}>.`,
-          snippet: `// ${owner}
-import { useCallback } from 'react';
-
-const ${id} = useCallback((/* args */) => {
-  // ...
-}, [/* deps */]);
-
-<${r.component} ${root}={${id}} />`
-        });
-      } else if (c.kind === "element") {
-        out.push({
-          kind: "useMemoElement",
-          owner,
-          target: r.component,
-          prop: root,
-          label: `memoize element prop ${root} in <${owner}>`,
-          detail: `prop "${c.path}" of <${r.component}> is a new element with the same type and props on every render of <${owner}>.`,
-          snippet: `// ${owner}
-import { useMemo } from 'react';
-
-const ${id} = useMemo(() => ${shortValue(c.next, 40)}, [/* deps */]);
-// or pass it as children from a component that does not re-render`
-        });
-      } else {
-        const isArray = Array.isArray(c.next);
-        out.push({
-          kind: "useMemo",
-          owner,
-          target: r.component,
-          prop: root,
-          label: `useMemo(${root}) in <${owner}>`,
-          detail: `prop "${c.path}" of <${r.component}> is a new ${isArray ? "array" : "object"} with the same contents on every render of <${owner}>.`,
-          snippet: `// ${owner}
-import { useMemo } from 'react';
-
-const ${id} = useMemo(() => (${shortValue(c.next, 80)}), [/* deps */]);
-
-// or, when it never changes, hoist it to module scope:
-const ${id.toUpperCase()} = ${shortValue(c.next, 80)};`
-        });
-      }
-    }
-    for (const c of [].concat(r.stateChanges || [], r.hookChanges || [])) {
-      const isContext = c.hook === "useContext" || /^useContext/.test(c.path);
-      const ctxName = isContext ? (/useContext\((.*)\)/.exec(c.path) || [])[1] || "Context" : "";
-      const providerOwner = isContext && c.provider && c.provider.component ? c.provider.component : null;
-      if (isContext && c.kind === "different" && c.changedKeys && typeof c.totalKeys === "number" && c.changedKeys.length > 0 && c.changedKeys.length < c.totalKeys) {
-        out.push({
-          kind: "splitContext",
-          owner: providerOwner || `${ctxName}.Provider`,
-          target: r.component,
-          prop: ctxName,
-          label: `split ${ctxName}${providerOwner ? ` in <${providerOwner}>` : ""}: only ${c.changedKeys.join(", ")} changed`,
-          detail: `${c.changedKeys.map((k) => `"${k}"`).join(", ")} of ${c.totalKeys} keys changed in ${ctxName}, yet every consumer (like <${r.component}>) re-rendered. Consumers that read the other keys re-render for nothing.`,
-          snippet: `// ${providerOwner || "Provider"}
-// one context per independently-changing slice
-const ${identifier(ctxName)}Static = createContext(...);
-const ${identifier(ctxName)}${c.changedKeys.map((k) => k[0].toUpperCase() + k.slice(1)).join("")} = createContext(...);
-
-// or keep one context and let consumers select a slice:
-const ${c.changedKeys[0]} = useContextSelector(${ctxName}, (v) => v.${c.changedKeys[0]});`
-        });
-        continue;
-      }
-      if (!AVOIDABLE_KINDS.has(c.kind)) continue;
-      if (isContext) {
-        const name = ctxName;
-        out.push({
-          kind: "contextValue",
-          owner: providerOwner || `${name}.Provider`,
-          target: r.component,
-          prop: name,
-          label: `memoize the ${name} provider value${providerOwner ? ` in <${providerOwner}>` : ""}`,
-          detail: `<${r.component}> re-rendered because ${name} produced a new value that is deep-equal to the previous one${providerOwner ? ` (Provider rendered by <${providerOwner}>)` : ""}.`,
-          snippet: `// ${providerOwner || `where <${name}.Provider> is rendered`}
-const value = useMemo(() => ({ /* ... */ }), [/* deps */]);
-<${name}.Provider value={value}>`
-        });
-      } else if (c.hook === "useSyncExternalStore") {
-        const chain = c.custom || [];
-        const redux = chain.some((n) => /^use(App)?Selector$/.test(n));
-        const zustand = !redux && chain.some((n) => /^use[A-Z]\w*Store$/.test(n) || n === "useStore" || n === "useBoundStore");
-        const via = chain.length ? ` via ${chain.join(" \u203A ")}` : "";
-        out.push({
-          kind: "storeSnapshot",
-          owner: r.component,
-          target: r.component,
-          prop: c.path,
-          label: redux ? `memoize the selector in <${r.component}>` : zustand ? `useShallow in <${r.component}>` : `stable getSnapshot in <${r.component}>`,
-          detail: redux ? `the selector${via} returns a new object on every call, so the component re-renders on every store change.` : zustand ? `the store selector${via} returns a new object on every call, so the component re-renders on every store change.` : `${c.path}${via} returned a new reference with the same contents; getSnapshot must return a cached value.`,
-          snippet: redux ? `// ${r.component}
-import { shallowEqual } from 'react-redux';
-const slice = useSelector(selectSlice, shallowEqual);
-// or memoize: const selectSlice = createSelector([selectA, selectB], (a, b) => ({ a, b }));` : zustand ? `// ${r.component}
-import { useShallow } from 'zustand/react/shallow';
-const { a, b } = useStore(useShallow((s) => ({ a: s.a, b: s.b })));
-// or select a primitive: const a = useStore((s) => s.a);` : `// ${r.component}
-// getSnapshot must return the same reference while the data is unchanged
-const snapshot = useSyncExternalStore(subscribe, store.getSnapshot /* cached */);`
-        });
-      } else {
-        out.push({
-          kind: "bailout",
-          owner: r.component,
-          target: r.component,
-          prop: c.path,
-          label: `bail out before setting ${c.path} in <${r.component}>`,
-          detail: `${c.path} was set to a value deep-equal to the current one (new reference).`,
-          snippet: `// ${r.component}
-setState((prev) => (deepEqual(prev, next) ? prev : next));`
-        });
-      }
-    }
-    return out;
-  }
-  var fixKey = (f) => `${f.kind}|${f.owner}|${f.prop || f.target}`;
-  function rankFixes(reports) {
-    const byKey = /* @__PURE__ */ new Map();
-    for (const r of reports) {
-      if (!r.avoidable) continue;
-      for (const f of fixesFor(r)) {
-        const k = fixKey(f);
-        let agg = byKey.get(k);
-        if (!agg) {
-          agg = { ...f, key: k, count: 0, components: /* @__PURE__ */ new Map(), reports: [] };
-          byKey.set(k, agg);
-        }
-        agg.count++;
-        agg.components.set(r.component, (agg.components.get(r.component) || 0) + 1);
-        if (agg.reports.length < 50) agg.reports.push(r);
-      }
-    }
-    return [...byKey.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   }
   var isAncestorReport = (anc, r) => anc.path.length < r.path.length && r.path[anc.path.length] === anc.component && anc.path.every((p, i) => r.path[i] === p);
   function indexByComponent(reports) {
@@ -503,57 +690,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     out.commits.reverse();
     out.fixes = rankFixes(affected);
     return out;
-  }
-  function summarizeSession(session, reports) {
-    var _a;
-    const byComponent = {};
-    let avoidable = 0;
-    let wasted = 0;
-    for (const r of reports) {
-      const c = byComponent[_a = r.component] || (byComponent[_a] = { total: 0, avoidable: 0, wasted: 0 });
-      c.total++;
-      if (r.avoidable) {
-        c.avoidable++;
-        avoidable++;
-        if (typeof r.selfDuration === "number") {
-          c.wasted += r.selfDuration;
-          wasted += r.selfDuration;
-        }
-      }
-    }
-    return {
-      id: session.id,
-      name: session.name,
-      startedAt: session.startedAt,
-      endedAt: session.endedAt,
-      total: reports.length,
-      avoidable,
-      wasted,
-      byComponent,
-      fixes: rankFixes(reports).map((f) => ({ key: f.key, label: f.label, count: f.count }))
-    };
-  }
-  function compareSessions(before, after) {
-    const names = /* @__PURE__ */ new Set([...Object.keys(before.byComponent), ...Object.keys(after.byComponent)]);
-    const rows = [];
-    for (const component of names) {
-      const b = before.byComponent[component]?.avoidable || 0;
-      const a = after.byComponent[component]?.avoidable || 0;
-      if (b || a) rows.push({ component, before: b, after: a, delta: a - b });
-    }
-    rows.sort((x, y) => x.delta - y.delta || y.before - x.before || x.component.localeCompare(y.component));
-    const afterKeys = new Set(after.fixes.map((f) => f.key));
-    const beforeKeys = new Set(before.fixes.map((f) => f.key));
-    return {
-      before,
-      after,
-      rows,
-      total: { before: before.total, after: after.total, delta: after.total - before.total },
-      avoidable: { before: before.avoidable, after: after.avoidable, delta: after.avoidable - before.avoidable },
-      wasted: { before: before.wasted, after: after.wasted, delta: after.wasted - before.wasted },
-      resolvedFixes: before.fixes.filter((f) => !afterKeys.has(f.key)),
-      newFixes: after.fixes.filter((f) => !beforeKeys.has(f.key))
-    };
   }
   var PRIORITY_LABEL = { immediate: "discrete input", "user-blocking": "continuous input", normal: "transition / async", low: "low", idle: "idle" };
   function sourceContext(text, line, around = 3) {
@@ -3158,7 +3294,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           const apps = isRecord(m.payload) && typeof m.payload.apps === "number" ? m.payload.apps : 0;
           const wasOnline = appsOnline;
           appsOnline = apps;
-          if (apps > 0 && wasOnline !== null && wasOnline === 0) void attach();
+          if (apps > 0 && (wasOnline === null || wasOnline === 0)) void attach();
           else if (apps === 0) emit({ type: "disconnected" });
         } else if (m.__rerenderLens === true && typeof m.type === "string") emit({ type: m.type, version: typeof m.version === "number" ? m.version : void 0, payload: m.payload });
       }
@@ -3187,7 +3323,6 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           };
         };
         open();
-        void attach();
       },
       replay: () => void bridge("replay"),
       clear: () => void bridge("clear"),

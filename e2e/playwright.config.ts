@@ -8,7 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // `npm run build` must have run first (it produces the extension/vendor/rerender-lens.*.js scripts).
 export default defineConfig({
   testDir: '.',
-  testMatch: /.*\.spec\.ts/,
+  testMatch: /extension\.spec\.ts/, // next.spec.ts has its own config (e2e/next.config.ts)
   timeout: 60_000,
   retries: process.env.CI ? 1 : 0,
   workers: 1,

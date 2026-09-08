@@ -207,7 +207,7 @@ export function diffRecords(
     const kind = classify(a, b);
     if (kind === 'different') {
       // Once the budget is gone the nested walk would only burn more time; report the top-level key.
-      changes.push({ path: diffBudgetExhausted() ? path : firstDifferentPath(a, b, path), kind, prev: a, next: b });
+      changes.push({ path: diffBudgetExhausted() ? path : (firstDifferentPath(a, b, path) ?? path), kind, prev: a, next: b });
     } else {
       changes.push({ path, kind, prev: a, next: b });
     }
@@ -215,22 +215,51 @@ export function diffRecords(
   return changes;
 }
 
-/** Walk plain objects/arrays to find the deepest path where the values first differ. */
-export function firstDifferentPath(a: unknown, b: unknown, path: string, depth = 0): string {
-  if (depth > 8) return path;
+/**
+ * Walk plain objects/arrays to find the deepest path where the values first differ, e.g. `style.color`
+ * or `items[2].id`; null when they are deep-equal. Two different values with no path to descend into
+ * (primitives at the root) give `(value)`. Works on live values and on the panel's serialized ones.
+ */
+export function firstDifferentPath(a: unknown, b: unknown, path = '', depth = 0): string | null {
+  if (depth > 8) return path || '(value)';
   if (Array.isArray(a) && Array.isArray(b)) {
-    if (a.length !== b.length) return `${path}.length`;
+    if (a.length !== b.length) return path ? `${path}.length` : 'length';
     for (let i = 0; i < a.length; i++) {
       if (!deepEqual(a[i], b[i])) return firstDifferentPath(a[i], b[i], joinPath(path, i), depth + 1);
     }
-    return path;
+    return null;
   }
   if (isPlainObject(a) && isPlainObject(b)) {
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
     for (const k of keys) {
       if (!deepEqual(a[k], b[k])) return firstDifferentPath(a[k], b[k], joinPath(path, k), depth + 1);
     }
-    return path;
+    return null;
   }
-  return path;
+  return deepEqual(a, b) ? null : path || '(value)';
+}
+
+export interface Leaf {
+  path: string;
+  prev: unknown;
+  next: unknown;
+}
+
+/** Every leaf at which two values differ, at most `limit` of them (the panel's diff view of `different` changes). */
+export function diffLeaves(a: unknown, b: unknown, limit = 20, path = '', out: Leaf[] = []): Leaf[] {
+  if (out.length >= limit || Object.is(a, b)) return out;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    const n = Math.max(a.length, b.length);
+    for (let i = 0; i < n && out.length < limit; i++) diffLeaves(a[i], b[i], limit, joinPath(path, i), out);
+    return out;
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      if (out.length >= limit) break;
+      diffLeaves(a[k], b[k], limit, joinPath(path, k), out);
+    }
+    return out;
+  }
+  if (!deepEqual(a, b)) out.push({ path: path || '(value)', prev: a, next: b });
+  return out;
 }

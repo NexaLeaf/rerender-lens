@@ -1,4 +1,4 @@
-import type { Change, CommitCause, CommitPriority, HookChange, HookSnapshot, Options, ParentInfo, RenderReport, RenderTrigger, SourceLocation } from './types';
+import type { Change, CommitCause, CommitPriority, HookChange, HookSnapshot, Options, ParentInfo, RenderReport, RenderTrigger, ReportLike, SourceLocation } from './types';
 
 const now = (): number =>
   typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
@@ -195,7 +195,8 @@ function describeTrigger(t: RenderTrigger): string {
   }
 }
 
-const KIND_LABEL: Record<Change['kind'], string> = {
+/** Short label per change kind, as printed by the console output and the panel. */
+export const KIND_LABEL: Record<Change['kind'], string> = {
   'deep-equal': 'equal by value',
   function: 'new function',
   element: 'equal element',
@@ -204,12 +205,13 @@ const KIND_LABEL: Record<Change['kind'], string> = {
   removed: 'removed',
 };
 
-export function summarize(report: RenderReport): string {
+/** `1 equal by value, 2 new function`, or `no changes`. Shared with the panel (serialized reports). */
+export function summarize(report: Pick<ReportLike, 'propChanges' | 'stateChanges' | 'hookChanges'>): string {
   const counts = new Map<string, number>();
-  for (const c of [...report.propChanges, ...report.stateChanges, ...report.hookChanges]) {
+  for (const c of [...(report.propChanges || []), ...(report.stateChanges || []), ...(report.hookChanges || [])]) {
     counts.set(c.kind, (counts.get(c.kind) ?? 0) + 1);
   }
-  const parts = [...counts].map(([kind, n]) => `${n} ${KIND_LABEL[kind as Change['kind']]}`);
+  const parts = [...counts].map(([kind, n]) => `${n} ${KIND_LABEL[kind as Change['kind']] || kind}`);
   if (parts.length === 0) parts.push('no changes');
   return parts.join(', ');
 }

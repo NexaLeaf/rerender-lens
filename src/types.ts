@@ -136,6 +136,39 @@ export interface RenderReport {
   time: number;
 }
 
+/**
+ * The fields the analysis helpers (`fixesFor`, `rankFixes`, `summarizeReports`, `summarize`) read,
+ * as a structural type: both a live `RenderReport` and the DevTools panel's serialized report satisfy
+ * it, so the panel and the library share one implementation without casts.
+ */
+export interface ChangeLike {
+  path: string;
+  kind: ChangeKind;
+  prev?: unknown;
+  next?: unknown;
+  hook?: string;
+  index?: number;
+  provider?: { component: string | null; path: string[] };
+  changedKeys?: string[];
+  totalKeys?: number;
+  custom?: string[];
+}
+
+export interface ReportLike {
+  component: string;
+  avoidable: boolean;
+  trigger: string;
+  memoized?: boolean;
+  propChanges: ChangeLike[];
+  stateChanges: ChangeLike[];
+  hookChanges: ChangeLike[];
+  parent: { name: string; trigger: string } | null;
+  owner: string | null;
+  path: string[];
+  selfDuration?: number;
+  time: number;
+}
+
 export type Notifier = (report: RenderReport) => void;
 
 export type ComponentMatcher = string | RegExp | ((displayName: string) => boolean);

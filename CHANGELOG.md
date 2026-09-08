@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- The DevTools panel and the library now share one implementation of fixes (`fixesFor`,
+  `rankFixes`), session summaries (`summarizeReports`/`summarizeSession`,
+  `compareSummaries`/`compareSessions`) and diff paths (`firstDifferentPath`, `diffLeaves`), typed
+  over a structural `ReportLike`. Library fixes gain the `snippet` and the context/provider
+  attribution the panel had; ranked fixes also carry the first 50 `reports` they apply to.
+- **Next.js, verified.** `examples/next` starts the library from `instrumentation-client.ts` with
+  `rerender-lens/setup` and reaches the relay panel; `npm run e2e:next` drives it in Chromium
+  (CI too). Two bugs it found: `rerender-lens/setup` read `process.env[key]` dynamically, which no
+  bundler inlines, so `NEXT_PUBLIC_RERENDER_LENS_RELAY` was never seen and the entry also ran in
+  production builds; and a panel that opened after the app had connected to the relay never
+  attached (the relay now greets each panel with the current app count, and the panel sends its
+  first command only after that greeting, so no reply is lost to the connection race).
+- `npm run test:built` (in `check` and CI) loads the three built vendor scripts in order and drives
+  a React re-render through them; before, that test always skipped in CI because tests ran
+  before the build.
+
 ## 0.4.0
 
 Highlights: the panel for any app with `npx rerender-lens panel`, Vitest and Playwright

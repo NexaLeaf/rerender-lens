@@ -2,7 +2,7 @@
  * Session summaries and before/after comparison, the same shape the extension records and exports,
  * so a session file committed next to the code can be compared in CI or with the CLI. Pure.
  */
-import type { RenderReport } from './types';
+import type { RenderReport, ReportLike } from './types';
 import { rankFixes } from './fixes';
 
 export interface SessionSummary {
@@ -37,7 +37,7 @@ export interface Comparison {
   regressions: CompareRow[];
 }
 
-export function summarizeReports(reports: RenderReport[], meta: Partial<Pick<SessionSummary, 'id' | 'name' | 'startedAt' | 'endedAt'>> = {}): SessionSummary {
+export function summarizeReports(reports: readonly ReportLike[], meta: Partial<Pick<SessionSummary, 'id' | 'name' | 'startedAt' | 'endedAt'>> = {}): SessionSummary {
   const byComponent: SessionSummary['byComponent'] = {};
   let avoidable = 0;
   let wasted = 0;
@@ -89,6 +89,12 @@ export function compareSummaries(before: SessionSummary, after: SessionSummary):
     regressions: rows.filter((r) => r.delta > 0),
   };
 }
+
+/** The panel's spelling: summarize a recorded session (`id`/`name`/`startedAt`/`endedAt` come from the session). */
+export const summarizeSession = (session: Pick<SessionSummary, 'id' | 'name' | 'startedAt' | 'endedAt'>, reports: readonly ReportLike[]): SessionSummary => summarizeReports(reports, session);
+
+/** Alias of `compareSummaries` (the panel's name). */
+export const compareSessions = compareSummaries;
 
 /** Plain-text table of a comparison (CLI, CI logs). */
 export function formatComparison(c: Comparison): string {

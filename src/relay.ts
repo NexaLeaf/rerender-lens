@@ -129,11 +129,21 @@ export function createRelayServer(options: RelayOptions = {}): Promise<RelayServ
         clearInterval(ping);
         role.delete(res);
       });
-      // Tell panels an app went away so they show "disconnected" instead of waiting.
+      // Panels learn the app count as soon as their stream is open (that first message is also how a
+      // panel knows it is safe to send commands: replies only reach panels that are already connected),
+      // and again whenever an app comes or goes, so they show "disconnected" instead of waiting.
+      const count = (): unknown => ({ __rerenderLens: true, version: 2, type: 'relay', payload: { apps: apps.size } });
       if (role === apps) {
-        send(panels, { __rerenderLens: true, version: 2, type: 'relay', payload: { apps: apps.size } });
-        req.on('close', () => send(panels, { __rerenderLens: true, version: 2, type: 'relay', payload: { apps: apps.size } }));
+        send(panels, count());
+        req.on('close', () => send(panels, count()));
+      } else {
+        send(new Set([res]), count());
       }
+      return;
+    }
+    if (u.pathname === '/favicon.ico') {
+      res.statusCode = 204;
+      res.end();
       return;
     }
     if (u.pathname === '/message' && req.method === 'POST') {

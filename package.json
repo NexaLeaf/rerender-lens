@@ -119,9 +119,11 @@
     "docs:media": "node scripts/docs-media.mjs",
     "lint:ext": "npx --yes web-ext lint --source-dir dist-extension/firefox --warnings-as-errors=false",
     "version": "node scripts/sync-version.mjs && git add extension/manifest.json",
-    "check": "npm run typecheck && npm test && npm run build && npm run lint:pkg && npm run build:ext",
+    "check": "npm run typecheck && npm test && npm run build && npm run test:built && npm run lint:pkg && npm run build:ext",
     "prepublishOnly": "npm run check",
-    "dev:example": "npm run build && npm --prefix examples/vite-react run dev"
+    "dev:example": "npm run build && npm --prefix examples/vite-react run dev",
+    "test:built": "vitest run test/vendor.test.ts",
+    "e2e:next": "playwright test -c e2e/next.config.ts"
   },
   "peerDependencies": {
     "react": ">=16.8.0",

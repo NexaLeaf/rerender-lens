@@ -12,18 +12,21 @@ export type {
   HookSnapshot,
   CommitPriority,
   CommitCause,
+  ReportLike,
+  ChangeLike,
 } from './types';
 export { MARKER } from './types';
 export { init, configure, disable, isEnabled, track, getDisplayName, shouldTrack } from './tracker';
 export { ensureDevtoolsHook, getRenderers, isProductionReact } from './fiber';
 export type { RendererInfo } from './fiber';
 export { useWhyRerender } from './hook';
-export { deepEqual, diffRecords, classify } from './diff';
-export { buildReport, summarize, printReport, hookLabel, storeAdvice } from './report';
+export { deepEqual, diffRecords, classify, firstDifferentPath, diffLeaves } from './diff';
+export type { Leaf } from './diff';
+export { buildReport, summarize, printReport, hookLabel, storeAdvice, KIND_LABEL } from './report';
 export { resolveHookNames, customHooksFromStack } from './hookNames';
-export { fixesFor, rankFixes, formatFixes, fixKey } from './fixes';
+export { fixesFor, rankFixes, formatFixes, fixKey, shortValue, AVOIDABLE_KINDS } from './fixes';
 export type { Fix, FixKind, RankedFix } from './fixes';
-export { summarizeReports, compareSummaries, formatComparison, parseExport } from './sessions';
+export { summarizeReports, compareSummaries, summarizeSession, compareSessions, formatComparison, parseExport } from './sessions';
 export type { SessionSummary, Comparison, CompareRow } from './sessions';
 export { checkBudget, toBudget, assertWithinBudget, avoidableCounts } from './budget';
 export type { Budget, BudgetResult, BudgetViolation } from './budget';

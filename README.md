@@ -432,6 +432,9 @@ deepEqual(a, b), diffRecords(prev, next), classify(prev, next)
 re-render avoidably, sharing one large context value and a typed-array prop. Its readout shows
 the library's own cost per commit and how many reports the per-commit cap skipped.
 
+`examples/next` is the same app in Next.js (App Router), started from `instrumentation-client.ts`
+with `rerender-lens/setup` and reporting to the relay panel; `npm run e2e:next` checks it.
+
 `examples/vite-react` has three deliberate bugs. From the repo root:
 
 ```sh

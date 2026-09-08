@@ -20,6 +20,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: tests that need the build (the three vendor scripts loaded in order)
+        run: npm run test:built
       - name: extension/panel.js is built from extension/src/panel.ts and committed
         run: git diff --exit-code -- extension/panel.js || (echo "::error::extension/panel.js is out of date. Run 'npm run build' and commit it." && exit 1)
       - run: npm run lint:pkg
@@ -49,4 +51,23 @@ jobs:
         if: failure()
         with:
           name: playwright-report
+          path: playwright-report
+  e2e-next:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm --prefix examples/next install
+      - run: npx playwright install --with-deps chromium
+      - name: Next.js app + `rerender-lens/setup` + the relay panel (`npx rerender-lens panel`)
+        run: npm run e2e:next
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-next
           path: playwright-report

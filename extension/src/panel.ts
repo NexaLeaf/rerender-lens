@@ -3,8 +3,15 @@
  * Exposes window.RerenderLensPanel.createPanel(root, transport, options) for tests, demo mode and the
  * Elements sidebar. Everything under `analysis` is pure and unit-tested on its own. */
 
+// The analysis (fixes, ranking, session summaries, diff paths) is the library's own, bundled in by
+// tsup: the panel's serialized `Report` satisfies `ReportLike`, so the same code serves both.
+import { diffLeaves, firstDifferentPath } from '../../src/diff';
+import { AVOIDABLE_KINDS, fixesFor, rankFixes, shortValue, type Fix, type RankedFix as LibRankedFix } from '../../src/fixes';
+import { KIND_LABEL, summarize } from '../../src/report';
+import { compareSessions, summarizeSession, type SessionSummary } from '../../src/sessions';
+import type { ChangeKind } from '../../src/types';
+
 // ---------- types ----------
-type ChangeKind = 'deep-equal' | 'function' | 'element' | 'different' | 'added' | 'removed';
 
 export interface Change {
   path: string;
@@ -61,41 +68,13 @@ export interface Report {
   receivedAt: number;
 }
 
-/** A recorded stretch of reports; summaries survive reloads (per origin), reports stay in memory. */
-export interface SessionSummary {
-  id: string;
-  name: string;
-  startedAt: number;
-  endedAt: number | null;
-  total: number;
-  avoidable: number;
-  wasted: number;
-  byComponent: Record<string, { total: number; avoidable: number; wasted: number }>;
-  fixes: { key: string; label: string; count: number }[];
-}
-
 export interface Session extends SessionSummary {
   reports: Report[];
 }
 
-export interface CompareRow {
-  component: string;
-  before: number;
-  after: number;
-  delta: number;
-}
-
-export interface Comparison {
-  before: SessionSummary;
-  after: SessionSummary;
-  rows: CompareRow[];
-  total: { before: number; after: number; delta: number };
-  avoidable: { before: number; after: number; delta: number };
-  wasted: { before: number; after: number; delta: number };
-  /** Fixes suggested in `before` that no longer appear in `after`. */
-  resolvedFixes: { key: string; label: string; count: number }[];
-  newFixes: { key: string; label: string; count: number }[];
-}
+export type { Fix, SessionSummary };
+/** The library's ranked fix, carrying the panel's serialized reports. */
+export type RankedFix = LibRankedFix<Report>;
 
 export interface TreeNode {
   name: string;
@@ -110,23 +89,6 @@ export interface TreeNode {
   lastReport?: Report;
   flash?: boolean;
   flashAt?: number;
-}
-
-export interface Fix {
-  kind: 'memo' | 'useCallback' | 'useMemo' | 'useMemoElement' | 'children' | 'contextValue' | 'splitContext' | 'storeSnapshot' | 'bailout';
-  owner: string;
-  target: string;
-  prop: string | null;
-  label: string;
-  detail: string;
-  snippet: string;
-}
-
-export interface RankedFix extends Fix {
-  key: string;
-  count: number;
-  components: Map<string, number>;
-  reports: Report[];
 }
 
 export interface RootCause {
@@ -332,15 +294,6 @@ declare global {
 
 // ---------- constants ----------
 const PROTOCOL = 2;
-const KIND_LABEL: Record<string, string> = {
-  'deep-equal': 'equal by value',
-  function: 'new function',
-  element: 'equal element',
-  different: 'changed',
-  added: 'added',
-  removed: 'removed',
-};
-const AVOIDABLE_KINDS = new Set<string>(['deep-equal', 'function', 'element']);
 const FN_PREFIX = 'ƒ '; // "f " as emitted by the library's serialize()
 const MAX_REPORTS = 2000;
 const MAX_PER_NODE = 200;
@@ -391,17 +344,11 @@ const fmtMs = (n: unknown): string => (typeof n === 'number' && Number.isFinite(
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-const componentList = (m: Map<string, number>): string => [...m].map(([c, n]) => `<${c}>${n > 1 ? ' ×' + n : ''}`).join(', ');
+const componentList = (m: Map<string, number> | Record<string, number>): string =>
+  (m instanceof Map ? [...m] : Object.entries(m)).map(([c, n]) => `<${c}>${n > 1 ? ' ×' + n : ''}`).join(', ');
 
 function changesOf(report: Report): Change[] {
   return ([] as Change[]).concat(report.propChanges || [], report.stateChanges || [], report.hookChanges || []);
-}
-
-function summarize(report: Report): string {
-  const counts = new Map<string, number>();
-  for (const c of changesOf(report)) counts.set(c.kind, (counts.get(c.kind) || 0) + 1);
-  if (counts.size === 0) return 'no changes';
-  return [...counts].map(([k, n]) => `${n} ${KIND_LABEL[k] || k}`).join(', ');
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
@@ -498,230 +445,6 @@ function objectDetails(label: string, obj: unknown): HTMLElement {
 }
 
 // ---------- analysis (pure) ----------
-/** First path at which two serialized values differ, e.g. "style.color" or "items[2].id"; null when equal. */
-function firstDifferentPath(a: unknown, b: unknown, base = ''): string | null {
-  if (a === b) return null;
-  if (!isRecord(a) || !isRecord(b)) return base || '(value)';
-  if (Array.isArray(a) !== Array.isArray(b)) return base || '(value)';
-  if (Array.isArray(a) && Array.isArray(b)) {
-    if (a.length !== b.length) return base ? `${base}.length` : 'length';
-    for (let i = 0; i < a.length; i++) {
-      const p = firstDifferentPath(a[i], b[i], `${base}[${i}]`);
-      if (p) return p;
-    }
-    return null;
-  }
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const k of keys) {
-    const p = firstDifferentPath(a[k], b[k], base ? `${base}.${k}` : k);
-    if (p) return p;
-  }
-  return null;
-}
-
-export interface Leaf {
-  path: string;
-  prev: unknown;
-  next: unknown;
-}
-
-/** Every leaf at which two serialized values differ (bounded), for the diff view of `different` changes. */
-function diffLeaves(a: unknown, b: unknown, limit = 20, base = '', out: Leaf[] = []): Leaf[] {
-  if (out.length >= limit || a === b) return out;
-  if (!isRecord(a) || !isRecord(b) || Array.isArray(a) !== Array.isArray(b)) {
-    out.push({ path: base || '(value)', prev: a, next: b });
-    return out;
-  }
-  if (Array.isArray(a) && Array.isArray(b)) {
-    const n = Math.max(a.length, b.length);
-    for (let i = 0; i < n && out.length < limit; i++) diffLeaves(a[i], b[i], limit, `${base}[${i}]`, out);
-    return out;
-  }
-  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
-    if (out.length >= limit) break;
-    diffLeaves(a[k], b[k], limit, base ? `${base}.${k}` : k, out);
-  }
-  return out;
-}
-
-function shortValue(v: unknown, max = 60): string {
-  let s: string | undefined;
-  try {
-    s = JSON.stringify(v);
-  } catch {
-    s = String(v);
-  }
-  if (s === undefined) s = String(v);
-  return s.length > max ? s.slice(0, max - 3) + '...' : s;
-}
-
-const identifier = (name: string): string => (/^[A-Za-z_$][\w$]*$/.test(name) ? name : 'value');
-
-/** The concrete fixes one report suggests, each attributed to the file that must change. */
-function fixesFor(r: Report): Fix[] {
-  const out: Fix[] = [];
-  const ownerName = r.owner || (r.parent && r.parent.name) || null;
-  const changes = changesOf(r);
-  const avoidableProps = (r.propChanges || []).filter((c) => AVOIDABLE_KINDS.has(c.kind));
-  // Not memoized: props alone will never stop the re-render, so React.memo comes first (in addition to
-  // any prop fixes below). Reports from protocol-1 libraries have no `memoized`; assume memoized then.
-  if (r.avoidable && (changes.length === 0 || r.memoized === false)) {
-    const identical = changes.length === 0;
-    out.push({
-      kind: 'memo',
-      owner: r.component,
-      target: r.component,
-      prop: null,
-      label: `Wrap <${r.component}> in React.memo`,
-      detail: identical
-        ? `<${r.component}> re-rendered with identical props because <${(r.parent && r.parent.name) || 'its parent'}> re-rendered.`
-        : `<${r.component}> is not memoized: fixing its props alone will not stop the re-render.`,
-      snippet: `// ${r.component}\nimport { memo } from 'react';\n\nexport const ${r.component} = memo(function ${r.component}(props) {\n  // ...\n});\n// class components: extend PureComponent instead`,
-    });
-  }
-  for (const c of avoidableProps) {
-    const owner = ownerName || '?';
-    const root = c.path.split(/[.[]/)[0] || c.path;
-    const id = identifier(root);
-    if (root === 'children' && (c.kind === 'element' || c.kind === 'deep-equal')) {
-      out.push({
-        kind: 'children',
-        owner,
-        target: r.component,
-        prop: 'children',
-        label: `memoize children of <${r.component}> in <${owner}>`,
-        detail: `<${owner}> re-creates the children of <${r.component}> on every render; they have the same types and props each time.`,
-        snippet:
-          `// ${owner}\nimport { useMemo } from 'react';\n\nconst children = useMemo(() => (\n  <>{/* the same elements */}</>\n), [/* deps */]);\n\n<${r.component}>{children}</${r.component}>\n\n` +
-          `// static children: hoist them to module scope\nconst STATIC = <em>hi</em>;`,
-      });
-      continue;
-    }
-    if (c.kind === 'function') {
-      out.push({
-        kind: 'useCallback',
-        owner,
-        target: r.component,
-        prop: root,
-        label: `useCallback(${root}) in <${owner}>`,
-        detail: `prop "${c.path}" of <${r.component}> is a new function on every render of <${owner}>.`,
-        snippet: `// ${owner}\nimport { useCallback } from 'react';\n\nconst ${id} = useCallback((/* args */) => {\n  // ...\n}, [/* deps */]);\n\n<${r.component} ${root}={${id}} />`,
-      });
-    } else if (c.kind === 'element') {
-      out.push({
-        kind: 'useMemoElement',
-        owner,
-        target: r.component,
-        prop: root,
-        label: `memoize element prop ${root} in <${owner}>`,
-        detail: `prop "${c.path}" of <${r.component}> is a new element with the same type and props on every render of <${owner}>.`,
-        snippet: `// ${owner}\nimport { useMemo } from 'react';\n\nconst ${id} = useMemo(() => ${shortValue(c.next, 40)}, [/* deps */]);\n// or pass it as children from a component that does not re-render`,
-      });
-    } else {
-      const isArray = Array.isArray(c.next);
-      out.push({
-        kind: 'useMemo',
-        owner,
-        target: r.component,
-        prop: root,
-        label: `useMemo(${root}) in <${owner}>`,
-        detail: `prop "${c.path}" of <${r.component}> is a new ${isArray ? 'array' : 'object'} with the same contents on every render of <${owner}>.`,
-        snippet:
-          `// ${owner}\nimport { useMemo } from 'react';\n\nconst ${id} = useMemo(() => (${shortValue(c.next, 80)}), [/* deps */]);\n\n` +
-          `// or, when it never changes, hoist it to module scope:\nconst ${id.toUpperCase()} = ${shortValue(c.next, 80)};`,
-      });
-    }
-  }
-  for (const c of ([] as Change[]).concat(r.stateChanges || [], r.hookChanges || [])) {
-    const isContext = c.hook === 'useContext' || /^useContext/.test(c.path);
-    const ctxName = isContext ? (/useContext\((.*)\)/.exec(c.path) || [])[1] || 'Context' : '';
-    const providerOwner = isContext && c.provider && c.provider.component ? c.provider.component : null;
-    // A genuine change of a few keys in an object context still re-renders every consumer.
-    if (isContext && c.kind === 'different' && c.changedKeys && typeof c.totalKeys === 'number' && c.changedKeys.length > 0 && c.changedKeys.length < c.totalKeys) {
-      out.push({
-        kind: 'splitContext',
-        owner: providerOwner || `${ctxName}.Provider`,
-        target: r.component,
-        prop: ctxName,
-        label: `split ${ctxName}${providerOwner ? ` in <${providerOwner}>` : ''}: only ${c.changedKeys.join(', ')} changed`,
-        detail: `${c.changedKeys.map((k) => `"${k}"`).join(', ')} of ${c.totalKeys} keys changed in ${ctxName}, yet every consumer (like <${r.component}>) re-rendered. Consumers that read the other keys re-render for nothing.`,
-        snippet:
-          `// ${providerOwner || 'Provider'}\n// one context per independently-changing slice\nconst ${identifier(ctxName)}Static = createContext(...);\nconst ${identifier(ctxName)}${c.changedKeys.map((k) => k[0]!.toUpperCase() + k.slice(1)).join('')} = createContext(...);\n\n` +
-          `// or keep one context and let consumers select a slice:\nconst ${c.changedKeys[0]} = useContextSelector(${ctxName}, (v) => v.${c.changedKeys[0]});`,
-      });
-      continue;
-    }
-    if (!AVOIDABLE_KINDS.has(c.kind)) continue;
-    if (isContext) {
-      const name = ctxName;
-      out.push({
-        kind: 'contextValue',
-        owner: providerOwner || `${name}.Provider`,
-        target: r.component,
-        prop: name,
-        label: `memoize the ${name} provider value${providerOwner ? ` in <${providerOwner}>` : ''}`,
-        detail: `<${r.component}> re-rendered because ${name} produced a new value that is deep-equal to the previous one${providerOwner ? ` (Provider rendered by <${providerOwner}>)` : ''}.`,
-        snippet: `// ${providerOwner || `where <${name}.Provider> is rendered`}\nconst value = useMemo(() => ({ /* ... */ }), [/* deps */]);\n<${name}.Provider value={value}>`,
-      });
-    } else if (c.hook === 'useSyncExternalStore') {
-      const chain = c.custom || [];
-      const redux = chain.some((n) => /^use(App)?Selector$/.test(n));
-      const zustand = !redux && chain.some((n) => /^use[A-Z]\w*Store$/.test(n) || n === 'useStore' || n === 'useBoundStore');
-      const via = chain.length ? ` via ${chain.join(' › ')}` : '';
-      out.push({
-        kind: 'storeSnapshot',
-        owner: r.component,
-        target: r.component,
-        prop: c.path,
-        label: redux ? `memoize the selector in <${r.component}>` : zustand ? `useShallow in <${r.component}>` : `stable getSnapshot in <${r.component}>`,
-        detail: redux
-          ? `the selector${via} returns a new object on every call, so the component re-renders on every store change.`
-          : zustand
-            ? `the store selector${via} returns a new object on every call, so the component re-renders on every store change.`
-            : `${c.path}${via} returned a new reference with the same contents; getSnapshot must return a cached value.`,
-        snippet: redux
-          ? `// ${r.component}\nimport { shallowEqual } from 'react-redux';\nconst slice = useSelector(selectSlice, shallowEqual);\n// or memoize: const selectSlice = createSelector([selectA, selectB], (a, b) => ({ a, b }));`
-          : zustand
-            ? `// ${r.component}\nimport { useShallow } from 'zustand/react/shallow';\nconst { a, b } = useStore(useShallow((s) => ({ a: s.a, b: s.b })));\n// or select a primitive: const a = useStore((s) => s.a);`
-            : `// ${r.component}\n// getSnapshot must return the same reference while the data is unchanged\nconst snapshot = useSyncExternalStore(subscribe, store.getSnapshot /* cached */);`,
-      });
-    } else {
-      out.push({
-        kind: 'bailout',
-        owner: r.component,
-        target: r.component,
-        prop: c.path,
-        label: `bail out before setting ${c.path} in <${r.component}>`,
-        detail: `${c.path} was set to a value deep-equal to the current one (new reference).`,
-        snippet: `// ${r.component}\nsetState((prev) => (deepEqual(prev, next) ? prev : next));`,
-      });
-    }
-  }
-  return out;
-}
-
-const fixKey = (f: Fix): string => `${f.kind}|${f.owner}|${f.prop || f.target}`;
-
-/** Aggregate fixes over many reports: how many avoidable renders each one removes. */
-function rankFixes(reports: Report[]): RankedFix[] {
-  const byKey = new Map<string, RankedFix>();
-  for (const r of reports) {
-    if (!r.avoidable) continue;
-    for (const f of fixesFor(r)) {
-      const k = fixKey(f);
-      let agg = byKey.get(k);
-      if (!agg) {
-        agg = { ...f, key: k, count: 0, components: new Map(), reports: [] };
-        byKey.set(k, agg);
-      }
-      agg.count++;
-      agg.components.set(r.component, (agg.components.get(r.component) || 0) + 1);
-      if (agg.reports.length < 50) agg.reports.push(r);
-    }
-  }
-  return [...byKey.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
-}
-
 const isAncestorReport = (anc: Report, r: Report): boolean =>
   anc.path.length < r.path.length && r.path[anc.path.length] === anc.component && anc.path.every((p, i) => r.path[i] === p);
 
@@ -863,60 +586,6 @@ function rootCauseSummary(name: string, commits: Iterable<[number, Report[]]>, a
   out.commits.reverse();
   out.fixes = rankFixes(affected);
   return out;
-}
-
-// ---------- sessions (pure) ----------
-function summarizeSession(session: Pick<SessionSummary, 'id' | 'name' | 'startedAt' | 'endedAt'>, reports: Report[]): SessionSummary {
-  const byComponent: SessionSummary['byComponent'] = {};
-  let avoidable = 0;
-  let wasted = 0;
-  for (const r of reports) {
-    const c = (byComponent[r.component] ||= { total: 0, avoidable: 0, wasted: 0 });
-    c.total++;
-    if (r.avoidable) {
-      c.avoidable++;
-      avoidable++;
-      if (typeof r.selfDuration === 'number') {
-        c.wasted += r.selfDuration;
-        wasted += r.selfDuration;
-      }
-    }
-  }
-  return {
-    id: session.id,
-    name: session.name,
-    startedAt: session.startedAt,
-    endedAt: session.endedAt,
-    total: reports.length,
-    avoidable,
-    wasted,
-    byComponent,
-    fixes: rankFixes(reports).map((f) => ({ key: f.key, label: f.label, count: f.count })),
-  };
-}
-
-/** Before/after: avoidable re-renders per component, totals, and which fixes went away. */
-function compareSessions(before: SessionSummary, after: SessionSummary): Comparison {
-  const names = new Set([...Object.keys(before.byComponent), ...Object.keys(after.byComponent)]);
-  const rows: CompareRow[] = [];
-  for (const component of names) {
-    const b = before.byComponent[component]?.avoidable || 0;
-    const a = after.byComponent[component]?.avoidable || 0;
-    if (b || a) rows.push({ component, before: b, after: a, delta: a - b });
-  }
-  rows.sort((x, y) => x.delta - y.delta || y.before - x.before || x.component.localeCompare(y.component));
-  const afterKeys = new Set(after.fixes.map((f) => f.key));
-  const beforeKeys = new Set(before.fixes.map((f) => f.key));
-  return {
-    before,
-    after,
-    rows,
-    total: { before: before.total, after: after.total, delta: after.total - before.total },
-    avoidable: { before: before.avoidable, after: after.avoidable, delta: after.avoidable - before.avoidable },
-    wasted: { before: before.wasted, after: after.wasted, delta: after.wasted - before.wasted },
-    resolvedFixes: before.fixes.filter((f) => !afterKeys.has(f.key)),
-    newFixes: after.fixes.filter((f) => !beforeKeys.has(f.key)),
-  };
 }
 
 const PRIORITY_LABEL: Record<string, string> = { immediate: 'discrete input', 'user-blocking': 'continuous input', normal: 'transition / async', low: 'low', idle: 'idle' };
@@ -3755,7 +3424,9 @@ function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = Even
         const apps = isRecord(m.payload) && typeof m.payload.apps === 'number' ? m.payload.apps : 0;
         const wasOnline = appsOnline;
         appsOnline = apps;
-        if (apps > 0 && wasOnline !== null && wasOnline === 0) void attach();
+        // The relay sends the app count as soon as this stream is open. Attaching before that loses the
+        // reply: the relay only forwards replies to panels that are already connected.
+        if (apps > 0 && (wasOnline === null || wasOnline === 0)) void attach();
         else if (apps === 0) emit({ type: 'disconnected' });
       } else if (m.__rerenderLens === true && typeof m.type === 'string') emit({ type: m.type, version: typeof m.version === 'number' ? m.version : undefined, payload: m.payload });
     }
@@ -3783,8 +3454,7 @@ function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = Even
           emit({ type: 'disconnected' });
         };
       };
-      open();
-      void attach();
+      open(); // attach() runs once the relay's first message confirms the stream is connected
     },
     replay: () => void bridge('replay'),
     clear: () => void bridge('clear'),
