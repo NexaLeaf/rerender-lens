@@ -1,6 +1,6 @@
 {
   "name": "rerender-lens",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Find avoidable React re-renders and what caused them. Reads the fiber tree like React DevTools, so nothing is patched: works with Fast Refresh, memo, forwardRef and classes. Structured reports, test assertions, and a DevTools bridge.",
   "keywords": [
     "react",

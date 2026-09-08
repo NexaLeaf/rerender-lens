@@ -1,7 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
+Highlights: the panel for any app with `npx rerender-lens panel`, Vitest and Playwright
+integrations, bounded work per commit (large apps no longer freeze), a lighter panel, and the
+injectable library split into three readable scripts. Details, newest first:
+
+- **Scale test.** `examples/vite-react/scale.html?rows=N` renders N memoized cells sharing a
+  2,000-item context and a 4 MB typed-array prop; its readout shows the library's overhead and
+  the reports skipped by the cap. The e2e suite runs it with 3,000 rows. The panel shows the
+  skipped count in the status tooltip and as a banner.
 - **`npx rerender-lens panel`.** A dependency-free relay (`rerender-lens/relay`) that serves the
   panel and forwards messages between apps and panels over server-sent events and POST, so the
   panel works for any app on any origin without the extension or Vite: Next.js, Webpack, a remote

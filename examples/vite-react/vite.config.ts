@@ -8,7 +8,7 @@ export default defineConfig({
     // Starts rerender-lens before React on `/` only (plain.html stays library-free for the extension's
     // injection mode), tracks every memo plus the one un-memoized Row, and serves the panel at
     // http://localhost:5199/__rerender-lens/ so no extension is needed.
-    rerenderLens({ trackAllMemoized: true, include: ['Row'], panel: true, pages: ['/', '/index.html'] }),
+    rerenderLens({ trackAllMemoized: true, include: ['Row'], panel: true, pages: ['/', '/index.html', '/scale.html'] }),
   ],
   // Only needed because this example links the library from the repo root.
   resolve: { dedupe: ['react', 'react-dom'] },

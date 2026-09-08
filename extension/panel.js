@@ -2278,6 +2278,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         cls = "connected";
         title = state.relay ? "live via content script" : "polling the page";
         if (lib.overhead) title += ` \xB7 library overhead ${lib.overhead.totalMs.toFixed(1)} ms over ${plural(lib.commits ?? 0, "commit")}, worst ${lib.overhead.maxCommitMs.toFixed(1)} ms`;
+        if (lib.truncated) title += ` \xB7 ${plural(lib.truncated, "report")} skipped by the per-commit cap`;
       } else if (state.relay || state.polling) {
         text = "no library in page";
         cls = "partial";
@@ -2297,6 +2298,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       if (lib && lib.injected && lib.source === "page")
         warnings.push(`The page runs its own rerender-lens ${lib.library || ""}; the copy injected by the extension stepped aside. Turn injection off for this origin in Settings to avoid loading the library twice.`);
       if (lib && lib.enabled === false) warnings.push("rerender-lens is present but disabled in this page.");
+      if (lib && lib.truncated) warnings.push(`${plural(lib.truncated, "report")} skipped: a commit re-rendered more tracked components than the per-commit cap (200) or took over its time budget. Narrow "include" in Settings, or fix the top offenders first.`);
       banner.hidden = warnings.length === 0;
       for (const w of warnings) banner.append(el("div", { text: w }));
     }
