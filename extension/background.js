@@ -95,9 +95,11 @@ chrome.runtime.onConnect.addListener((port) => {
 
 // ---------- origins: relay + injection registration ----------
 const RELAY_FILES = ['content.js'];
-const INJECT_FILES = ['vendor/rerender-lens.js', 'inject.js'];
+// The library is three classic scripts (see scripts/build-vendor.mjs); order matters.
+const VENDOR_FILES = ['vendor/rerender-lens.core.js', 'vendor/rerender-lens.engine.js', 'vendor/rerender-lens.js'];
+const INJECT_FILES = [...VENDOR_FILES, 'inject.js'];
 // inject-deferred.js sets a flag that makes inject.js wait one task before creating the hook.
-const INJECT_FILES_DEFERRED = ['vendor/rerender-lens.js', 'inject-deferred.js', 'inject.js'];
+const INJECT_FILES_DEFERRED = [...VENDOR_FILES, 'inject-deferred.js', 'inject.js'];
 
 const relayId = (origin) => 'relay:' + origin;
 const injectId = (origin) => 'inject:' + origin;

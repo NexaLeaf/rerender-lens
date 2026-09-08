@@ -1,5 +1,5 @@
 // Packages extension/ into dist-extension/{chrome,firefox,edge}/ (unpacked) and matching .zip files.
-// Requires `npm run build` first (it produces extension/vendor/rerender-lens.js).
+// Requires `npm run build` first (it produces the extension/vendor/rerender-lens.*.js scripts).
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'node:path';
@@ -12,8 +12,8 @@ const out = join(root, 'dist-extension');
 // Keep manifest.json in sync with package.json.
 await import('./sync-version.mjs');
 
-if (!existsSync(join(src, 'vendor', 'rerender-lens.js'))) {
-  console.error('extension/vendor/rerender-lens.js is missing: run `npm run build` first.');
+if (!['rerender-lens.core.js', 'rerender-lens.engine.js', 'rerender-lens.js'].every((f) => existsSync(join(src, 'vendor', f)))) {
+  console.error('extension/vendor/ is incomplete: run `npm run build` first.');
   process.exit(1);
 }
 

@@ -88,7 +88,7 @@ describe('background', () => {
     const ids = [...chrome._registered.keys()];
     expect(ids).toEqual(['relay:https://app.example.com', 'inject:https://app.example.com']);
     expect(chrome._registered.get('relay:https://app.example.com')).toMatchObject({ world: 'ISOLATED', js: ['content.js'], matches: ['https://app.example.com/*'] });
-    expect(chrome._registered.get('inject:https://app.example.com')).toMatchObject({ world: 'MAIN', js: ['vendor/rerender-lens.js', 'inject-deferred.js', 'inject.js'], runAt: 'document_start' });
+    expect(chrome._registered.get('inject:https://app.example.com')).toMatchObject({ world: 'MAIN', js: ['vendor/rerender-lens.core.js', 'vendor/rerender-lens.engine.js', 'vendor/rerender-lens.js', 'inject-deferred.js', 'inject.js'], runAt: 'document_start' });
     expect(chrome._store.origins).toEqual({ 'https://app.example.com': { inject: true, deferHook: true } });
 
     // turning injection off updates in place (relay stays); deferHook cannot survive without inject
@@ -98,7 +98,7 @@ describe('background', () => {
 
     // built-in host: only the injection script is registered (the manifest relay already runs)
     await send(chrome, { type: 'origin:set', origin: 'http://localhost:5199', enabled: true, inject: true });
-    expect(chrome._registered.get('inject:http://localhost:5199')).toMatchObject({ js: ['vendor/rerender-lens.js', 'inject.js'] });
+    expect(chrome._registered.get('inject:http://localhost:5199')).toMatchObject({ js: ['vendor/rerender-lens.core.js', 'vendor/rerender-lens.engine.js', 'vendor/rerender-lens.js', 'inject.js'] });
     expect(chrome._registered.has('relay:http://localhost:5199')).toBe(false);
     // and switching injection off on a built-in host forgets the origin entirely
     await send(chrome, { type: 'origin:set', origin: 'http://localhost:5199', enabled: true, inject: false });

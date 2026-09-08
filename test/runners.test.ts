@@ -35,7 +35,7 @@ describe('rerender-lens/playwright', () => {
     expect(script).toContain('createDevtoolsNotifier({"relay":"http://127.0.0.1:4141"})');
     expect(installScript({ bundle })).toContain('createDevtoolsNotifier({})');
     // The real IIFE bundle exists only after `npm run build` (dist/rerender-lens.iife.js or extension/vendor/rerender-lens.js).
-    const built = [join(__dirname, '..', 'src', 'rerender-lens.iife.js'), join(__dirname, '..', 'extension', 'vendor', 'rerender-lens.js')].some((f) => existsSync(f));
+    const built = existsSync(join(__dirname, '..', 'extension', 'vendor', 'rerender-lens.js'));
     if (built) expect(installScript()).toContain('RerenderLens');
     else expect(() => installScript()).toThrow(/bundle not found/);
 

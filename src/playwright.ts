@@ -36,13 +36,17 @@ export interface InstallOptions extends SerializableOptions {
 
 let bundleCache: string | null = null;
 
-/** The IIFE bundle (`window.RerenderLens`) the extension injects; shipped as `dist/rerender-lens.iife.js`. */
+/** The vendor scripts the extension injects, in load order (see scripts/build-vendor.mjs). */
+export const VENDOR_FILES = ['rerender-lens.core.js', 'rerender-lens.engine.js', 'rerender-lens.js'];
+
+/** The library as one script (`window.RerenderLens`): `dist/rerender-lens.iife.js`, or the vendor parts joined in this repo. */
 export function libraryBundle(): string {
   if (bundleCache) return bundleCache;
   const here = dirname(fileURLToPath(import.meta.url));
-  for (const file of [join(here, 'rerender-lens.iife.js'), join(here, '..', 'extension', 'vendor', 'rerender-lens.js')]) {
+  const candidates = [[join(here, 'rerender-lens.iife.js')], VENDOR_FILES.map((f) => join(here, '..', 'extension', 'vendor', f))];
+  for (const files of candidates) {
     try {
-      bundleCache = readFileSync(file, 'utf8');
+      bundleCache = files.map((f) => readFileSync(f, 'utf8')).join('\n;\n');
       return bundleCache;
     } catch {
       /* next */

@@ -113,7 +113,7 @@ test('injects the library into a page that does not load it when injection is en
   });
   await expect
     .poll(() => worker.evaluate(async () => (await chrome.scripting.getRegisteredContentScripts()).find((s) => s.id.startsWith('inject:'))?.js))
-    .toEqual(['vendor/rerender-lens.js', 'inject-deferred.js', 'inject.js']);
+    .toEqual(['vendor/rerender-lens.core.js', 'vendor/rerender-lens.engine.js', 'vendor/rerender-lens.js', 'inject-deferred.js', 'inject.js']);
   page = await context.newPage();
   await page.goto('/plain.html');
   await expect(page.getByRole('heading', { name: 'rerender-lens example' })).toBeVisible();

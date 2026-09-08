@@ -4,7 +4,7 @@ React re-render debugger. See README.md for the public API.
 
 ## Commands
 
-- `npm test` (vitest, jsdom), `npm run typecheck`, `npm run build` (tsup: `dist/` + the IIFE `extension/vendor/rerender-lens.js`), `npm run lint:pkg` (publint + attw).
+- `npm test` (vitest, jsdom), `npm run typecheck`, `npm run build` (tsup for `dist/` and the panel, then `scripts/build-vendor.mjs` for the three injectable `extension/vendor/rerender-lens.*.js` scripts, then `scripts/copy-panel.mjs`), `npm run lint:pkg` (publint + attw).
 - `npm run build:ext` packages `extension/` into `dist-extension/` (Chrome/Edge/Firefox zips; syncs the manifest version from package.json).
 - `npm run check` runs all of the above and is `prepublishOnly`.
 - `npm run e2e` (Playwright, Chromium with the extension loaded against the example app; needs `npm run build` and `npm --prefix examples/vite-react install` first).
@@ -22,7 +22,7 @@ React re-render debugger. See README.md for the public API.
 - `src/tracker.ts` — `init`/`configure`/`disable`, `shouldTrack`, `getDisplayName`, `track`.
 - `src/hook.ts` — `useWhyRerender`. `src/notifiers.ts` — collector. `src/overlay.ts` — in-page highlight/flash DOM.
 - `src/devtools.ts` — postMessage bridge (protocol 2): `createDevtoolsNotifier`, `window.__RERENDER_LENS_DEVTOOLS__` (`replay`, `pull`, `info`, `configure`, `highlight`, `inspect`, ...), `serializeOptions`.
-- `src/inject.ts` — entry of the IIFE bundle (everything but `useWhyRerender`, which needs `react` as a module). `src/version.ts` — `VERSION` from a build define.
+- `src/inject.ts` — entry of the injectable library (everything but `useWhyRerender`, which needs `react` as a module). `scripts/build-vendor.mjs` builds it as three classic scripts, `vendor/rerender-lens.core.js` (types, version, diff, report, state, overlay), `vendor/rerender-lens.engine.js` (fiber, tracker, hookNames) and `vendor/rerender-lens.js` (bridge, notifiers, `window.RerenderLens`); later parts import earlier modules through `globalThis.__RERENDER_LENS_PARTS__`, so no module may be imported by an earlier part than the one that owns it. `src/version.ts` — `VERSION` from a build define.
 - `src/hookNames.ts` — opt-in custom hook name replay. `src/fixes.ts`, `src/sessions.ts`, `src/budget.ts` — pure ranking, summary/compare and budget helpers (the panel keeps its own typed copy of the ranking logic). `src/cli.ts` — the `rerender-lens` bin (`fixes`, `summary`, `compare`, `budget`).
 - `src/vite.ts` — `rerender-lens/vite` plugin (virtual setup module + `<script type="module">` prepended in dev). `src/setup.ts` — `rerender-lens/setup` side-effect entry (Next.js `instrumentation-client`, Webpack entry arrays).
 - `src/relay.ts` — `rerender-lens/relay`, the SSE + POST relay behind `rerender-lens panel` (serves `panel/`). The library side is the `relay` option in `src/devtools.ts` (shares `runCommand` with the BroadcastChannel); the panel side is `createRelayClientTransport` in `extension/src/panel.ts`. `test/sse.ts` is a fetch-based EventSource for Node.

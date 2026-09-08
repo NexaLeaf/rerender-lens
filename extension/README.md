@@ -86,7 +86,7 @@ From source:
 
 ```sh
 npm install
-npm run build        # also writes extension/vendor/rerender-lens.js (the injectable bundle)
+npm run build        # also writes extension/vendor/rerender-lens.{core,engine,}.js (the injectable library)
 npm run build:ext    # dist-extension/{chrome,edge,firefox}/ and .zip files
 ```
 
@@ -105,7 +105,7 @@ with sample data.
 - When no content script is present (a host you did not enable), the panel polls the page's bridge
   with `chrome.devtools.inspectedWindow.eval('...pull(since)')` every 500 ms instead. Same data,
   slightly later.
-- `inject.js` + `vendor/rerender-lens.js` run in the page's main world at `document_start` on
+- `inject.js` + `vendor/rerender-lens.*.js` (core, engine, bridge) run in the page's main world at `document_start` on
   origins with injection enabled (registered with `chrome.scripting.registerContentScripts`).
 - Settings, highlight and source links go through the bridge (`window.__RERENDER_LENS_DEVTOOLS__`),
   never through the app.

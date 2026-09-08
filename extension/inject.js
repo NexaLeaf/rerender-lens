@@ -1,5 +1,5 @@
 // Runs in the page (MAIN world) at document_start on origins where injection is enabled,
-// right after vendor/rerender-lens.js defined `window.RerenderLens`. Creates the React DevTools
+// right after the vendor/rerender-lens.*.js scripts defined `window.RerenderLens`. Creates the React DevTools
 // hook before react-dom loads and starts reporting, so the app needs no code change.
 (function () {
   const L = window.RerenderLens;

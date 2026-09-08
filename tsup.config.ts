@@ -18,23 +18,6 @@ export default defineConfig([
     define,
     shims: true, // import.meta.url in the CJS build (vite.ts locates panel/)
   },
-  // Self-contained bundle the Chrome extension injects into pages (`window.RerenderLens`).
-  {
-    entry: { 'rerender-lens': 'src/inject.ts' },
-    format: ['iife'],
-    globalName: 'RerenderLens',
-    outDir: 'extension/vendor',
-    outExtension: () => ({ js: '.js' }),
-    dts: false,
-    sourcemap: false,
-    clean: false,
-    splitting: false,
-    treeshake: true,
-    minify: false,
-    platform: 'browser',
-    target: 'es2020',
-    define,
-  },
   // The DevTools panel. Output is committed so the extension loads unpacked and jsdom tests need no build.
   {
     entry: { panel: 'extension/src/panel.ts' },

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 // Runs Chromium with the unpacked extension against the example app (port 5199).
-// `npm run build` must have run first (it produces extension/vendor/rerender-lens.js).
+// `npm run build` must have run first (it produces the extension/vendor/rerender-lens.*.js scripts).
 export default defineConfig({
   testDir: '.',
   testMatch: /.*\.spec\.ts/,
