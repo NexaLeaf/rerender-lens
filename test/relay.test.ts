@@ -40,14 +40,16 @@ describe('relay server', () => {
     expect((await fetch(`${relay.url}/message`, { method: 'OPTIONS' })).status).toBe(204);
 
     const panel = new FetchEventSource(`${relay.url}/events?role=panel`);
-    const app = new FetchEventSource(`${relay.url}/events?role=app`);
+    const app = new FetchEventSource(`${relay.url}/events?role=app&label=localhost%3A3000%2Fshop`);
     const toPanel: unknown[] = [];
     const toApp: unknown[] = [];
     panel.onmessage = (e) => toPanel.push(JSON.parse(e.data));
     app.onmessage = (e) => toApp.push(JSON.parse(e.data));
     await vi.waitFor(() => expect(relay!.counts()).toEqual({ apps: 1, panels: 1 }));
-    // app connected -> panels learn about it
-    await vi.waitFor(() => expect(toPanel).toContainEqual({ __rerenderLens: true, version: 2, type: 'relay', payload: { apps: 1 } }));
+    // app connected -> panels learn the roster; the app learns its own id
+    await vi.waitFor(() => expect(toPanel).toContainEqual({ __rerenderLens: true, version: 2, type: 'relay', payload: { apps: 1, list: [{ id: 'a1', label: 'localhost:3000/shop' }] } }));
+    await vi.waitFor(() => expect(toApp).toContainEqual({ __rerenderLensRelay: true, version: 2, app: 'a1' }));
+    toApp.length = 0;
     const post = (m: unknown) => fetch(`${relay!.url}/message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(m) });
     expect((await post({ __rerenderLens: true, type: 'report', payload: { component: 'A' } })).status).toBe(204);
     expect((await post([{ __rerenderLensCmd: true, id: '1', cmd: 'info' }, { __rerenderLensReply: true, id: '1', result: 42 }])).status).toBe(204);
@@ -57,10 +59,55 @@ describe('relay server', () => {
       expect(toPanel).toContainEqual({ __rerenderLensReply: true, id: '1', result: 42 });
     });
     expect((await fetch(`${relay.url}/message`, { method: 'POST', body: 'not json{' })).status).toBe(400);
-    expect(JSON.parse(await (await fetch(`${relay.url}/status`)).text())).toEqual({ ok: true, apps: 1, panels: 1 });
+    expect(JSON.parse(await (await fetch(`${relay.url}/status`)).text())).toEqual({ ok: true, apps: 1, panels: 1, list: [{ id: 'a1', label: 'localhost:3000/shop' }] });
     app.close();
     await vi.waitFor(() => expect(relay!.counts().apps).toBe(0));
-    await vi.waitFor(() => expect(toPanel.at(-1)).toEqual({ __rerenderLens: true, version: 2, type: 'relay', payload: { apps: 0 } }));
+    await vi.waitFor(() => expect(toPanel.at(-1)).toEqual({ __rerenderLens: true, version: 2, type: 'relay', payload: { apps: 0, list: [] } }));
+    panel.close();
+  });
+
+  it('several apps on one relay: messages are stamped, a command reaches one app or all of them', async () => {
+    relay = await createRelayServer({ port: 0, keepAliveMs: 50 });
+    const panel = new FetchEventSource(`${relay.url}/events?role=panel`);
+    const toPanel: Record<string, unknown>[] = [];
+    panel.onmessage = (e) => toPanel.push(JSON.parse(e.data) as Record<string, unknown>);
+    const shop = new FetchEventSource(`${relay.url}/events?role=app&label=shop`);
+    const admin = new FetchEventSource(`${relay.url}/events?role=app&label=admin`);
+    const toShop: Record<string, unknown>[] = [];
+    const toAdmin: Record<string, unknown>[] = [];
+    shop.onmessage = (e) => toShop.push(JSON.parse(e.data) as Record<string, unknown>);
+    admin.onmessage = (e) => toAdmin.push(JSON.parse(e.data) as Record<string, unknown>);
+    await vi.waitFor(() => expect(relay!.counts().apps).toBe(2));
+    await vi.waitFor(() => expect(relay!.appList()).toEqual([{ id: 'a1', label: 'shop' }, { id: 'a2', label: 'admin' }]));
+    // each app was told its own id, and panels have the full roster
+    await vi.waitFor(() => expect(toShop[0]).toEqual({ __rerenderLensRelay: true, version: 2, app: 'a1' }));
+    await vi.waitFor(() => expect(toAdmin[0]).toEqual({ __rerenderLensRelay: true, version: 2, app: 'a2' }));
+    await vi.waitFor(() => expect(toPanel.at(-1)).toEqual({ __rerenderLens: true, version: 2, type: 'relay', payload: { apps: 2, list: [{ id: 'a1', label: 'shop' }, { id: 'a2', label: 'admin' }] } }));
+
+    // an app stamps its id on what it posts (via ?app=), and the panel sees who sent it
+    const post = (m: unknown, from?: string) =>
+      fetch(`${relay!.url}/message${from ? `?app=${from}` : ''}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(m) });
+    await post({ __rerenderLens: true, type: 'report', payload: { component: 'Row' } }, 'a2');
+    await vi.waitFor(() => expect(toPanel).toContainEqual({ __rerenderLens: true, type: 'report', payload: { component: 'Row' }, app: 'a2' }));
+
+    // a command naming an app reaches only that one; without a name, all of them
+    toShop.length = 0;
+    toAdmin.length = 0;
+    await post({ __rerenderLensCmd: true, id: 'q1', cmd: 'info', app: 'a1' });
+    await vi.waitFor(() => expect(toShop).toEqual([{ __rerenderLensCmd: true, id: 'q1', cmd: 'info', app: 'a1' }]));
+    expect(toAdmin).toEqual([]);
+    await post({ __rerenderLensCmd: true, id: 'q2', cmd: 'clear' });
+    await vi.waitFor(() => {
+      expect(toShop).toHaveLength(2);
+      expect(toAdmin).toEqual([{ __rerenderLensCmd: true, id: 'q2', cmd: 'clear' }]);
+    });
+    // a command for an app that went away falls back to everyone rather than vanishing
+    shop.close();
+    await vi.waitFor(() => expect(relay!.counts().apps).toBe(1));
+    toAdmin.length = 0;
+    await post({ __rerenderLensCmd: true, id: 'q3', cmd: 'info', app: 'a1' });
+    await vi.waitFor(() => expect(toAdmin).toEqual([{ __rerenderLensCmd: true, id: 'q3', cmd: 'info', app: 'a1' }]));
+    admin.close();
     panel.close();
   });
 
@@ -84,6 +131,9 @@ describe('relay server', () => {
     rerender();
     await vi.waitFor(() => expect(toPanel.some((m) => m.type === 'report' && (m.payload as { component: string }).component === 'Child')).toBe(true));
     expect(toPanel.some((m) => m.type === 'hello')).toBe(true);
+    // the library learned its id from the relay and stamps what it posts, so a panel can tell apps apart
+    expect(relay!.appList()).toEqual([{ id: 'a1', label: expect.any(String) }]);
+    expect(toPanel.find((m) => m.type === 'report')!.app).toBe('a1');
     const post = (m: unknown) => fetch(`${relay!.url}/message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(m) });
     await post({ __rerenderLensCmd: true, id: 'q1', cmd: 'pull', arg: 0 });
     await vi.waitFor(() => expect(toPanel.find((m) => m.__rerenderLensReply && m.id === 'q1')).toBeTruthy());

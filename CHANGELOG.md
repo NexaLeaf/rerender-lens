@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Several apps on one relay.** `npx rerender-lens panel` now gives each connected app an id and a
+  label (its address), tells the app its id so what it posts is stamped, and sends panels the
+  roster. The panel shows a picker when more than one app is connected, watches one at a time and
+  addresses its commands to that app, so a host app and a microfrontend (or two pages, or two
+  machines) no longer interleave into one stream. A panel or a library that knows nothing about
+  ids behaves exactly as before, and the protocol stays at 2.
+- The side panel and the DevTools panel are now covered by a test that changes a setting in one and
+  reads it back in the other, in both directions.
+- **Panel: a commit timeline strip above the tree.** One bar per React commit, oldest left, height
+  on a sqrt scale of the commit's render count and filled from the bottom with its avoidable share.
+  Click a bar to open that commit in the Commits view; drag across bars to brush a time window, and
+  the tree, Offenders, Fixes, Commits and the live stream all narrow to it (a chip in the strip
+  header says how wide the window is and how many reports it holds; `Esc` or the chip clears it).
+  Bars are focusable, labelled ("commit 12, 4 renders, 3 avoidable, 8 seconds ago") and navigable
+  with the arrow keys. The strip collapses from its chevron (persisted per origin), draws at most
+  the 200 most recent commits, and repaints on the same `LEFT_RENDER_INTERVAL` throttle as the
+  other heavy views once the buffer passes 200 reports.
+
 - **Jest.** `rerender-lens/jest` and `rerender-lens/jest/setup`: the same deal as the Vitest
   integration — one `setupFilesAfterEnv` line collects every avoidable re-render, and the reporter
   (`reporters: [['rerender-lens/jest', { budget }]]`) prints the run's ranked fixes and root causes,

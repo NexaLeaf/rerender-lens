@@ -116,4 +116,49 @@ describe('relay client transport', () => {
     expect(JSON.parse(localStorage.getItem('rerender-lens:relay:http://127.0.0.1:4141:panel') || '{}').view).toBe('offenders');
     expect(transport.storage.get('panel')).toEqual({ view: 'offenders' });
   });
+
+  it('several apps on one relay: a picker appears, commands name the app, other apps are ignored', async () => {
+    const transport = factory.createRelayClientTransport('http://127.0.0.1:4141/', FakeEventSource);
+    const panel = factory.createPanel(root, transport);
+    const stream = FakeEventSource.instances[0]!;
+    const picker = (): HTMLSelectElement => root.querySelector('.app-picker') as HTMLSelectElement;
+
+    // one app: nothing to choose
+    stream.push({ __rerenderLens: true, version: 2, type: 'relay', payload: { apps: 1, list: [{ id: 'a1', label: 'shop' }] } });
+    await vi.waitFor(() => expect(posted.map((c) => c.cmd)).toEqual(['info', 'pull']));
+    expect(picker().hidden).toBe(true);
+    expect(posted.every((c) => c.app === 'a1')).toBe(true); // still addressed, so the other apps stay quiet
+
+    // a second app connects: the picker appears with both, still watching the first
+    stream.push({ __rerenderLens: true, version: 2, type: 'relay', payload: { apps: 2, list: [{ id: 'a1', label: 'shop' }, { id: 'a2', label: 'admin' }] } });
+    panel.flush();
+    expect(picker().hidden).toBe(false);
+    expect([...picker().options].map((o) => [o.value, o.textContent])).toEqual([['a1', 'shop'], ['a2', 'admin']]);
+    expect(picker().value).toBe('a1');
+
+    // reports from the app being watched arrive; the other app's do not
+    stream.push({ __rerenderLens: true, version: 2, type: 'report', app: 'a1', payload: report({ component: 'Shop', instanceId: 9 }) });
+    stream.push({ __rerenderLens: true, version: 2, type: 'report', app: 'a2', payload: report({ component: 'Admin', instanceId: 10 }) });
+    panel.flush();
+    expect(panel.state.reports.map((r) => (r as { component: string }).component)).toContain('Shop');
+    expect(panel.state.reports.map((r) => (r as { component: string }).component)).not.toContain('Admin');
+
+    // switching apps starts over on the other one and addresses it
+    const before = posted.length;
+    picker().value = 'a2';
+    picker().dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(posted.slice(before).map((c) => c.cmd)).toEqual(['info', 'pull']));
+    expect(posted.slice(before).every((c) => c.app === 'a2')).toBe(true);
+    panel.flush();
+    expect(panel.state.reports.map((r) => (r as { component: string }).component)).not.toContain('Shop');
+    stream.push({ __rerenderLens: true, version: 2, type: 'report', app: 'a2', payload: report({ component: 'Admin', instanceId: 10 }) });
+    panel.flush();
+    expect(panel.state.reports.map((r) => (r as { component: string }).component)).toContain('Admin');
+
+    // the watched app goes away: the panel falls back to the one that is left
+    stream.push({ __rerenderLens: true, version: 2, type: 'relay', payload: { apps: 1, list: [{ id: 'a1', label: 'shop' }] } });
+    panel.flush();
+    expect(picker().hidden).toBe(true);
+    await vi.waitFor(() => expect(posted.at(-1)!.app).toBe('a1'));
+  });
 });

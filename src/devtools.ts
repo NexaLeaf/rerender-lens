@@ -438,6 +438,9 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     }
     return reply;
   };
+  /** `{ __rerenderLensRelay: true, app }`: the relay telling this app which id it stamps messages with. */
+  const isRelayGreeting = (data: unknown): data is { app: string } =>
+    !!data && typeof data === 'object' && (data as { __rerenderLensRelay?: boolean }).__rerenderLensRelay === true && typeof (data as { app?: unknown }).app === 'string';
   const isCommand = (data: unknown): data is ChannelCommand => !!data && typeof data === 'object' && (data as ChannelCommand).__rerenderLensCmd === true && typeof (data as ChannelCommand).id === 'string';
   const envelope = (type: DevtoolsMessage['type'], payload?: unknown): DevtoolsMessage => ({ [DEVTOOLS_MARKER]: true, version: PROTOCOL_VERSION, type, payload });
 
@@ -471,11 +474,15 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     const base = relayUrl.replace(/\/$/, '');
     let queue: unknown[] = [];
     let scheduled = false;
+    // The relay hands out an id when the stream opens and stamps it on what this app posts, so a panel
+    // watching several apps can tell them apart and address one of them. Unknown until the first message.
+    let appId: string | null = null;
     const flush = (): void => {
       scheduled = false;
       const batch = queue;
       queue = [];
-      fetch(`${base}/message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(batch), keepalive: true }).catch(() => {});
+      const to = `${base}/message${appId ? `?app=${encodeURIComponent(appId)}` : ''}`;
+      fetch(to, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(batch), keepalive: true }).catch(() => {});
     };
     const relaySend = (message: unknown): void => {
       queue.push(message);
@@ -485,7 +492,9 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
       }
     };
     try {
-      const stream = new ES(`${base}/events?role=app`);
+      // The label is what the panel's app chooser shows; the page's own address is the useful default.
+      const label = typeof location !== 'undefined' ? `${location.host}${location.pathname}`.slice(0, 120) : '';
+      const stream = new ES(`${base}/events?role=app${label ? `&label=${encodeURIComponent(label)}` : ''}`);
       stream.onmessage = (event) => {
         let parsed: unknown;
         try {
@@ -493,7 +502,10 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
         } catch {
           return;
         }
-        for (const m of Array.isArray(parsed) ? parsed : [parsed]) if (isCommand(m)) relaySend(runCommand(m));
+        for (const m of Array.isArray(parsed) ? parsed : [parsed]) {
+          if (isRelayGreeting(m)) appId = m.app;
+          else if (isCommand(m)) relaySend(runCommand(m));
+        }
       };
       stream.onerror = () => {};
       sinks.push(relaySend);

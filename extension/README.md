@@ -5,6 +5,15 @@ live, laid out like React DevTools' Components tab: component tree on the left w
 counts, details on the right (why it rendered, which ancestor triggered it, props with the changed
 ones highlighted, state and hooks, the fix as a code snippet), plus a live stream at the bottom.
 
+Above the tree sits the **timeline strip**: one bar per React commit, oldest on the left, its
+height scaled to the commit's render count and filled from the bottom with the avoidable share, so
+a burst of wasted work is visible before you read a single row. Click a bar to open that commit in
+the Commits view; drag across bars to brush a time window, and the tree, Offenders, Fixes, Commits
+and the live stream all narrow to it ("3.2 s window, 412 reports · Clear" in its header, `Esc` to
+drop it). This answers "what happened while I typed". The chevron collapses the strip (persisted
+per origin), it draws at most the 200 most recent commits, and it repaints on the same throttle as
+the other heavy views once the buffer is large.
+
 Other views in the left pane:
 
 - **Offenders**: every component ranked by avoidable re-renders, total renders and wasted time.
@@ -23,8 +32,8 @@ with the avoidable count of the current tab, hover-to-highlight of a component's
 "open source" links into the Sources panel, JSON export/import, Markdown copy of a report, and a
 Settings drawer that changes the library's options live (persisted per origin).
 
-Keyboard: `/` focuses search, arrows move in the tree, `f` opens the Fix tab, `Esc` clears the
-highlight (and closes Settings). Search matches component names, `/regex/`, or `~text` to search
+Keyboard: `/` focuses search, arrows move in the tree and between timeline bars (`Enter` selects a
+commit), `f` opens the Fix tab, `Esc` clears the highlight, the time window (and closes Settings). Search matches component names, `/regex/`, or `~text` to search
 prop, hook, context and state values. The tree and the live stream are virtualized, so tens of
 thousands of reports stay smooth; `panel.html?demo&flood=5000` is the scale test.
 
@@ -44,8 +53,9 @@ has access to: local hosts, or a site you enabled. Below 720px wide the layout s
 above the details and shows icon-only buttons.
 
 Without the extension at all, `npx rerender-lens panel` serves this same panel from a local relay
-and any app pointed at it (`createDevtoolsNotifier({ relay })`) shows up there; see the package
-README.
+and any app pointed at it (`createDevtoolsNotifier({ relay })`) shows up there. With several apps on
+one relay a picker appears next to the status, listing each by address; the panel watches one at a
+time. See the package README.
 
 ## Two ways to connect a page
 

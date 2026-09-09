@@ -79,7 +79,13 @@ export type { Fix, SessionSummary };
 /** The library's ranked fix, carrying the panel's serialized reports. */
 export type RankedFix = LibRankedFix<Report>;
 
-export interface TreeNode {
+/** Row counts: a `TreeNode`'s lifetime totals, or the totals inside the brushed time window. */
+export interface NodeCounts {
+  total: number;
+  avoidable: number;
+}
+
+export interface TreeNode extends NodeCounts {
   name: string;
   children: Map<string, TreeNode>;
   reports: Report[];
@@ -141,6 +147,12 @@ export interface OriginStatus {
   deferHook?: boolean;
 }
 
+/** One app page connected to a relay (`rerender-lens panel`), as the relay reports it. */
+export interface RelayApp {
+  id: string;
+  label: string;
+}
+
 export interface Message {
   type: string;
   payload?: unknown;
@@ -174,6 +186,8 @@ export interface Transport {
   readSource?(url: string): Promise<string | null>;
   /** Stop timers and connections (the panel keeps its state). */
   dispose?(): void;
+  /** Relay transport with several apps connected: watch this one (the panel starts over on it). */
+  selectApp?(id: string): void;
 }
 
 export interface PanelOptions {
@@ -190,6 +204,13 @@ interface PersistedState {
   treeWidth?: number;
   flashOn?: boolean;
   byInstance?: boolean;
+  stripCollapsed?: boolean;
+}
+
+/** A brushed range of the commit timeline: while set, every view shows only reports received inside it. */
+export interface TimeWindow {
+  from: number;
+  to: number;
 }
 
 type View = 'tree' | 'offenders' | 'commits' | 'fixes' | 'sessions';
@@ -201,6 +222,9 @@ export interface PanelState {
   reports: Report[];
   commits: Map<number, Report[]>;
   commitOrder: number[];
+  /** Apps connected to the relay, when this panel is on one, and which is being watched. */
+  apps: RelayApp[];
+  appId: string | null;
   selectedKey: string | null;
   selectedReport: Report | null;
   selectedCommit: number | null;
@@ -228,6 +252,9 @@ export interface PanelState {
   selectedSession: string | null;
   compareWith: string | null;
   byInstance: boolean;
+  /** Brushed range of the timeline strip, or null for "everything". */
+  timeWindow: TimeWindow | null;
+  stripCollapsed: boolean;
 }
 
 export interface Panel {
@@ -282,6 +309,8 @@ const ROW_H = 22; // tree row height (px), must match panel.css
 const ITEM_H = 20; // stream item height (px), must match panel.css
 const OVERSCAN = 8;
 const FALLBACK_VIEWPORT = 800; // when the container has no layout (jsdom)
+const MAX_STRIP_BARS = 200; // timeline bars drawn at once; older commits fall off the left rather than growing the DOM
+const MIN_BAR_PCT = 8; // shortest bar, so a one-report commit is still a click target
 
 // ---------- tiny DOM helpers ----------
 type Child = Node | string | null | undefined;
@@ -313,6 +342,12 @@ function fmtTime(ms: number): string {
 const fmtMs = (n: unknown): string => (typeof n === 'number' && Number.isFinite(n) ? `${n.toFixed(1)} ms` : '');
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/** Compact duration for the timeline axis and the window chip: "820ms", "3.2s", "1.4m". */
+const fmtSpan = (ms: number): string => (ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${(ms / 1000).toFixed(1)}s` : `${(ms / 60000).toFixed(1)}m`);
+
+/** Spoken form of the same duration, for the bars' `aria-label`. */
+const spokenAgo = (ms: number): string => (ms < 1000 ? 'just now' : ms < 60000 ? `${Math.round(ms / 1000)} seconds ago` : `${Math.round(ms / 60000)} minutes ago`);
 
 const componentList = (m: Map<string, number> | Record<string, number>): string =>
   (m instanceof Map ? [...m] : Object.entries(m)).map(([c, n]) => `<${c}>${n > 1 ? ' ×' + n : ''}`).join(', ');
@@ -776,6 +811,8 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     reports: [],
     commits: new Map(),
     commitOrder: [],
+    apps: [],
+    appId: null,
     selectedKey: null,
     selectedReport: null,
     selectedCommit: null,
@@ -802,6 +839,8 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     selectedSession: null,
     compareWith: null,
     byInstance: false,
+    timeWindow: null,
+    stripCollapsed: false,
   };
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let queue: Report[] = [];
@@ -865,6 +904,9 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   const settingsBtn = iconButton('⚙', 'Settings', 'Settings', () => toggleSettings());
   const status = el('span', { class: 'status', title: '' }, [el('span', { class: 'dot' }), el('span', { class: 'status-text', text: 'no page' })]);
   const tabChip = el('span', { class: 'tab-chip', hidden: true, title: 'The tab this panel follows' });
+  // Several apps on one relay: pick which one this panel watches.
+  const appPicker = el('select', { class: 'app-picker', hidden: true, title: 'Which connected app this panel watches', 'aria-label': 'App' }) as HTMLSelectElement;
+  appPicker.addEventListener('change', () => transport.selectApp?.(appPicker.value));
   const undock = transport.undock
     ? [
         el('span', { class: 'sep' }),
@@ -888,11 +930,34 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     ...undock,
     el('span', { class: 'spacer' }),
     tabChip,
+    appPicker,
     status,
     settingsBtn,
   ]);
   const summary = el('div', { class: 'summary' });
   const banner = el('div', { class: 'banner', hidden: true });
+
+  // ---------- commit timeline strip ----------
+  const stripChevron = el('span', { class: 'chevron', text: '▾' });
+  const stripCount = el('span', { class: 'count', text: '0 commits' });
+  const stripChip = el('button', {
+    class: 'chip',
+    hidden: true,
+    title: 'Clear the time window (Esc)',
+    onclick: (e: Event) => {
+      e.stopPropagation();
+      clearWindow();
+    },
+  });
+  const stripBars = el('div', { class: 'bars' });
+  const stripFrom = el('span', { class: 'from', text: '' });
+  const stripTo = el('span', { class: 'to', text: 'now' });
+  const stripHeader = el('div', { class: 'timeline-header', onclick: () => toggleStrip() }, [stripChevron, el('span', { class: 'title', text: 'Timeline' }), stripChip, stripCount]);
+  const timeline = el('div', { class: 'timeline', hidden: true, role: 'group', 'aria-label': 'Commit timeline' }, [
+    stripHeader,
+    el('div', { class: 'timeline-body' }, [stripBars, el('div', { class: 'timeline-axis' }, [stripFrom, stripTo])]),
+  ]);
+
   const viewsBar = el('div', { class: 'views' });
   const VIEWS: [View, string][] = [
     ['tree', 'Tree'],
@@ -955,7 +1020,9 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   details.setAttribute('aria-label', 'Details');
   settings.setAttribute('role', 'dialog');
   settings.setAttribute('aria-label', 'Settings');
-  root.append(toolbar, summary, banner, main, stream, toastEl);
+  stripBars.setAttribute('role', 'group');
+  stripBars.setAttribute('aria-label', 'Commits over time; arrow keys move between commits, Enter selects, drag to filter every view to a time window');
+  root.append(toolbar, summary, banner, timeline, main, stream, toastEl);
   root.addEventListener('keydown', onGlobalKey);
 
   // Narrow hosts (the side panel) stack the tree above the details and hide button labels.
@@ -1087,6 +1154,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         treeWidth: state.treeWidth,
         flashOn: state.flashOn,
         byInstance: state.byInstance,
+        stripCollapsed: state.stripCollapsed,
       };
       transport.storage!.set('panel', saved);
     }, 150);
@@ -1141,6 +1209,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       instancesBtn.classList.toggle('active', state.byInstance);
       rebuildTree();
     }
+    if (typeof saved.stripCollapsed === 'boolean' && saved.stripCollapsed !== state.stripCollapsed) toggleStrip(saved.stripCollapsed);
     if (saved.tab === 'history' || saved.tab === 'fix') state.tab = saved.tab;
     if (saved.view && viewButtons.has(saved.view)) state.view = saved.view;
     for (const n of state.nodesByKey.values()) n.expanded = !state.collapsed.has(n.key);
@@ -1316,6 +1385,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   function renderHeavy(details: boolean): void {
     heavyAt = Date.now();
     if (state.view !== 'tree') renderLeft();
+    renderStrip();
     if (details) renderDetails();
   }
   /** Rebuild the non-tree left pane (and the details when asked) now, or within LEFT_RENDER_INTERVAL while a large buffer streams. */
@@ -1365,12 +1435,14 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     state.selectedCommit = null;
     state.selectedFix = null;
     state.selectedRoot = null;
+    state.timeWindow = null;
     if (state.tab === 'commit' || state.tab === 'fixlist' || state.tab === 'root') state.tab = 'latest';
     queue = [];
     renderLeft();
     renderDetails();
     renderStream();
     renderSummary();
+    renderStrip();
   }
 
   // The parsed filter, recomputed only when `state.filter` changes (`matchesFilter` runs once per tree node and report).
@@ -1419,21 +1491,53 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     return text.includes(q);
   }
 
+  /** The brushed timeline range, part of the filter like `avoidableOnly` so every view narrows together. */
+  const inWindow = (r: Report): boolean => {
+    const w = state.timeWindow;
+    return !w || (r.receivedAt >= w.from && r.receivedAt <= w.to);
+  };
+  const windowKey = (): string => {
+    const w = state.timeWindow;
+    return w ? `${w.from}-${w.to}` : '';
+  };
+
+  // The tree's own counters are lifetime totals; under a time window the rows count only the reports inside it.
+  const NO_COUNTS: NodeCounts = { total: 0, avoidable: 0 };
+  let windowNodes: { key: string; map: Map<string, NodeCounts> } | null = null;
+  function nodeCounts(node: TreeNode): NodeCounts {
+    if (!state.timeWindow) return node;
+    const key = `${dataGen}|${windowKey()}|${state.byInstance}`;
+    if (!windowNodes || windowNodes.key !== key) {
+      const map = new Map<string, NodeCounts>();
+      for (const r of state.reports) {
+        if (!inWindow(r)) continue;
+        const k = nodeOfReport(r).key;
+        let c = map.get(k);
+        if (!c) map.set(k, (c = { total: 0, avoidable: 0 }));
+        c.total++;
+        if (r.avoidable) c.avoidable++;
+      }
+      windowNodes = { key, map };
+    }
+    return windowNodes.map.get(node.key) || NO_COUNTS;
+  }
+
   /** A node is shown if it or any descendant matches the filter (and has avoidable reports when that filter is on). */
   function visible(node: TreeNode): boolean {
-    const own = (!state.avoidableOnly || node.avoidable > 0) && matchesFilter(node.name) && node.total > 0 && (valueQuery() === null || node.reports.some(matchesValues));
+    const c = nodeCounts(node);
+    const own = (!state.avoidableOnly || c.avoidable > 0) && matchesFilter(node.name) && c.total > 0 && (valueQuery() === null || node.reports.some(matchesValues));
     if (own) return true;
-    for (const c of node.children.values()) if (visible(c)) return true;
+    for (const child of node.children.values()) if (visible(child)) return true;
     return false;
   }
 
-  const passes = (r: Report): boolean => (!state.avoidableOnly || r.avoidable) && matchesFilter(r.component) && matchesValues(r);
+  const passes = (r: Report): boolean => inWindow(r) && (!state.avoidableOnly || r.avoidable) && matchesFilter(r.component) && matchesValues(r);
 
   // The filtered buffer and its ranked fixes, shared by every render of one flush (or of one user action) that needs them.
   let dataGen = 0; // bumped whenever `state.reports` changes
   let filtered: { key: string; reports: Report[]; fixes: RankedFix[] | null } = { key: '', reports: [], fixes: null };
   function filteredReports(): Report[] {
-    const key = `${dataGen}|${state.avoidableOnly}|${state.filter}`;
+    const key = `${dataGen}|${state.avoidableOnly}|${state.filter}|${windowKey()}`;
     if (filtered.key !== key) filtered = { key, reports: state.reports.filter(passes), fixes: null };
     return filtered.reports;
   }
@@ -1452,6 +1556,176 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     renderLeft();
     renderDetails();
     persist();
+  }
+
+  // ---------- commit timeline ----------
+  interface StripBar {
+    key: number;
+    total: number;
+    avoidable: number;
+    from: number;
+    to: number;
+  }
+  let bars: StripBar[] = []; // what the strip currently shows, oldest first (the last MAX_STRIP_BARS commits)
+  const barEls = new Map<number, HTMLButtonElement>();
+  const barNodes = (): HTMLElement[] => [...stripBars.children] as HTMLElement[];
+
+  /**
+   * One bar per commit, oldest left: height on a sqrt scale of the commit's report count (so one huge
+   * commit does not flatten the rest), filled from the bottom with the avoidable share. Redrawn with the
+   * other heavy views, so a streaming buffer repaints at most every LEFT_RENDER_INTERVAL.
+   */
+  function renderStrip(): void {
+    const order = state.commitOrder;
+    const next: StripBar[] = [];
+    let max = 1;
+    for (let i = Math.max(0, order.length - MAX_STRIP_BARS); i < order.length; i++) {
+      const key = order[i]!;
+      const reports = state.commits.get(key);
+      if (!reports || !reports.length) continue;
+      let avoidable = 0;
+      let from = Infinity;
+      let to = 0;
+      for (const r of reports) {
+        if (r.avoidable) avoidable++;
+        if (r.receivedAt < from) from = r.receivedAt;
+        if (r.receivedAt > to) to = r.receivedAt;
+      }
+      next.push({ key, total: reports.length, avoidable, from, to });
+      if (reports.length > max) max = reports.length;
+    }
+    bars = next;
+    if (!bars.length) {
+      timeline.hidden = true;
+      stripBars.textContent = '';
+      barEls.clear();
+      return;
+    }
+    timeline.hidden = false;
+    const now = bars[bars.length - 1]!.to;
+    const win = state.timeWindow;
+    const live = new Set<number>();
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < bars.length; i++) {
+      const b = bars[i]!;
+      live.add(b.key);
+      let node = barEls.get(b.key);
+      if (!node) {
+        node = el('button', { class: 'bar', type: 'button', 'data-commit': String(b.key) }, [el('span', { class: 'avoid' })]);
+        barEls.set(b.key, node);
+      }
+      node.setAttribute('data-index', String(i));
+      node.style.height = `${Math.max(MIN_BAR_PCT, Math.round(100 * Math.sqrt(b.total / max)))}%`;
+      (node.firstElementChild as HTMLElement).style.height = `${Math.round((100 * b.avoidable) / b.total)}%`;
+      node.classList.toggle('has-avoid', b.avoidable > 0);
+      node.classList.toggle('selected', state.selectedCommit === b.key && state.tab === 'commit');
+      node.classList.toggle('in-window', !!win && b.to >= win.from && b.from <= win.to);
+      node.setAttribute('aria-label', `commit ${b.key}, ${plural(b.total, 'render')}, ${b.avoidable} avoidable, ${spokenAgo(Math.max(0, now - b.to))}`);
+      node.title = `#${b.key} · ${plural(b.total, 'render')} · ${b.avoidable} avoidable`;
+      frag.append(node);
+    }
+    stripBars.textContent = '';
+    stripBars.append(frag);
+    for (const key of [...barEls.keys()]) if (!live.has(key)) barEls.delete(key);
+    const span = now - bars[0]!.from;
+    stripFrom.textContent = span > 0 ? `-${fmtSpan(span)}` : '0ms';
+    stripTo.textContent = 'now';
+    stripCount.textContent = plural(bars.length, 'commit') + (order.length > bars.length ? ` of ${order.length}` : '');
+    if (win) {
+      let n = 0;
+      for (const r of state.reports) if (inWindow(r)) n++;
+      stripChip.textContent = `${fmtSpan(win.to - win.from)} window, ${plural(n, 'report')} · Clear`;
+      stripChip.hidden = false;
+    } else stripChip.hidden = true;
+  }
+
+  function toggleStrip(value?: boolean): void {
+    state.stripCollapsed = value === undefined ? !state.stripCollapsed : value;
+    timeline.classList.toggle('collapsed', state.stripCollapsed);
+    stripChevron.textContent = state.stripCollapsed ? '▸' : '▾';
+    if (value === undefined) persist();
+  }
+
+  /** Brushing and clearing go through the shared filter, so the tree, Offenders, Fixes, Commits and the stream agree. */
+  function setWindow(from: number, to: number): void {
+    state.timeWindow = from <= to ? { from, to } : { from: to, to: from };
+    afterWindowChange();
+  }
+  function clearWindow(): void {
+    if (!state.timeWindow) return;
+    state.timeWindow = null;
+    afterWindowChange();
+  }
+  function afterWindowChange(): void {
+    renderLeft();
+    renderStream();
+    renderDetails();
+    renderStrip();
+  }
+
+  const barAt = (target: EventTarget | null): number => {
+    const node = target && typeof (target as Element).closest === 'function' ? (target as Element).closest('.bar') : null;
+    const i = node ? Number(node.getAttribute('data-index')) : -1;
+    return Number.isInteger(i) && i >= 0 && i < bars.length ? i : -1;
+  };
+
+  let brush: { a: number; b: number } | null = null;
+  let swallowClick = false; // the click that ends a drag must not also select a commit
+  const paintBrush = (): void => {
+    const lo = brush ? Math.min(brush.a, brush.b) : -1;
+    const hi = brush ? Math.max(brush.a, brush.b) : -2;
+    const nodes = barNodes();
+    for (let i = 0; i < nodes.length; i++) nodes[i]!.classList.toggle('brushing', i >= lo && i <= hi);
+  };
+  stripBars.addEventListener('mousedown', (e) => {
+    swallowClick = false;
+    const i = barAt(e.target);
+    if (i < 0) return;
+    brush = { a: i, b: i };
+  });
+  stripBars.addEventListener('mousemove', (e) => {
+    if (!brush) return;
+    const i = barAt(e.target);
+    if (i < 0 || i === brush.b) return;
+    brush.b = i;
+    paintBrush();
+  });
+  window.addEventListener('mouseup', (e) => {
+    if (!brush) return;
+    const i = barAt(e.target);
+    if (i >= 0) brush.b = i;
+    const { a, b } = brush;
+    brush = null;
+    paintBrush();
+    if (a === b) return; // a plain click: the click handler selects the commit
+    swallowClick = true;
+    setWindow(bars[Math.min(a, b)]!.from, bars[Math.max(a, b)]!.to);
+  });
+  stripBars.addEventListener('click', (e) => {
+    if (swallowClick) {
+      swallowClick = false;
+      return;
+    }
+    const i = barAt(e.target);
+    if (i >= 0) selectCommitBar(bars[i]!.key);
+  });
+  stripBars.addEventListener('keydown', (e) => {
+    swallowClick = false;
+    const key = (e as KeyboardEvent).key;
+    if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return;
+    const nodes = barNodes();
+    const i = nodes.indexOf(document.activeElement as HTMLElement);
+    if (i < 0) return;
+    e.preventDefault();
+    const to = key === 'ArrowLeft' ? Math.max(0, i - 1) : key === 'ArrowRight' ? Math.min(nodes.length - 1, i + 1) : key === 'Home' ? 0 : nodes.length - 1;
+    nodes[to]!.focus();
+  });
+
+  /** Same path as clicking the row in the Commits view, plus a hop to that view. */
+  function selectCommitBar(key: number): void {
+    showCommit(key);
+    if (state.view !== 'commits') setView('commits');
+    renderStrip();
   }
 
   function renderLeft(): void {
@@ -1544,8 +1818,9 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     chevron.textContent = node.expanded ? '▾' : '▸';
     const badges = row.querySelector('.badges') as HTMLElement;
     badges.textContent = '';
-    if (node.avoidable) badges.append(el('span', { class: 'badge avoid', title: 'avoidable re-renders', text: String(node.avoidable) }));
-    if (node.total) badges.append(el('span', { class: 'badge', title: 're-renders', text: String(node.total) }));
+    const counts = nodeCounts(node);
+    if (counts.avoidable) badges.append(el('span', { class: 'badge avoid', title: 'avoidable re-renders', text: String(counts.avoidable) }));
+    if (counts.total) badges.append(el('span', { class: 'badge', title: 're-renders', text: String(counts.total) }));
     if (node.flash) {
       node.flash = false;
       // Rows scrolled into view long after the report arrived should not flash.
@@ -1607,7 +1882,11 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         toggleSettings(false);
         return;
       }
-      if (inField) target!.blur();
+      if (inField) {
+        target!.blur();
+        return;
+      }
+      clearWindow();
       return;
     }
     if (inField || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1723,6 +2002,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     state.tab = 'commit';
     renderLeft();
     renderDetails();
+    renderStrip();
   }
 
   function showRoot(name: string): void {
@@ -2342,6 +2622,17 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     status.querySelector('.status-text')!.textContent = text;
     tabChip.hidden = !state.tabLabel;
     tabChip.textContent = state.tabLabel || '';
+    // Only worth showing when there is a choice to make.
+    appPicker.hidden = state.apps.length < 2;
+    if (!appPicker.hidden) {
+      const want = state.apps.map((a) => `${a.id}:${a.label}`).join('|');
+      if (appPicker.dataset.apps !== want) {
+        appPicker.dataset.apps = want;
+        appPicker.textContent = '';
+        for (const a of state.apps) appPicker.append(el('option', { value: a.id, text: a.label || a.id }));
+      }
+      if (state.appId) appPicker.value = state.appId;
+    }
     banner.textContent = '';
     const warnings: string[] = [];
     if (lib && typeof lib.protocol === 'number' && lib.protocol > PROTOCOL) warnings.push(`The page runs a newer rerender-lens (protocol ${lib.protocol}) than this panel (${PROTOCOL}). Update the extension.`);
@@ -2557,6 +2848,13 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         state.library = null;
         renderStatus();
         break;
+      case 'apps': {
+        const p = isRecord(message.payload) ? message.payload : {};
+        state.apps = Array.isArray(p.list) ? (p.list as RelayApp[]) : [];
+        state.appId = typeof p.selected === 'string' ? p.selected : null;
+        renderStatus();
+        break;
+      }
       case 'hello':
         if (isRecord(message.payload)) setLibrary(message.payload as unknown as HelloPayload);
         break;
@@ -3222,6 +3520,9 @@ function sampleReports(): Record<string, unknown>[] {
 function floodReports(n: number): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
   const components = Math.max(10, Math.floor(n / 10));
+  // Spread the arrival times over the last 90 s: they all arrive in one tick, but the timeline strip is about time.
+  const spread = 90_000;
+  const t0 = Date.now() - spread;
   for (let i = 0; i < n; i++) {
     const id = i % components;
     const depth = 1 + (id % 6);
@@ -3229,6 +3530,7 @@ function floodReports(n: number): Record<string, unknown>[] {
     for (let d = 1; d < depth; d++) path.push(`Section${(id * 7 + d) % 40}`);
     const avoidable = id % 3 !== 0;
     out.push({
+      receivedAt: t0 + Math.round((i / Math.max(1, n - 1)) * spread),
       component: `Item${id}`, path, trigger: avoidable ? 'parent' : 'props', avoidable, renderCount: Math.floor(i / components) + 1, instanceId: id + 1, commitId: Math.floor(i / 50) + 1,
       memoized: id % 2 === 0, owner: path[path.length - 1], parent: { name: path[path.length - 1], trigger: 'state' }, selfDuration: (id % 7) / 10,
       props: { prev: { style: { w: id }, n: i }, next: { style: { w: id }, n: i + (avoidable ? 0 : 1) } },
@@ -3305,10 +3607,17 @@ function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = Even
   let listener: ((m: Message) => void) | null = null;
   let stream: EventSourceLike | null = null;
   let appsOnline: number | null = null;
+  // Several apps can share one relay; this panel watches one of them at a time.
+  let roster: RelayApp[] = [];
+  let selected: string | null = null;
   const emit = (m: Message): void => {
     if (listener) listener(m);
   };
-  const post = (message: unknown): Promise<void> => fetch(`${base}/message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(message) }).then(() => undefined);
+  // Commands name the app being watched, so the other apps are not asked to answer.
+  const post = (message: unknown): Promise<void> => {
+    const body = selected && isRecord(message) && message.__rerenderLensCmd === true ? { ...message, app: selected } : message;
+    return fetch(`${base}/message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(() => undefined);
+  };
   const { bridge, reply } = commandBridge(post, 2000);
   const handleData = (data: string): void => {
     let parsed: unknown;
@@ -3320,14 +3629,25 @@ function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = Even
     for (const m of Array.isArray(parsed) ? parsed : [parsed]) {
       if (!isRecord(m) || reply(m)) continue;
       if (m.__rerenderLens === true && m.type === 'relay') {
-        const apps = isRecord(m.payload) && typeof m.payload.apps === 'number' ? m.payload.apps : 0;
+        const p = isRecord(m.payload) ? m.payload : {};
+        const apps = typeof p.apps === 'number' ? p.apps : 0;
+        roster = Array.isArray(p.list) ? (p.list as RelayApp[]) : [];
         const wasOnline = appsOnline;
+        const wasSelected = selected;
         appsOnline = apps;
-        // The relay sends the app count as soon as this stream is open. Attaching before that loses the
+        // Keep watching the same app across roster changes; fall back to the first one when it goes away.
+        if (!roster.length) selected = null;
+        else if (!selected || !roster.some((a) => a.id === selected)) selected = roster[0]!.id;
+        emit({ type: 'apps', payload: { list: roster, selected } });
+        // The relay sends the roster as soon as this stream is open. Attaching before that loses the
         // reply: the relay only forwards replies to panels that are already connected.
-        if (apps > 0 && (wasOnline === null || wasOnline === 0)) void attach();
+        if (apps > 0 && (wasOnline === null || wasOnline === 0 || selected !== wasSelected)) void attach();
         else if (apps === 0) emit({ type: 'disconnected' });
-      } else if (m.__rerenderLens === true && typeof m.type === 'string') emit({ type: m.type, version: typeof m.version === 'number' ? m.version : undefined, payload: m.payload });
+      } else if (m.__rerenderLens === true && typeof m.type === 'string') {
+        // Reports from an app this panel is not watching belong to another panel.
+        if (typeof m.app === 'string' && selected && m.app !== selected) continue;
+        emit({ type: m.type, version: typeof m.version === 'number' ? m.version : undefined, payload: m.payload });
+      }
     }
   };
   async function attach(): Promise<void> {
@@ -3344,6 +3664,13 @@ function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = Even
   const transport: Transport = {
     origin: base,
     tabLabel: `relay ${base.replace(/^https?:\/\//, '')}`,
+    selectApp(id) {
+      if (id === selected || !roster.some((a) => a.id === id)) return;
+      selected = id;
+      emit({ type: 'apps', payload: { list: roster, selected } });
+      emit({ type: 'navigated' }); // drop the other app's reports, then load this one's buffer
+      void attach();
+    },
     subscribe(fn) {
       listener = fn;
       const open = (): void => {

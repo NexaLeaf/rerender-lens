@@ -38,7 +38,7 @@ const report = (over: Record<string, unknown> = {}) => ({
 });
 
 interface Panel {
-  state: { reports: unknown[]; commits: Map<number, unknown[]>; commitOrder: number[]; selectedKey: string | null; paused: boolean; view: string; tab: string; library: unknown; relay: boolean; flashOn: boolean; recording: unknown; sessions: { name: string }[]; sort: { key: string; dir: number } };
+  state: { reports: unknown[]; commits: Map<number, unknown[]>; commitOrder: number[]; timeWindow: { from: number; to: number } | null; stripCollapsed: boolean; selectedCommit: number | null; selectedKey: string | null; paused: boolean; view: string; tab: string; library: unknown; relay: boolean; flashOn: boolean; recording: unknown; sessions: { name: string }[]; sort: { key: string; dir: number } };
   handle(m: unknown): void;
   flush(): void;
   select(name: string): void;
@@ -562,6 +562,186 @@ describe('scale and navigation', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe('commit timeline strip', () => {
+    const T0 = 1_700_000_000_000;
+    const send = (m: unknown) => {
+      panel.handle(m);
+      panel.flush();
+    };
+    /** Three commits, one component each, one second apart. */
+    const threeCommits = () => {
+      send({ type: 'report', payload: report({ component: 'A', path: ['App'], commitId: 1, receivedAt: T0 }) });
+      send({ type: 'report', payload: report({ component: 'B', path: ['App'], commitId: 2, receivedAt: T0 + 1000 }) });
+      send({ type: 'report', payload: report({ component: 'C', path: ['App'], commitId: 3, receivedAt: T0 + 2000 }) });
+    };
+    const bars = () => [...root.querySelectorAll<HTMLElement>('.timeline .bar')];
+    const chip = () => root.querySelector('.timeline-header .chip') as HTMLElement;
+    const mouse = (node: HTMLElement, type: string) => node.dispatchEvent(new MouseEvent(type, { bubbles: true }));
+
+    it('draws a bar per commit, scaled and labelled, and hides itself when empty', () => {
+      expect((root.querySelector('.timeline') as HTMLElement).hidden).toBe(true);
+      threeCommits();
+      send({ type: 'report', payload: report({ component: 'C2', path: ['App'], avoidable: false, commitId: 3, receivedAt: T0 + 2000 }) });
+      const b = bars();
+      expect(b).toHaveLength(3);
+      expect(b.map((n) => n.getAttribute('data-commit'))).toEqual(['1', '2', '3']);
+      expect(b[0]!.getAttribute('aria-label')).toBe('commit 1, 1 render, 1 avoidable, 2 seconds ago');
+      expect(b[2]!.getAttribute('aria-label')).toBe('commit 3, 2 renders, 1 avoidable, just now');
+      // sqrt scale: the two-report commit is the tallest, the one-report commits are shorter but not invisible
+      expect(b[2]!.style.height).toBe('100%');
+      expect(parseInt(b[0]!.style.height, 10)).toBeGreaterThanOrEqual(8);
+      expect(parseInt(b[0]!.style.height, 10)).toBeLessThan(100);
+      // the avoidable share fills the bar from the bottom
+      expect((b[2]!.firstElementChild as HTMLElement).style.height).toBe('50%');
+      expect(root.querySelector('.timeline-header .count')!.textContent).toBe('3 commits');
+      expect(root.querySelector('.timeline-axis .from')!.textContent).toBe('-2.0s');
+      expect(root.querySelector('.timeline-axis .to')!.textContent).toBe('now');
+      panel.clearAll();
+      expect((root.querySelector('.timeline') as HTMLElement).hidden).toBe(true);
+    });
+
+    it('clicking a bar selects that commit and switches to the Commits view', () => {
+      threeCommits();
+      expect(panel.state.view).toBe('tree');
+      bars()[1]!.click();
+      expect(panel.state.selectedCommit).toBe(2);
+      expect(panel.state.tab).toBe('commit');
+      expect(panel.state.view).toBe('commits');
+      expect(root.querySelector('.commits li.selected .id')!.textContent).toBe('#2');
+      expect(root.querySelector('.details-header .title')!.textContent).toContain('#2');
+      expect(bars()[1]!.classList.contains('selected')).toBe(true);
+      expect(bars()[0]!.classList.contains('selected')).toBe(false);
+    });
+
+    it('arrow keys move between bars and Enter selects the focused commit', () => {
+      threeCommits();
+      bars()[0]!.focus();
+      bars()[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+      expect(document.activeElement).toBe(bars()[1]);
+      bars()[1]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+      expect(document.activeElement).toBe(bars()[0]);
+      (document.activeElement as HTMLElement).click(); // what Enter does on a focused button
+      expect(panel.state.selectedCommit).toBe(1);
+    });
+
+    it('brushing a range narrows the tree, Offenders and the stream, and the chip or Esc clears it', () => {
+      threeCommits();
+      expect(names(root)).toEqual(['App', 'A', 'B', 'C']);
+      panel.setView('offenders');
+      expect(root.querySelectorAll('.grid tbody tr')).toHaveLength(3);
+      expect(root.querySelectorAll('.stream-item')).toHaveLength(3);
+      expect(chip().hidden).toBe(true);
+
+      mouse(bars()[0]!, 'mousedown');
+      mouse(bars()[1]!, 'mousemove');
+      mouse(bars()[1]!, 'mouseup');
+      expect(panel.state.timeWindow).toEqual({ from: T0, to: T0 + 1000 });
+      expect(chip().hidden).toBe(false);
+      expect(chip().textContent).toBe('1.0s window, 2 reports · Clear');
+      expect(root.querySelectorAll('.grid tbody tr')).toHaveLength(2);
+      expect(root.querySelectorAll('.stream-item')).toHaveLength(2);
+      expect(bars().map((n) => n.classList.contains('in-window'))).toEqual([true, true, false]);
+      panel.setView('tree');
+      expect(names(root)).toEqual(['App', 'A', 'B']);
+      panel.setView('commits');
+      expect(root.querySelectorAll('.commits li')).toHaveLength(2);
+
+      root.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      expect(panel.state.timeWindow).toBeNull();
+      expect(chip().hidden).toBe(true);
+      expect(root.querySelectorAll('.commits li')).toHaveLength(3);
+      panel.setView('tree');
+      expect(names(root)).toEqual(['App', 'A', 'B', 'C']);
+
+      // and the chip clears it too (a drag over one bar is a click, not a window)
+      mouse(bars()[1]!, 'mousedown');
+      mouse(bars()[2]!, 'mousemove');
+      mouse(bars()[2]!, 'mouseup');
+      expect(panel.state.timeWindow).toEqual({ from: T0 + 1000, to: T0 + 2000 });
+      chip().click();
+      expect(panel.state.timeWindow).toBeNull();
+      panel.setView('tree');
+      expect(names(root)).toEqual(['App', 'A', 'B', 'C']);
+    });
+
+    it('a window narrows the tree badges without touching the lifetime summary counters', () => {
+      send({ type: 'report', payload: report({ component: 'A', path: ['App'], commitId: 1, receivedAt: T0 }) });
+      send({ type: 'report', payload: report({ component: 'A', path: ['App'], commitId: 2, receivedAt: T0 + 1000, renderCount: 2 }) });
+      const badges = () => [...root.querySelectorAll('.row .badges .badge')].map((b) => b.textContent);
+      expect(badges()).toEqual(['2', '2']); // <A>: 2 avoidable of 2 (the App row has none of its own)
+      mouse(bars()[0]!, 'mousedown');
+      mouse(bars()[0]!, 'mousemove');
+      mouse(bars()[0]!, 'mouseup');
+      expect(panel.state.timeWindow).toBeNull(); // a press and release on one bar is a click, not a window
+      panel.setView('tree');
+      expect(badges()).toEqual(['2', '2']);
+      // brush only the first commit by dragging to it from the second
+      mouse(bars()[1]!, 'mousedown');
+      mouse(bars()[0]!, 'mousemove');
+      mouse(bars()[0]!, 'mouseup');
+      expect(panel.state.timeWindow).toEqual({ from: T0, to: T0 + 1000 });
+      expect([...root.querySelectorAll('.summary .stat')].map((s) => s.textContent).slice(0, 2)).toEqual(['2renders', '2avoidable']);
+    });
+
+    it('collapses from the header and persists that through storage', async () => {
+      const store: Record<string, unknown> = {};
+      const storage = { get: (k: string) => Promise.resolve(store[k]), set: (k: string, v: unknown) => Promise.resolve((store[k] = v)) };
+      document.body.innerHTML = '<div id="root"></div>';
+      root = document.getElementById('root')!;
+      panel = factory.createPanel(root, makeTransport({ storage }));
+      threeCommits();
+      const strip = root.querySelector('.timeline') as HTMLElement;
+      expect(strip.classList.contains('collapsed')).toBe(false);
+      (root.querySelector('.timeline-header') as HTMLElement).click();
+      expect(panel.state.stripCollapsed).toBe(true);
+      expect(strip.classList.contains('collapsed')).toBe(true);
+      expect(root.querySelector('.timeline-header .chevron')!.textContent).toBe('▸');
+      await new Promise((r) => setTimeout(r, 200));
+      expect((store.panel as { stripCollapsed: boolean }).stripCollapsed).toBe(true);
+
+      document.body.innerHTML = '<div id="root"></div>';
+      const again = factory.createPanel(document.getElementById('root')!, makeTransport({ storage }));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(again.state.stripCollapsed).toBe(true);
+      expect(document.querySelector('.timeline')!.classList.contains('collapsed')).toBe(true);
+    });
+
+    it('redraws on the throttle tick once the buffer is large, and caps the number of bars', async () => {
+      vi.useFakeTimers();
+      try {
+        for (let i = 0; i < 199; i++) panel.handle({ type: 'report', payload: report({ component: `C${i}`, path: ['App'], commitId: 1 }) });
+        panel.flush();
+        expect(bars()).toHaveLength(1); // small buffer: synchronous
+        for (let i = 0; i < 60; i++) panel.handle({ type: 'report', payload: report({ component: `D${i}`, path: ['App'], commitId: 2 }) });
+        panel.flush();
+        expect(bars()).toHaveLength(1); // 259 reports: the strip waits for the interval like the other heavy views
+        await vi.advanceTimersByTimeAsync(250);
+        expect(bars()).toHaveLength(2);
+        expect(bars()[1]!.getAttribute('data-commit')).toBe('2');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('never draws more than 200 bars, and says how many commits it dropped', () => {
+      for (let c = 1; c <= 260; c++) panel.handle({ type: 'report', payload: report({ commitId: c, receivedAt: T0 + c }) });
+      panel.flush();
+      expect(panel.state.commitOrder).toHaveLength(260);
+      expect(bars()).toHaveLength(200);
+      expect(bars()[0]!.getAttribute('data-commit')).toBe('61');
+      expect(bars()[199]!.getAttribute('data-commit')).toBe('260');
+      expect(root.querySelector('.timeline-header .count')!.textContent).toBe('200 commits of 260');
+    });
+
+    it('spreads the flood demo reports over time so the strip is more than one bar', () => {
+      const flood = factory.floodReports(200) as { receivedAt: number; commitId: number }[];
+      const times = new Set(flood.map((r) => r.receivedAt));
+      expect(times.size).toBeGreaterThan(10);
+      expect(new Set(flood.map((r) => r.commitId)).size).toBe(4);
+      expect(flood[flood.length - 1]!.receivedAt).toBeGreaterThan(flood[0]!.receivedAt);
+    });
   });
 
   it('keyboard: / focuses search, f opens the fix tab, Esc clears the highlight and leaves the search box', () => {

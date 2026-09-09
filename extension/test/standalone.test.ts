@@ -8,6 +8,7 @@ const source = readFileSync(join(__dirname, '..', 'panel.js'), 'utf8');
 interface Panel {
   state: { reports: unknown[]; library: unknown; relay: boolean; polling: boolean; tabLabel: string | null; origin: string | null };
   flush(): void;
+  openSettings(): void;
 }
 interface Msg {
   type: string;
@@ -25,18 +26,22 @@ interface Factory {
 }
 
 /** A page bridge as the injected/page library would expose it. */
-function fakeBridge(reports: unknown[]) {
+function fakeBridge(reports: unknown[], options: Record<string, unknown> = {}) {
   const calls: unknown[] = [];
   return {
     calls,
     bridge: {
       size: reports.length,
       version: 2,
-      info: () => ({ count: reports.length, library: '0.2.0', protocol: 2, react: [{ version: '19.2.0', bundleType: 1 }], production: false, enabled: true, options: {}, source: 'page', injected: false }),
+      info: () => ({ count: reports.length, library: '0.2.0', protocol: 2, react: [{ version: '19.2.0', bundleType: 1 }], production: false, enabled: true, options: { ...options }, source: 'page', injected: false }),
       pull: (since: number) => ({ seq: reports.length, reports: reports.slice(since), dropped: false }),
       replay: () => calls.push('replay'),
       clear: () => calls.push('clear'),
-      configure: (o: unknown) => (calls.push(['configure', o]), { trackAllMemoized: true }),
+      configure: (o: unknown) => {
+        calls.push(['configure', o]);
+        Object.assign(options, o);
+        return { ...options };
+      },
       highlight: (id: unknown) => (calls.push(['highlight', id]), true),
       flashAvoidable: (on: unknown) => calls.push(['flash', on]),
     },
@@ -189,6 +194,49 @@ describe('standalone panel (side panel / window)', () => {
     chrome.tabs.onUpdated.emit(7, { status: 'loading' });
     expect(panel.state.polling).toBe(false);
     expect(panel.state.reports).toHaveLength(0);
+  });
+
+  it('the side panel and the DevTools panel share per-origin settings in both directions', async () => {
+    const page = fakeBridge([], { trackAllMemoized: true });
+    chrome = makeChrome({ activeUrl: 'http://localhost:5199/app', page: { __RERENDER_LENS_DEVTOOLS__: page.bridge } });
+    const optionInput = (label: string): HTMLInputElement =>
+      [...document.querySelectorAll('label.opt')].find((l) => l.textContent!.includes(label))!.querySelector('input') as HTMLInputElement;
+    const settingsKey = `settings:${location.origin}`;
+
+    // one panel (the side panel) turns an option on
+    load(chrome);
+    const side = factory.bootStandalone({ tabId: 7 });
+    await settle();
+    await settle();
+    side.openSettings();
+    await settle();
+    expect(optionInput('Track every component').checked).toBe(false);
+    const all = optionInput('Track every component');
+    all.checked = true;
+    all.dispatchEvent(new Event('change'));
+    await settle();
+    await settle();
+    // it reached the page and was saved for this origin
+    expect(page.calls).toContainEqual(['configure', { trackAllComponents: true }]);
+    expect(chrome._store[settingsKey]).toMatchObject({ trackAllMemoized: true, trackAllComponents: true });
+
+    // a second panel over the same origin (the DevTools one) opens on the new state
+    load(chrome);
+    const devtools = factory.bootStandalone({ tabId: 7 });
+    await settle();
+    await settle();
+    devtools.openSettings();
+    await settle();
+    expect(optionInput('Track every component').checked).toBe(true);
+
+    // and the other way round: what the second panel changes is what the first would read next
+    const hooks = optionInput('Diff hook state and contexts');
+    hooks.checked = false;
+    hooks.dispatchEvent(new Event('change'));
+    await settle();
+    await settle();
+    expect(page.calls).toContainEqual(['configure', { trackHooks: false }]);
+    expect(chrome._store[settingsKey]).toMatchObject({ trackAllComponents: true, trackHooks: false });
   });
 
   it('follows the active tab when not pinned and starts over on tab switch', async () => {

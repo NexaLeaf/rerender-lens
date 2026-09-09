@@ -30,9 +30,11 @@ Adds a **Re-renders** tab: the component tree with avoidable counts, why each co
 the props and hooks that changed, and the fix as a snippet. Other views rank components by wasted
 renders (Offenders), group renders by React commit with their root cause (Commits), rank every fix
 by how many re-renders it removes (Fixes), and compare a recording before and after a fix
-(Sessions). Also: an Elements-panel sidebar, a badge with the tab's avoidable count, hover to
-highlight in the page, "open source" links, and the same panel next to the page (side panel) or
-in its own window.
+(Sessions). A timeline strip above the tree draws one bar per commit sized by its renders and
+coloured by its avoidable share: click a bar for that commit, drag across bars to brush a time
+window that every view narrows to. Also: an Elements-panel sidebar, a badge with the tab's
+avoidable count, hover to highlight in the page, "open source" links, and the same panel next to
+the page (side panel) or in its own window.
 
 **Install** (until the Web Store listing is live): download `rerender-lens-chrome-<version>.zip`
 from the [latest release](https://github.com/NexaLeaf/rerender-lens/releases), unzip it, open
@@ -83,7 +85,9 @@ npx rerender-lens panel           # http://127.0.0.1:4141/  (--port, --host 0.0.
 and point the app at it with `RERENDER_LENS_RELAY=http://127.0.0.1:4141`
 (`NEXT_PUBLIC_RERENDER_LENS_RELAY` for Next.js), `createDevtoolsNotifier({ relay })`, or
 `window.__RERENDER_LENS_RELAY__` set before the app loads. Settings, highlight and replay travel
-back to the app; several apps or panels can share one relay.
+back to the app, and the panel re-attaches when an app reloads. Point **several apps** at one relay
+(a host app and a microfrontend, two pages, two machines) and the panel shows a picker listing each
+by address; it watches one at a time and commands go only to that one.
 
 ## Manual setup
 

@@ -577,6 +577,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
   var ITEM_H = 20;
   var OVERSCAN = 8;
   var FALLBACK_VIEWPORT = 800;
+  var MAX_STRIP_BARS = 200;
+  var MIN_BAR_PCT = 8;
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
     if (attrs) {
@@ -602,6 +604,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
   }
   var fmtMs = (n) => typeof n === "number" && Number.isFinite(n) ? `${n.toFixed(1)} ms` : "";
   var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  var fmtSpan = (ms) => ms < 1e3 ? `${Math.round(ms)}ms` : ms < 6e4 ? `${(ms / 1e3).toFixed(1)}s` : `${(ms / 6e4).toFixed(1)}m`;
+  var spokenAgo = (ms) => ms < 1e3 ? "just now" : ms < 6e4 ? `${Math.round(ms / 1e3)} seconds ago` : `${Math.round(ms / 6e4)} minutes ago`;
   var componentList = (m) => (m instanceof Map ? [...m] : Object.entries(m)).map(([c, n]) => `<${c}>${n > 1 ? " \xD7" + n : ""}`).join(", ");
   function changesOf(report) {
     return [].concat(report.propChanges || [], report.stateChanges || [], report.hookChanges || []);
@@ -999,6 +1003,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       reports: [],
       commits: /* @__PURE__ */ new Map(),
       commitOrder: [],
+      apps: [],
+      appId: null,
       selectedKey: null,
       selectedReport: null,
       selectedCommit: null,
@@ -1024,7 +1030,9 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       recording: null,
       selectedSession: null,
       compareWith: null,
-      byInstance: false
+      byInstance: false,
+      timeWindow: null,
+      stripCollapsed: false
     };
     let persistTimer = null;
     let queue = [];
@@ -1084,6 +1092,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     const settingsBtn = iconButton("\u2699", "Settings", "Settings", () => toggleSettings());
     const status = el("span", { class: "status", title: "" }, [el("span", { class: "dot" }), el("span", { class: "status-text", text: "no page" })]);
     const tabChip = el("span", { class: "tab-chip", hidden: true, title: "The tab this panel follows" });
+    const appPicker = el("select", { class: "app-picker", hidden: true, title: "Which connected app this panel watches", "aria-label": "App" });
+    appPicker.addEventListener("change", () => transport.selectApp?.(appPicker.value));
     const undock = transport.undock ? [
       el("span", { class: "sep" }),
       iconButton("\u2AFF", "Side panel", "Show this panel next to the page (Chrome side panel)", () => void transport.undock("sidepanel").catch((e) => toast(String(e.message || e)))),
@@ -1105,11 +1115,31 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       ...undock,
       el("span", { class: "spacer" }),
       tabChip,
+      appPicker,
       status,
       settingsBtn
     ]);
     const summary = el("div", { class: "summary" });
     const banner = el("div", { class: "banner", hidden: true });
+    const stripChevron = el("span", { class: "chevron", text: "\u25BE" });
+    const stripCount = el("span", { class: "count", text: "0 commits" });
+    const stripChip = el("button", {
+      class: "chip",
+      hidden: true,
+      title: "Clear the time window (Esc)",
+      onclick: (e) => {
+        e.stopPropagation();
+        clearWindow();
+      }
+    });
+    const stripBars = el("div", { class: "bars" });
+    const stripFrom = el("span", { class: "from", text: "" });
+    const stripTo = el("span", { class: "to", text: "now" });
+    const stripHeader = el("div", { class: "timeline-header", onclick: () => toggleStrip() }, [stripChevron, el("span", { class: "title", text: "Timeline" }), stripChip, stripCount]);
+    const timeline = el("div", { class: "timeline", hidden: true, role: "group", "aria-label": "Commit timeline" }, [
+      stripHeader,
+      el("div", { class: "timeline-body" }, [stripBars, el("div", { class: "timeline-axis" }, [stripFrom, stripTo])])
+    ]);
     const viewsBar = el("div", { class: "views" });
     const VIEWS = [
       ["tree", "Tree"],
@@ -1172,7 +1202,9 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     details.setAttribute("aria-label", "Details");
     settings.setAttribute("role", "dialog");
     settings.setAttribute("aria-label", "Settings");
-    root.append(toolbar, summary, banner, main, stream, toastEl);
+    stripBars.setAttribute("role", "group");
+    stripBars.setAttribute("aria-label", "Commits over time; arrow keys move between commits, Enter selects, drag to filter every view to a time window");
+    root.append(toolbar, summary, banner, timeline, main, stream, toastEl);
     root.addEventListener("keydown", onGlobalKey);
     function setCompact(on) {
       if (state.compact === on) return;
@@ -1291,7 +1323,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           collapsed: [...state.collapsed],
           treeWidth: state.treeWidth,
           flashOn: state.flashOn,
-          byInstance: state.byInstance
+          byInstance: state.byInstance,
+          stripCollapsed: state.stripCollapsed
         };
         transport.storage.set("panel", saved);
       }, 150);
@@ -1343,6 +1376,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         instancesBtn.classList.toggle("active", state.byInstance);
         rebuildTree();
       }
+      if (typeof saved.stripCollapsed === "boolean" && saved.stripCollapsed !== state.stripCollapsed) toggleStrip(saved.stripCollapsed);
       if (saved.tab === "history" || saved.tab === "fix") state.tab = saved.tab;
       if (saved.view && viewButtons.has(saved.view)) state.view = saved.view;
       for (const n of state.nodesByKey.values()) n.expanded = !state.collapsed.has(n.key);
@@ -1498,6 +1532,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     function renderHeavy(details2) {
       heavyAt = Date.now();
       if (state.view !== "tree") renderLeft();
+      renderStrip();
       if (details2) renderDetails();
     }
     function scheduleHeavy(details2) {
@@ -1544,12 +1579,14 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       state.selectedCommit = null;
       state.selectedFix = null;
       state.selectedRoot = null;
+      state.timeWindow = null;
       if (state.tab === "commit" || state.tab === "fixlist" || state.tab === "root") state.tab = "latest";
       queue = [];
       renderLeft();
       renderDetails();
       renderStream();
       renderSummary();
+      renderStrip();
     }
     let filterCache = { filter: "", value: null, regex: null, text: "" };
     function parsedFilter() {
@@ -1590,17 +1627,45 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       }
       return text.includes(q);
     }
+    const inWindow = (r) => {
+      const w = state.timeWindow;
+      return !w || r.receivedAt >= w.from && r.receivedAt <= w.to;
+    };
+    const windowKey = () => {
+      const w = state.timeWindow;
+      return w ? `${w.from}-${w.to}` : "";
+    };
+    const NO_COUNTS = { total: 0, avoidable: 0 };
+    let windowNodes = null;
+    function nodeCounts(node) {
+      if (!state.timeWindow) return node;
+      const key = `${dataGen}|${windowKey()}|${state.byInstance}`;
+      if (!windowNodes || windowNodes.key !== key) {
+        const map = /* @__PURE__ */ new Map();
+        for (const r of state.reports) {
+          if (!inWindow(r)) continue;
+          const k = nodeOfReport(r).key;
+          let c = map.get(k);
+          if (!c) map.set(k, c = { total: 0, avoidable: 0 });
+          c.total++;
+          if (r.avoidable) c.avoidable++;
+        }
+        windowNodes = { key, map };
+      }
+      return windowNodes.map.get(node.key) || NO_COUNTS;
+    }
     function visible(node) {
-      const own = (!state.avoidableOnly || node.avoidable > 0) && matchesFilter(node.name) && node.total > 0 && (valueQuery() === null || node.reports.some(matchesValues));
+      const c = nodeCounts(node);
+      const own = (!state.avoidableOnly || c.avoidable > 0) && matchesFilter(node.name) && c.total > 0 && (valueQuery() === null || node.reports.some(matchesValues));
       if (own) return true;
-      for (const c of node.children.values()) if (visible(c)) return true;
+      for (const child of node.children.values()) if (visible(child)) return true;
       return false;
     }
-    const passes = (r) => (!state.avoidableOnly || r.avoidable) && matchesFilter(r.component) && matchesValues(r);
+    const passes = (r) => inWindow(r) && (!state.avoidableOnly || r.avoidable) && matchesFilter(r.component) && matchesValues(r);
     let dataGen = 0;
     let filtered = { key: "", reports: [], fixes: null };
     function filteredReports() {
-      const key = `${dataGen}|${state.avoidableOnly}|${state.filter}`;
+      const key = `${dataGen}|${state.avoidableOnly}|${state.filter}|${windowKey()}`;
       if (filtered.key !== key) filtered = { key, reports: state.reports.filter(passes), fixes: null };
       return filtered.reports;
     }
@@ -1617,6 +1682,154 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       renderLeft();
       renderDetails();
       persist();
+    }
+    let bars = [];
+    const barEls = /* @__PURE__ */ new Map();
+    const barNodes = () => [...stripBars.children];
+    function renderStrip() {
+      const order = state.commitOrder;
+      const next = [];
+      let max = 1;
+      for (let i = Math.max(0, order.length - MAX_STRIP_BARS); i < order.length; i++) {
+        const key = order[i];
+        const reports = state.commits.get(key);
+        if (!reports || !reports.length) continue;
+        let avoidable = 0;
+        let from = Infinity;
+        let to = 0;
+        for (const r of reports) {
+          if (r.avoidable) avoidable++;
+          if (r.receivedAt < from) from = r.receivedAt;
+          if (r.receivedAt > to) to = r.receivedAt;
+        }
+        next.push({ key, total: reports.length, avoidable, from, to });
+        if (reports.length > max) max = reports.length;
+      }
+      bars = next;
+      if (!bars.length) {
+        timeline.hidden = true;
+        stripBars.textContent = "";
+        barEls.clear();
+        return;
+      }
+      timeline.hidden = false;
+      const now = bars[bars.length - 1].to;
+      const win = state.timeWindow;
+      const live = /* @__PURE__ */ new Set();
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < bars.length; i++) {
+        const b = bars[i];
+        live.add(b.key);
+        let node = barEls.get(b.key);
+        if (!node) {
+          node = el("button", { class: "bar", type: "button", "data-commit": String(b.key) }, [el("span", { class: "avoid" })]);
+          barEls.set(b.key, node);
+        }
+        node.setAttribute("data-index", String(i));
+        node.style.height = `${Math.max(MIN_BAR_PCT, Math.round(100 * Math.sqrt(b.total / max)))}%`;
+        node.firstElementChild.style.height = `${Math.round(100 * b.avoidable / b.total)}%`;
+        node.classList.toggle("has-avoid", b.avoidable > 0);
+        node.classList.toggle("selected", state.selectedCommit === b.key && state.tab === "commit");
+        node.classList.toggle("in-window", !!win && b.to >= win.from && b.from <= win.to);
+        node.setAttribute("aria-label", `commit ${b.key}, ${plural(b.total, "render")}, ${b.avoidable} avoidable, ${spokenAgo(Math.max(0, now - b.to))}`);
+        node.title = `#${b.key} \xB7 ${plural(b.total, "render")} \xB7 ${b.avoidable} avoidable`;
+        frag.append(node);
+      }
+      stripBars.textContent = "";
+      stripBars.append(frag);
+      for (const key of [...barEls.keys()]) if (!live.has(key)) barEls.delete(key);
+      const span = now - bars[0].from;
+      stripFrom.textContent = span > 0 ? `-${fmtSpan(span)}` : "0ms";
+      stripTo.textContent = "now";
+      stripCount.textContent = plural(bars.length, "commit") + (order.length > bars.length ? ` of ${order.length}` : "");
+      if (win) {
+        let n = 0;
+        for (const r of state.reports) if (inWindow(r)) n++;
+        stripChip.textContent = `${fmtSpan(win.to - win.from)} window, ${plural(n, "report")} \xB7 Clear`;
+        stripChip.hidden = false;
+      } else stripChip.hidden = true;
+    }
+    function toggleStrip(value) {
+      state.stripCollapsed = value === void 0 ? !state.stripCollapsed : value;
+      timeline.classList.toggle("collapsed", state.stripCollapsed);
+      stripChevron.textContent = state.stripCollapsed ? "\u25B8" : "\u25BE";
+      if (value === void 0) persist();
+    }
+    function setWindow(from, to) {
+      state.timeWindow = from <= to ? { from, to } : { from: to, to: from };
+      afterWindowChange();
+    }
+    function clearWindow() {
+      if (!state.timeWindow) return;
+      state.timeWindow = null;
+      afterWindowChange();
+    }
+    function afterWindowChange() {
+      renderLeft();
+      renderStream();
+      renderDetails();
+      renderStrip();
+    }
+    const barAt = (target) => {
+      const node = target && typeof target.closest === "function" ? target.closest(".bar") : null;
+      const i = node ? Number(node.getAttribute("data-index")) : -1;
+      return Number.isInteger(i) && i >= 0 && i < bars.length ? i : -1;
+    };
+    let brush = null;
+    let swallowClick = false;
+    const paintBrush = () => {
+      const lo = brush ? Math.min(brush.a, brush.b) : -1;
+      const hi = brush ? Math.max(brush.a, brush.b) : -2;
+      const nodes = barNodes();
+      for (let i = 0; i < nodes.length; i++) nodes[i].classList.toggle("brushing", i >= lo && i <= hi);
+    };
+    stripBars.addEventListener("mousedown", (e) => {
+      swallowClick = false;
+      const i = barAt(e.target);
+      if (i < 0) return;
+      brush = { a: i, b: i };
+    });
+    stripBars.addEventListener("mousemove", (e) => {
+      if (!brush) return;
+      const i = barAt(e.target);
+      if (i < 0 || i === brush.b) return;
+      brush.b = i;
+      paintBrush();
+    });
+    window.addEventListener("mouseup", (e) => {
+      if (!brush) return;
+      const i = barAt(e.target);
+      if (i >= 0) brush.b = i;
+      const { a, b } = brush;
+      brush = null;
+      paintBrush();
+      if (a === b) return;
+      swallowClick = true;
+      setWindow(bars[Math.min(a, b)].from, bars[Math.max(a, b)].to);
+    });
+    stripBars.addEventListener("click", (e) => {
+      if (swallowClick) {
+        swallowClick = false;
+        return;
+      }
+      const i = barAt(e.target);
+      if (i >= 0) selectCommitBar(bars[i].key);
+    });
+    stripBars.addEventListener("keydown", (e) => {
+      swallowClick = false;
+      const key = e.key;
+      if (key !== "ArrowLeft" && key !== "ArrowRight" && key !== "Home" && key !== "End") return;
+      const nodes = barNodes();
+      const i = nodes.indexOf(document.activeElement);
+      if (i < 0) return;
+      e.preventDefault();
+      const to = key === "ArrowLeft" ? Math.max(0, i - 1) : key === "ArrowRight" ? Math.min(nodes.length - 1, i + 1) : key === "Home" ? 0 : nodes.length - 1;
+      nodes[to].focus();
+    });
+    function selectCommitBar(key) {
+      showCommit(key);
+      if (state.view !== "commits") setView("commits");
+      renderStrip();
     }
     function renderLeft() {
       if (state.view === "tree") renderTree();
@@ -1698,8 +1911,9 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       chevron.textContent = node.expanded ? "\u25BE" : "\u25B8";
       const badges = row.querySelector(".badges");
       badges.textContent = "";
-      if (node.avoidable) badges.append(el("span", { class: "badge avoid", title: "avoidable re-renders", text: String(node.avoidable) }));
-      if (node.total) badges.append(el("span", { class: "badge", title: "re-renders", text: String(node.total) }));
+      const counts = nodeCounts(node);
+      if (counts.avoidable) badges.append(el("span", { class: "badge avoid", title: "avoidable re-renders", text: String(counts.avoidable) }));
+      if (counts.total) badges.append(el("span", { class: "badge", title: "re-renders", text: String(counts.total) }));
       if (node.flash) {
         node.flash = false;
         if (Date.now() - (node.flashAt || 0) < 1e3) {
@@ -1754,7 +1968,11 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           toggleSettings(false);
           return;
         }
-        if (inField) target.blur();
+        if (inField) {
+          target.blur();
+          return;
+        }
+        clearWindow();
         return;
       }
       if (inField || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1862,6 +2080,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       state.tab = "commit";
       renderLeft();
       renderDetails();
+      renderStrip();
     }
     function showRoot(name) {
       state.selectedRoot = name;
@@ -2438,6 +2657,16 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       status.querySelector(".status-text").textContent = text;
       tabChip.hidden = !state.tabLabel;
       tabChip.textContent = state.tabLabel || "";
+      appPicker.hidden = state.apps.length < 2;
+      if (!appPicker.hidden) {
+        const want = state.apps.map((a) => `${a.id}:${a.label}`).join("|");
+        if (appPicker.dataset.apps !== want) {
+          appPicker.dataset.apps = want;
+          appPicker.textContent = "";
+          for (const a of state.apps) appPicker.append(el("option", { value: a.id, text: a.label || a.id }));
+        }
+        if (state.appId) appPicker.value = state.appId;
+      }
       banner.textContent = "";
       const warnings = [];
       if (lib && typeof lib.protocol === "number" && lib.protocol > PROTOCOL) warnings.push(`The page runs a newer rerender-lens (protocol ${lib.protocol}) than this panel (${PROTOCOL}). Update the extension.`);
@@ -2634,6 +2863,13 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           state.library = null;
           renderStatus();
           break;
+        case "apps": {
+          const p = isRecord(message.payload) ? message.payload : {};
+          state.apps = Array.isArray(p.list) ? p.list : [];
+          state.appId = typeof p.selected === "string" ? p.selected : null;
+          renderStatus();
+          break;
+        }
         case "hello":
           if (isRecord(message.payload)) setLibrary(message.payload);
           break;
@@ -3251,6 +3487,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
   function floodReports(n) {
     const out = [];
     const components = Math.max(10, Math.floor(n / 10));
+    const spread = 9e4;
+    const t0 = Date.now() - spread;
     for (let i = 0; i < n; i++) {
       const id = i % components;
       const depth = 1 + id % 6;
@@ -3258,6 +3496,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       for (let d = 1; d < depth; d++) path.push(`Section${(id * 7 + d) % 40}`);
       const avoidable = id % 3 !== 0;
       out.push({
+        receivedAt: t0 + Math.round(i / Math.max(1, n - 1) * spread),
         component: `Item${id}`,
         path,
         trigger: avoidable ? "parent" : "props",
@@ -3331,10 +3570,15 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     let listener = null;
     let stream = null;
     let appsOnline = null;
+    let roster = [];
+    let selected = null;
     const emit = (m) => {
       if (listener) listener(m);
     };
-    const post = (message) => fetch(`${base}/message`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(message) }).then(() => void 0);
+    const post = (message) => {
+      const body = selected && isRecord(message) && message.__rerenderLensCmd === true ? { ...message, app: selected } : message;
+      return fetch(`${base}/message`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(() => void 0);
+    };
     const { bridge, reply } = commandBridge(post, 2e3);
     const handleData = (data) => {
       let parsed;
@@ -3346,12 +3590,21 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       for (const m of Array.isArray(parsed) ? parsed : [parsed]) {
         if (!isRecord(m) || reply(m)) continue;
         if (m.__rerenderLens === true && m.type === "relay") {
-          const apps = isRecord(m.payload) && typeof m.payload.apps === "number" ? m.payload.apps : 0;
+          const p = isRecord(m.payload) ? m.payload : {};
+          const apps = typeof p.apps === "number" ? p.apps : 0;
+          roster = Array.isArray(p.list) ? p.list : [];
           const wasOnline = appsOnline;
+          const wasSelected = selected;
           appsOnline = apps;
-          if (apps > 0 && (wasOnline === null || wasOnline === 0)) void attach();
+          if (!roster.length) selected = null;
+          else if (!selected || !roster.some((a) => a.id === selected)) selected = roster[0].id;
+          emit({ type: "apps", payload: { list: roster, selected } });
+          if (apps > 0 && (wasOnline === null || wasOnline === 0 || selected !== wasSelected)) void attach();
           else if (apps === 0) emit({ type: "disconnected" });
-        } else if (m.__rerenderLens === true && typeof m.type === "string") emit({ type: m.type, version: typeof m.version === "number" ? m.version : void 0, payload: m.payload });
+        } else if (m.__rerenderLens === true && typeof m.type === "string") {
+          if (typeof m.app === "string" && selected && m.app !== selected) continue;
+          emit({ type: m.type, version: typeof m.version === "number" ? m.version : void 0, payload: m.payload });
+        }
       }
     };
     async function attach() {
@@ -3368,6 +3621,13 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     const transport = {
       origin: base,
       tabLabel: `relay ${base.replace(/^https?:\/\//, "")}`,
+      selectApp(id) {
+        if (id === selected || !roster.some((a) => a.id === id)) return;
+        selected = id;
+        emit({ type: "apps", payload: { list: roster, selected } });
+        emit({ type: "navigated" });
+        void attach();
+      },
       subscribe(fn) {
         listener = fn;
         const open = () => {
