@@ -121,6 +121,18 @@ export interface HelloPayload {
   overhead?: { totalMs: number; maxCommitMs: number };
   /** Reports the library skipped because a commit exceeded its per-commit cap or time budget. */
   truncated?: number;
+  /** What the library's options select and how much of the page they cover (protocol 2, 0.5+). */
+  tracking?: TrackingSummary;
+}
+
+/** `info().tracking`: the library's answer to "why does the panel show nothing?". */
+export interface TrackingSummary {
+  mode: 'all' | 'memoized' | 'marked';
+  include: string[];
+  exclude: string[];
+  renderedCount: number;
+  trackedCount: number;
+  overflow?: boolean;
 }
 
 export interface SerializableOptions {
@@ -1743,10 +1755,88 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   }
   const rowEls = new Map<string, HTMLElement>();
   const treeList = virtualList<FlatRow>(tree, ROW_H, ({ node, depth }) => rowFor(node, depth));
-  const emptyEl = el('div', { class: 'empty' }, [
-    el('div', { text: 'No re-renders reported yet.' }),
-    el('div', null, ['Call ', el('code', { text: 'init({ notifier: createDevtoolsNotifier() })' }), ' in the page, or enable injection in Settings, then interact with it.']),
-  ]);
+  const emptyEl = el('div', { class: 'empty' });
+
+  /** "tracking every React.memo and PureComponent; 42 components rendered, 3 of them tracked" */
+  function trackingSentence(t: TrackingSummary): string {
+    const what =
+      t.mode === 'all' ? 'Tracking every component'
+      : t.mode === 'memoized' ? 'Tracking every React.memo and PureComponent'
+      : 'Tracking only components marked with track()';
+    const parts = [what];
+    if (t.include.length) parts.push(`${t.mode === 'marked' ? 'and' : 'plus'} names matching ${t.include.join(', ')}`);
+    if (t.exclude.length) parts.push(`except ${t.exclude.join(', ')}`);
+    const rendered = `${t.renderedCount}${t.overflow ? '+' : ''} component${t.renderedCount === 1 ? '' : 's'} rendered`;
+    return `${parts.join(', ')}; ${rendered}, ${t.trackedCount} of them tracked.`;
+  }
+
+  /** The empty tree: what is being tracked, and the two changes that usually fix "nothing shows up". */
+  function renderEmpty(): void {
+    emptyEl.textContent = '';
+    emptyEl.append(el('div', { class: 'empty-head', text: 'No re-renders reported yet.' }));
+    const t = state.library?.tracking;
+    if (!t) {
+      emptyEl.append(
+        el('div', null, ['Call ', el('code', { text: 'init({ notifier: createDevtoolsNotifier() })' }), ' in the page, or enable injection in Settings, then interact with it.']),
+      );
+      return;
+    }
+    emptyEl.append(el('div', { class: 'empty-tracking', text: trackingSentence(t) }));
+    if (t.mode === 'all') {
+      emptyEl.append(el('div', { text: 'Every component is tracked, so this is waiting for a re-render: interact with the page. The first render of a component is never reported.' }));
+      return;
+    }
+    const untracked = t.renderedCount - t.trackedCount;
+    emptyEl.append(
+      el('div', {
+        text:
+          untracked > 0
+            ? `${untracked} component${untracked === 1 ? '' : 's'} rendered without being tracked. Widen what is tracked, or interact with the page if the tracked ones simply have not re-rendered yet.`
+            : 'Interact with the page: the first render of a component is never reported, only re-renders.',
+      }),
+    );
+    if (!transport.configure) return;
+    const trackAll = el('button', { class: 'primary', onclick: () => void applyTracking({ trackAllComponents: true }) }, 'Track every component');
+    const match = el('input', { class: 'empty-match', type: 'text', placeholder: 'Name or /regex/', 'aria-label': 'Track components matching' });
+    const addMatch = (): void => {
+      const value = match.value.trim();
+      if (!value) return;
+      const include = (state.library?.tracking?.include || []).slice();
+      if (!include.includes(value)) include.push(value);
+      match.value = '';
+      void applyTracking({ include });
+    };
+    match.addEventListener('keydown', (e) => {
+      if ((e as KeyboardEvent).key === 'Enter') addMatch();
+    });
+    emptyEl.append(
+      el('div', { class: 'empty-actions' }, [trackAll, match, el('button', { onclick: addMatch }, 'Track components matching…')]),
+    );
+  }
+
+  /**
+   * Apply a tracking change from the empty state and reflect it right away: the 3 s `info()` poll
+   * replaces `state.library` with the page's own answer a moment later.
+   */
+  async function applyTracking(patch: SerializableOptions): Promise<void> {
+    if (!transport.configure) return;
+    try {
+      const applied = await transport.configure(patch);
+      if (state.library) {
+        if (applied) state.library.options = applied;
+        const t = state.library.tracking;
+        if (t) {
+          if (patch.trackAllComponents) t.mode = 'all';
+          if (patch.include) t.include = patch.include;
+        }
+        transport.storage?.set('settings', Object.assign({}, state.library.options));
+      }
+      toast('Applied');
+      renderTree();
+    } catch (e) {
+      toast(`Failed: ${(e as Error).message}`);
+    }
+  }
 
   function renderTree(): void {
     const flat: FlatRow[] = [];
@@ -1759,6 +1849,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     };
     walk(state.tree, 0);
     if (flat.length === 0) {
+      renderEmpty();
       if (!emptyEl.parentNode) tree.append(emptyEl);
     } else emptyEl.remove();
     // drop cached rows for nodes that are gone
@@ -2654,6 +2745,8 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   function setLibrary(info: HelloPayload): void {
     state.library = info;
     renderStatus();
+    // The tracking sentence in the empty state comes from `info()`; the 3 s poll keeps it current.
+    if (emptyEl.parentNode) renderEmpty();
     if (state.settingsOpen) void renderSettings();
     if (state.flashOn) transport.flashAvoidable?.(true);
   }
@@ -3603,7 +3696,11 @@ type EventSourceCtor = new (url: string) => EventSourceLike;
 
 /** Transport over the relay: reports arrive on an SSE stream, commands go out as POSTs and are answered on the stream. */
 function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = EventSource as unknown as EventSourceCtor): Transport {
-  const base = relayUrl.replace(/\/$/, '');
+  // A relay off loopback prints its URL with `?token=`; it authenticates every request but is not part of the base.
+  const [rawBase, relayQuery = ''] = relayUrl.split('?');
+  const base = (rawBase ?? '').replace(/\/$/, '');
+  const relayToken = new URLSearchParams(relayQuery).get('token');
+  const auth = relayToken ? `token=${encodeURIComponent(relayToken)}` : '';
   let listener: ((m: Message) => void) | null = null;
   let stream: EventSourceLike | null = null;
   let appsOnline: number | null = null;
@@ -3616,7 +3713,7 @@ function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = Even
   // Commands name the app being watched, so the other apps are not asked to answer.
   const post = (message: unknown): Promise<void> => {
     const body = selected && isRecord(message) && message.__rerenderLensCmd === true ? { ...message, app: selected } : message;
-    return fetch(`${base}/message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(() => undefined);
+    return fetch(`${base}/message${auth ? `?${auth}` : ''}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(() => undefined);
   };
   const { bridge, reply } = commandBridge(post, 2000);
   const handleData = (data: string): void => {
@@ -3674,7 +3771,7 @@ function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = Even
     subscribe(fn) {
       listener = fn;
       const open = (): void => {
-        stream = new ES(`${base}/events?role=panel`);
+        stream = new ES(`${base}/events?role=panel${auth ? `&${auth}` : ''}`);
         stream.onmessage = (e) => handleData(e.data);
         stream.onerror = () => {
           emit({ type: 'disconnected' });

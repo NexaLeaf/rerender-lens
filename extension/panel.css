@@ -217,6 +217,12 @@ button.ib.active .glyph { color: var(--accent); }
 @keyframes flash { from { box-shadow: inset 3px 0 0 var(--warn); background: var(--warn-bg); } to { box-shadow: none; background: transparent; } }
 .empty { padding: 28px 18px; color: var(--text-dim); text-align: center; line-height: 1.6; }
 .empty code { font-family: var(--mono); font-size: 11px; background: var(--bg-inset); padding: 1px 5px; border-radius: 4px; }
+.empty .empty-head { color: var(--text); font-weight: 600; margin-bottom: 6px; }
+.empty .empty-tracking { color: var(--text); background: var(--bg-inset); border-radius: 6px; padding: 6px 10px; margin: 0 auto 8px; display: inline-block; max-width: 46em; }
+.empty-actions { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; margin-top: 10px; }
+.empty-actions button { border: 1px solid var(--border); }
+.empty-actions button.primary { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
+.empty-actions input.empty-match { border: 1px solid var(--border); border-radius: 4px; padding: 0 6px; height: 24px; background: var(--bg-inset); width: 12em; }
 
 /* ---------- details ---------- */
 .details { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }

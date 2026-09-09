@@ -55,6 +55,16 @@ Injection tracks every `memo` / `PureComponent` and leaves the hook/context/stat
 (*Include state* in Settings turns them on; they are the costliest part on large apps). Settings
 are saved per origin. Details, shortcuts and packaging: [`extension/README.md`](extension/README.md).
 
+### Nothing shows up?
+
+Most often the default is doing exactly what it says: injection tracks only `React.memo` components
+and `PureComponent` classes, and an app of plain function components has none. The panel's empty
+state says so in words — *"tracking every React.memo and PureComponent; 42 components rendered, 3 of
+them tracked"* — with two buttons: **Track every component** and **Track components matching…**.
+For one component, select its element in **Elements**: the *rerender-lens* sidebar gives the verdict,
+the reason, and a *Track this component* button. Nothing avoidable in a tracked component is the
+other, good, case: it simply has not re-rendered.
+
 ## Vite
 
 ```ts
@@ -81,6 +91,11 @@ production builds. To see the panel without the extension:
 ```sh
 npx rerender-lens panel           # http://127.0.0.1:4141/  (--port, --host 0.0.0.0 for another machine)
 ```
+
+On loopback it needs no secret. Given any other `--host` it generates a token, prints it in the
+URL, and refuses connections without it, because reports carry your app's prop, state and context
+values. Pass the whole printed URL (token and all) to the app and the panel; `--token` sets your
+own and `--no-token` opts out.
 
 and point the app at it with `RERENDER_LENS_RELAY=http://127.0.0.1:4141`
 (`NEXT_PUBLIC_RERENDER_LENS_RELAY` for Next.js), `createDevtoolsNotifier({ relay })`, or

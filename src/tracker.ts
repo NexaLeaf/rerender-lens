@@ -1,4 +1,4 @@
-import type { ComponentMatcher, Options, TrackableStatics } from './types';
+import type { ComponentMatcher, Options, TrackableStatics, TrackingVerdict } from './types';
 import { MARKER } from './types';
 import { attach } from './fiber';
 import { getState } from './state';
@@ -63,6 +63,53 @@ export function shouldTrack(type: unknown, o: Options): boolean {
   return false;
 }
 
+const ANONYMOUS = 'Anonymous';
+
+/**
+ * The same decision as `shouldTrack`, with the rule that made it and what to change. Pure and
+ * allocation-light, but one step slower than `shouldTrack` (it builds strings), so the commit path
+ * keeps calling `shouldTrack`; `test/tracking.test.ts` proves the two never disagree.
+ */
+export function explainTracking(type: unknown, o: Options): TrackingVerdict {
+  if (typeof type === 'string')
+    return { tracked: false, name: type, memoized: false, reason: `<${type}> is a DOM element, not a React component; only components are tracked.` };
+  if (!isComponentLike(type))
+    return { tracked: false, name: ANONYMOUS, memoized: false, reason: 'This is not a React component type, so it is never tracked.' };
+  const name = getDisplayName(type);
+  const memo = isMemo(type);
+  const memoized = memo || isPureClass(type);
+  if (o.exclude?.some((m) => matches(m, name)))
+    return { tracked: false, name, memoized, reason: `<${name}> matches "exclude", which wins over every other rule.`, fix: `Remove "${name}" from the exclude list.` };
+  if (hasMarker(type)) return { tracked: true, name, memoized, reason: `<${name}> is marked with track() (the ${MARKER} static).` };
+  if (o.include?.some((m) => matches(m, name))) return { tracked: true, name, memoized, reason: `<${name}> matches "include".` };
+  if (o.trackAllComponents) return { tracked: true, name, memoized, reason: '"Track every component" is on, so every component is tracked.' };
+  if (o.trackAllMemoized && memoized)
+    return { tracked: true, name, memoized, reason: `<${name}> is ${memo ? 'a React.memo component' : 'a PureComponent'}, and "Track every React.memo and PureComponent" is on.` };
+  if (name === ANONYMOUS)
+    return {
+      tracked: false,
+      name,
+      memoized,
+      reason: 'This component has no display name, so "include" and "exclude" cannot address it.',
+      fix: "Give the function a name, set displayName, or mark it with track(fn, 'Name').",
+    };
+  if (o.trackAllMemoized)
+    return {
+      tracked: false,
+      name,
+      memoized,
+      reason: `"Track every React.memo and PureComponent" only covers React.memo components and PureComponent classes, and <${name}> is neither.`,
+      fix: `Add "${name}" to include, wrap it in React.memo, or turn on "Track every component".`,
+    };
+  return {
+    tracked: false,
+    name,
+    memoized,
+    reason: `Nothing selects <${name}>: it is not marked with track(), no "include" pattern matches it, and neither "track every" option is on.`,
+    fix: `Add "${name}" to include, or turn on "Track every React.memo and PureComponent" / "Track every component".`,
+  };
+}
+
 /**
  * Start reporting re-renders of tracked components. Observes React commits
  * through the DevTools global hook; nothing in React is patched or wrapped.
@@ -72,6 +119,10 @@ export function init(options: Options = {}): () => void {
   const s = getState();
   s.options = { ...options };
   s.printed.clear();
+  // "since init": the tracking summary describes this run's options, not a previous one's.
+  s.seen.clear();
+  s.seenTracked.clear();
+  s.seenOverflow = false;
   if (!s.enabled) {
     s.detach = attach();
     s.enabled = true;

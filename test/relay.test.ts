@@ -158,16 +158,59 @@ describe('relay server', () => {
     }
   });
 
+  it('a token locks down everything that carries data; the panel URL and the library carry it', async () => {
+    relay = await createRelayServer({ port: 0, keepAliveMs: 50, token: 'sekret' });
+    expect(relay.connectUrl).toBe(`${relay.url}?token=sekret`);
+    // the redirect hands the panel a relay URL with the token in it
+    const root = await fetch(`${relay.url}/`, { redirect: 'manual' });
+    expect(root.headers.get('location')).toBe(`/panel.html?relay=${encodeURIComponent(`${relay.url}?token=sekret`)}`);
+    // static panel files stay open (the page has to load before it can authenticate)
+    expect((await fetch(`${relay.url}/panel.js`)).status).toBe(200);
+    // everything that carries data does not
+    for (const path of ['/status', '/events?role=panel', '/message']) {
+      const res = await fetch(`${relay.url}${path}`, { method: path === '/message' ? 'POST' : 'GET', body: path === '/message' ? '{}' : undefined });
+      expect(res.status, path).toBe(401);
+    }
+    expect((await fetch(`${relay.url}/status?token=nope`)).status).toBe(401);
+    expect((await fetch(`${relay.url}/status?token=sekret`)).status).toBe(200);
+    expect((await fetch(`${relay.url}/status`, { headers: { 'x-rerender-lens-token': 'sekret' } })).status).toBe(200);
+
+    // the library takes the token out of the relay URL it is given and authenticates with it
+    const panel = new FetchEventSource(`${relay.url}/events?role=panel&token=sekret`);
+    const toPanel: Record<string, unknown>[] = [];
+    panel.onmessage = (e) => {
+      const parsed = JSON.parse(e.data);
+      for (const m of Array.isArray(parsed) ? parsed : [parsed]) toPanel.push(m);
+    };
+    init({ notifier: createDevtoolsNotifier({ target: { postMessage() {} } as unknown as Window, relay: relay.connectUrl, eventSource: FetchEventSource as never }), silent: true });
+    await vi.waitFor(() => expect(relay!.counts().apps).toBe(1));
+    await vi.waitFor(() => expect(toPanel.some((m) => m.type === 'hello')).toBe(true));
+    panel.close();
+    await wait(20);
+  });
+
   it('CLI: `panel` starts the relay and stops on SIGINT', async () => {
     const out: string[] = [];
     const log = vi.spyOn(console, 'log').mockImplementation((...a) => void out.push(a.join(' ')));
     try {
       const exit = main(['panel', '--port', '0']);
       await vi.waitFor(() => expect(out.join('\n')).toMatch(/rerender-lens panel: http:\/\/127\.0\.0\.1:\d+\//));
-      const url = /panel: (http:\/\/[^/]+)\//.exec(out.join('\n'))![1]!;
+      const url = /panel: (http:\/\/[^/?]+)/.exec(out.join('\n'))![1]!;
       expect(JSON.parse(await (await fetch(`${url}/status`)).text()).ok).toBe(true);
+      expect(out.join('\n')).not.toContain('token='); // loopback needs none
       process.emit('SIGINT');
       expect(await exit).toBe(0);
+
+      // off loopback it generates one and says why
+      out.length = 0;
+      const exposed = main(['panel', '--port', '0', '--host', '0.0.0.0']);
+      await vi.waitFor(() => expect(out.join('\n')).toMatch(/panel: http:\/\/localhost:\d+\?token=[\w-]{20,}/));
+      expect(out.join('\n')).toContain("reports carry your app's prop, state and context values");
+      const secured = /panel: (http:\/\/[^/?]+)\?token=([\w-]+)/.exec(out.join('\n'))!;
+      expect((await fetch(`${secured[1]}/status`)).status).toBe(401);
+      expect((await fetch(`${secured[1]}/status?token=${secured[2]}`)).status).toBe(200);
+      process.emit('SIGINT');
+      expect(await exposed).toBe(0);
     } finally {
       log.mockRestore();
     }

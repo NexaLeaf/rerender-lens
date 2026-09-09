@@ -221,6 +221,35 @@ export interface Options {
   maxReportsPerComponent?: number;
 }
 
+/**
+ * Why one component type is or is not tracked under the current options, in words a user can act on.
+ * Produced by `explainTracking`; `tracked` always agrees with `shouldTrack`.
+ */
+export interface TrackingVerdict {
+  tracked: boolean;
+  /** One sentence: the rule that decided it. */
+  reason: string;
+  /** What to change to track it, when it is not tracked and something can be changed. */
+  fix?: string;
+  /** Display name, or `Anonymous` when the type has none. */
+  name: string;
+  /** `React.memo` component or `PureComponent` class. */
+  memoized: boolean;
+}
+
+/** What the current options select, plus how much of the page they actually cover. In `info().tracking`. */
+export interface TrackingSummary {
+  /** `all` = every component, `memoized` = `React.memo`/`PureComponent` only, `marked` = only `track()` and `include`. */
+  mode: 'all' | 'memoized' | 'marked';
+  include: string[];
+  exclude: string[];
+  /** Distinct component names that rendered since `init`, and how many of those were tracked. */
+  renderedCount: number;
+  trackedCount: number;
+  /** True when more distinct names rendered than the counter keeps (`MAX_SEEN_COMPONENTS`); the counts are a floor. */
+  overflow: boolean;
+}
+
 /** Marker static: `MyComponent.rerenderLens = true` opts a component in. */
 export const MARKER = 'rerenderLens' as const;
 

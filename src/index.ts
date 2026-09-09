@@ -14,9 +14,11 @@ export type {
   CommitCause,
   ReportLike,
   ChangeLike,
+  TrackingVerdict,
+  TrackingSummary,
 } from './types';
 export { MARKER } from './types';
-export { init, configure, disable, isEnabled, track, getDisplayName, shouldTrack } from './tracker';
+export { init, configure, disable, isEnabled, track, getDisplayName, shouldTrack, explainTracking } from './tracker';
 export { ensureDevtoolsHook, getRenderers, isProductionReact } from './fiber';
 export type { RendererInfo } from './fiber';
 export { useWhyRerender } from './hook';

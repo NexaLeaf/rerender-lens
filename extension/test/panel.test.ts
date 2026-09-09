@@ -114,6 +114,57 @@ describe('devtools panel', () => {
     expect(root.querySelector('.status-text')!.textContent).toBe('no page');
   });
 
+  it('the empty state explains what is tracked and offers the two one-click fixes', async () => {
+    const configured: unknown[] = [];
+    const store: Record<string, unknown> = {};
+    transport = makeTransport({
+      configure: (o: unknown) => {
+        configured.push(o);
+        return Promise.resolve(Object.assign({ trackAllMemoized: true }, o as object));
+      },
+      storage: { get: (k: string) => Promise.resolve(store[k]), set: (k: string, v: unknown) => Promise.resolve((store[k] = v)) },
+    });
+    panel = factory.createPanel(root, transport);
+    // Before any info(): the setup instructions, since nothing is known about the page yet.
+    expect(root.querySelector('.tree .empty')!.textContent).toContain('createDevtoolsNotifier');
+    const hello = (tracking: object) => ({
+      type: 'hello',
+      version: 2,
+      payload: { library: '0.5.0', protocol: 2, react: [], production: false, enabled: true, options: { trackAllMemoized: true }, tracking },
+    });
+    panel.handle(hello({ mode: 'memoized', include: [], exclude: [], renderedCount: 42, trackedCount: 3, overflow: false }));
+    const empty = () => root.querySelector('.tree .empty') as HTMLElement;
+    expect(empty().querySelector('.empty-tracking')!.textContent).toBe('Tracking every React.memo and PureComponent; 42 components rendered, 3 of them tracked.');
+    expect(empty().textContent).toContain('39 components rendered without being tracked');
+
+    const btn = (text: string) => [...empty().querySelectorAll('button')].find((b) => b.textContent!.includes(text))!;
+    btn('Track every component').click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(configured).toEqual([{ trackAllComponents: true }]);
+    expect(store.settings).toEqual({ trackAllMemoized: true, trackAllComponents: true });
+    // The optimistic update lands before the next info() poll does.
+    expect(empty().querySelector('.empty-tracking')!.textContent).toContain('Tracking every component');
+    expect(empty().textContent).toContain('Every component is tracked');
+    expect([...empty().querySelectorAll('button')]).toHaveLength(0);
+
+    // "Track components matching…" appends to include
+    panel.handle(hello({ mode: 'memoized', include: ['Row'], exclude: ['Portal'], renderedCount: 500, trackedCount: 1, overflow: true }));
+    expect(empty().querySelector('.empty-tracking')!.textContent).toBe(
+      'Tracking every React.memo and PureComponent, plus names matching Row, except Portal; 500+ components rendered, 1 of them tracked.',
+    );
+    const input = empty().querySelector('input.empty-match') as HTMLInputElement;
+    input.value = '  /^Grid/  ';
+    btn('Track components matching').click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(configured[1]).toEqual({ include: ['Row', '/^Grid/'] });
+    expect(input.value).toBe('');
+    expect(empty().querySelector('.empty-tracking')!.textContent).toContain('plus names matching Row, /^Grid/');
+
+    // A report arrives: the empty state gives way to the tree, and stops being refreshed.
+    send({ type: 'report', payload: report() });
+    expect(root.querySelector('.tree .empty')).toBeNull();
+  });
+
   it('warns about a newer page protocol and production builds', () => {
     panel.handle({ type: 'connected' });
     panel.handle({ type: 'hello', version: 3, payload: { library: '9.0.0', protocol: 3 } });

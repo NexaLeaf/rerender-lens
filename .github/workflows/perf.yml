@@ -1,0 +1,27 @@
+name: Perf
+# What the library costs per commit on a big tree, nightly, so a regression shows up before a user
+# hits it. The numbers land in the run summary; the job fails when a commit blows its budget.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: Comma-separated tree sizes
+        default: '3000,10000'
+jobs:
+  cost:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm --prefix examples/vite-react install
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e:perf
+        env:
+          PERF_ROWS: ${{ inputs.rows || '3000,10000' }}

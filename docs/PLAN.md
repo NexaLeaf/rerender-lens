@@ -29,20 +29,25 @@ from `dist-extension/chrome.zip` with `extension/store/LISTING.md` and `extensio
 Edge Add-ons from the same zip, Firefox AMO from the firefox zip. Walk `extension/store/QA.md` on a
 real app once and fix what it turns up.
 
-## T — hardening (1 day)
+## T — hardening (done, except one item)
 
-- Relay: require `--token` when `--host` is not loopback; the token travels as a query parameter on
-  the SSE stream and a header on POST, and the panel URL carries it. Today a relay bound to
-  `0.0.0.0` is open to the network.
-- Extension: fail CI on `web-ext lint` warnings that are ours; re-check that no path uses `eval`
-  outside the DevTools API; document the CSP.
-- Perf: a nightly job runs the scale e2e at 3k and 10k rows with tighter budgets and posts
-  `maxCommitMs` per size as a CI annotation, so a regression shows up before a user reports it.
+Done: the relay generates and requires a token whenever it is not on loopback; the `eval` audit
+(nothing outside `chrome.devtools.inspectedWindow.eval`) and the CSP note in the extension README;
+the nightly `perf` workflow (`npm run e2e:perf`) with per-size budgets.
+
+Left: **fail CI on our own `web-ext lint` warnings.** The flag is one word
+(`--warnings-as-errors` in the `check` job), but `web-ext` cannot run in the sandbox this was
+developed in, so there is no clean baseline to flip against. Look at one CI run's lint output,
+fix or allowlist what it reports, then flip it.
 
 ## U — after the listing lands (sized once there is feedback)
 
+The first candidate shipped: the panel now explains **why a component is not tracked** and offers
+the fix, in the empty state and in the Elements sidebar.
+
 - Whatever the store reviews and the first issues ask for. Hold this slot.
-- Candidates already on the list: a "why is this component not tracked?" explainer in the panel,
+- Still on the list: component names in production builds through source maps (the biggest of
+  these by far, and the one that decides whether the tool is useful on a staging build),
   `include`/`exclude` presets per framework, and an `onlyAvoidable` streaming mode for very large
   apps (the library posts nothing until a commit has an avoidable report).
 

@@ -149,7 +149,8 @@
     "test:jest": "node scripts/jest-check.mjs",
     "test:react18": "npm install --prefix .react18 --no-save --no-package-lock --no-audit --no-fund react@18 react-dom@18 && vitest run --config test/react-compat.config.ts",
     "store:media": "node scripts/store-media.mjs",
-    "test:react17": "npm install --prefix .react17 --no-save --no-package-lock --no-audit --no-fund react@17 react-dom@17 && REACT_COMPAT_DIR=.react17/node_modules vitest run --config test/react-compat.config.ts"
+    "test:react17": "npm install --prefix .react17 --no-save --no-package-lock --no-audit --no-fund react@17 react-dom@17 && REACT_COMPAT_DIR=.react17/node_modules vitest run --config test/react-compat.config.ts",
+    "e2e:perf": "playwright test -c e2e/perf.config.ts"
   },
   "peerDependencies": {
     "react": ">=16.8.0",

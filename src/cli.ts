@@ -8,7 +8,8 @@
  *   rerender-lens compare <before.json> <after.json>   before/after table; exit 1 on regressions
  *   rerender-lens budget <export.json> <budget.json>   check avoidable re-renders per component; exit 1 on violations
  *   rerender-lens budget <export.json> --init          print a budget matching the export
- *   rerender-lens panel [--port 4141] [--host 127.0.0.1]  serve the panel and relay reports from any app
+ *   rerender-lens panel [--port 4141] [--host 127.0.0.1] [--token X | --no-token]
+ *                                                serve the panel and relay reports from any app
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { formatFixes } from './fixes';
@@ -16,6 +17,7 @@ import { formatRootCauses } from './causes';
 import { compareSummaries, formatComparison, parseExport, summarizeReports, type SessionSummary } from './sessions';
 import { checkBudget, toBudget, type Budget } from './budget';
 import { createRelayServer } from './relay';
+import { randomBytes } from 'node:crypto';
 
 const read = (file: string): unknown => JSON.parse(readFileSync(file, 'utf8'));
 
@@ -26,15 +28,23 @@ function summaryOf(file: string): SessionSummary {
   return summarizeReports(parsed.reports, { name: file.replace(/^.*[\\/]/, '').replace(/\.json$/, '') });
 }
 
+/** Loopback needs no token; anything else is reachable by other machines, and reports carry app data. */
+const isLoopback = (host: string): boolean => host === '127.0.0.1' || host === 'localhost' || host === '::1';
+
 /** `rerender-lens panel`: start the relay and keep running until it closes. */
 async function panelCommand(args: string[]): Promise<number> {
   const flag = (name: string): string | null => {
     const i = args.indexOf(name);
     return i >= 0 ? (args[i + 1] ?? '') : null;
   };
-  const relay = await createRelayServer({ port: Number(flag('--port') || 4141), host: flag('--host') || '127.0.0.1' });
-  console.log(`rerender-lens panel: ${relay.url}/`);
-  console.log(`in the app: createDevtoolsNotifier({ relay: '${relay.url}' })  or  window.__RERENDER_LENS_RELAY__ = '${relay.url}'`);
+  const host = flag('--host') || '127.0.0.1';
+  const given = flag('--token');
+  const token = args.includes('--no-token') ? null : given || (isLoopback(host) ? null : randomToken());
+  const relay = await createRelayServer({ port: Number(flag('--port') || 4141), host, token: token ?? undefined });
+  console.log(`rerender-lens panel: ${relay.connectUrl}/`);
+  console.log(`in the app: createDevtoolsNotifier({ relay: '${relay.connectUrl}' })  or  window.__RERENDER_LENS_RELAY__ = '${relay.connectUrl}'`);
+  if (token) console.log('The token in that URL is required: reports carry your app\'s prop, state and context values.');
+  else if (!isLoopback(host)) console.log(`WARNING: ${host} is reachable by other machines and --no-token was given: anyone who can reach this port can read every report.`);
   console.log('Ctrl+C to stop.');
   return new Promise((resolve) => {
     const stop = (): void => void relay.close().then(() => resolve(0));
@@ -42,6 +52,11 @@ async function panelCommand(args: string[]): Promise<number> {
     process.once('SIGTERM', stop);
     relay.server.once('close', () => resolve(0));
   });
+}
+
+/** 128 bits, URL-safe: enough for a dev-time shared secret. */
+function randomToken(): string {
+  return randomBytes(16).toString('base64url');
 }
 
 export function main(argv: string[]): number | Promise<number> {

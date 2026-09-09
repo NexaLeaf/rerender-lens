@@ -15,7 +15,10 @@
  * command carrying `app` goes to that one app, a command without it goes to all of them, so a panel
  * or a library that knows nothing about ids behaves exactly as before.
  *
- * Dependency-free (node:http). CORS is open: the relay is a local dev tool, bind it to 127.0.0.1.
+ * Dependency-free (node:http). Bound to 127.0.0.1 by default, where CORS is open and no token is
+ * needed. On any other host `rerender-lens panel` generates a token: `/events`, `/message` and
+ * `/status` then require it (`?token=` or the `x-rerender-lens-token` header) and the URL it prints
+ * carries it, because reports contain the app's prop, state and context values.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
@@ -29,6 +32,11 @@ export interface RelayOptions {
   panelDir?: string | null;
   /** Milliseconds between SSE keep-alive comments. Default 15000. */
   keepAliveMs?: number;
+  /**
+   * Require this token on `/events`, `/message` and `/status`. `rerender-lens panel` generates one
+   * whenever it binds to anything but loopback; the URL it prints carries it as `?token=`.
+   */
+  token?: string;
 }
 
 /** One connected app page. `label` is what the panel's app chooser shows. */
@@ -41,6 +49,8 @@ export interface RelayServer {
   server: Server;
   /** `http://127.0.0.1:4141` once listening. */
   url: string;
+  /** The URL to hand to a panel or an app: `url`, plus `?token=` when one is required. */
+  connectUrl: string;
   port: number;
   close(): Promise<void>;
   /** Connected app and panel streams. */
@@ -91,10 +101,12 @@ export function createRelayServer(options: RelayOptions = {}): Promise<RelayServ
   const host = options.host ?? '127.0.0.1';
   const panelDir = options.panelDir === undefined ? findPanelDir() : options.panelDir;
   const keepAliveMs = options.keepAliveMs ?? 15_000;
+  const token = options.token || null;
   const apps = new Map<ServerResponse, RelayApp>();
   const panels = new Set<ServerResponse>();
   let url = '';
   let nextAppId = 1;
+  const connectUrl = (): string => (token ? `${url}?token=${encodeURIComponent(token)}` : url);
 
   const line = (message: unknown): string => `data: ${JSON.stringify(message)}\n\n`;
   const sendTo = (res: ServerResponse, message: unknown): void => {
@@ -137,6 +149,13 @@ export function createRelayServer(options: RelayOptions = {}): Promise<RelayServ
     }
   };
 
+  /** With a token set, everything that carries data needs it; the static panel files do not. */
+  const authorized = (req: IncomingMessage, u: URL): boolean => {
+    if (!token) return true;
+    const given = u.searchParams.get('token') || (typeof req.headers['x-rerender-lens-token'] === 'string' ? req.headers['x-rerender-lens-token'] : '');
+    return given === token;
+  };
+
   const server = createServer(async (req, res) => {
     cors(res);
     const u = new URL(req.url || '/', 'http://relay');
@@ -147,8 +166,14 @@ export function createRelayServer(options: RelayOptions = {}): Promise<RelayServ
     }
     if (u.pathname === '/' && req.method === 'GET') {
       res.statusCode = 302;
-      res.setHeader('Location', `/panel.html?relay=${encodeURIComponent(url)}`);
+      res.setHeader('Location', `/panel.html?relay=${encodeURIComponent(connectUrl())}`);
       res.end();
+      return;
+    }
+    if (/^\/(events|message|status)$/.test(u.pathname) && !authorized(req, u)) {
+      res.statusCode = 401;
+      res.setHeader('Content-Type', 'text/plain');
+      res.end('rerender-lens relay: this relay needs the token from the URL it printed (?token=...)');
       return;
     }
     if (u.pathname === '/events' && req.method === 'GET') {
@@ -239,6 +264,7 @@ export function createRelayServer(options: RelayOptions = {}): Promise<RelayServ
       resolve({
         server,
         url,
+        connectUrl: connectUrl(),
         port,
         counts: () => ({ apps: apps.size, panels: panels.size }),
         appList,

@@ -74,6 +74,12 @@ and applied on the next load.
 
 If the page already runs the library, injection steps aside.
 
+**Panel empty?** `trackAllMemoized` covers only `React.memo` and `PureComponent`, which many apps
+have none of. The empty state names what is tracked ("tracking every React.memo and PureComponent;
+42 components rendered, 3 of them tracked") and offers *Track every component* and *Track components
+matching…*; the Elements sidebar gives the same verdict for one selected element, with a *Track this
+component* button. Both come from `info().tracking` and `inspect().tracking` (`explainTracking`).
+
 Local development hosts (`localhost`, `127.0.0.1`, `*.localhost`, `*.local`) are always enabled.
 Any other origin needs a one-time host permission, requested when you enable it (optional host
 permissions; nothing is granted until you ask).
@@ -113,6 +119,11 @@ with sample data.
   origins with injection enabled (registered with `chrome.scripting.registerContentScripts`).
 - Settings, highlight and source links go through the bridge (`window.__RERENDER_LENS_DEVTOOLS__`),
   never through the app.
+- No remote code and no `eval`. The manifest sets no `content_security_policy`, so MV3's default
+  applies to every extension page: scripts load from the extension only, `eval` and inline scripts
+  are refused. The one `eval` in the codebase is `chrome.devtools.inspectedWindow.eval`, the
+  DevTools API for running an expression in the inspected page, used for the polling fallback and
+  the page bridge. The injected library is a plain script shipped in the package, never fetched.
 
 If React DevTools is also installed, both hooks coexist: whichever installs the global hook first
 owns it, the other wraps it. If React DevTools' Components tab comes up empty with injection on,

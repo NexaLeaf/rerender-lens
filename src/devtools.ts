@@ -1,6 +1,6 @@
-import type { ComponentMatcher, Notifier, Options, RenderReport } from './types';
+import type { ComponentMatcher, Notifier, Options, RenderReport, TrackingSummary, TrackingVerdict } from './types';
 import { isReactElement } from './diff';
-import { configure, getDisplayName, isEnabled, shouldTrack } from './tracker';
+import { configure, explainTracking, getDisplayName, isEnabled, shouldTrack } from './tracker';
 import { getState } from './state';
 import { fiberById, fiberForNode, fiberName, fiberType, getRenderers, hostNodesOf, instanceIdOf, isProductionReact, nearestComponent } from './fiber';
 import type { Fiber, RendererInfo } from './fiber';
@@ -41,13 +41,15 @@ export interface HelloPayload {
   overhead: { totalMs: number; maxCommitMs: number };
   /** Reports skipped because a commit exceeded the per-commit cap or time budget. */
   truncated: number;
+  /** What the current options select, and how much of the page they cover: the panel's answer to "why is it empty?". */
+  tracking: TrackingSummary;
 }
 
 /** Command sent by a panel over the BroadcastChannel; answered with a `ChannelReply` of the same id. */
 export interface ChannelCommand {
   __rerenderLensCmd: true;
   id: string;
-  cmd: 'info' | 'pull' | 'replay' | 'clear' | 'configure' | 'highlight' | 'flash';
+  cmd: 'info' | 'pull' | 'replay' | 'clear' | 'configure' | 'highlight' | 'flash' | 'explain';
   arg?: unknown;
 }
 
@@ -124,6 +126,8 @@ export interface InspectResult {
   component: string;
   instanceId: number | null;
   tracked: boolean;
+  /** Why it is tracked or not, and what to change. Same decision as `tracked`, in words. */
+  tracking: TrackingVerdict;
   path: string[];
   /** Serialized reports for this instance, oldest first. */
   reports: unknown[];
@@ -158,6 +162,11 @@ export interface DevtoolsBridge {
   flashAvoidable(on: boolean): void;
   /** Re-render details for a DOM node (DevTools' `$0`). */
   inspect(node: unknown): InspectResult | null;
+  /**
+   * Why the component behind a DOM node (or an `instanceId`, which is all a panel on the
+   * BroadcastChannel or the relay can send) is or is not tracked.
+   */
+  explain(target: unknown): TrackingVerdict | null;
 }
 
 declare global {
@@ -320,6 +329,18 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
   };
 
   const source = options.source ?? 'page';
+  const trackingSummary = (): TrackingSummary => {
+    const s = getState();
+    const o = s.options;
+    return {
+      mode: o.trackAllComponents ? 'all' : o.trackAllMemoized ? 'memoized' : 'marked',
+      include: (o.include ?? []).map(matcherToString).filter((x): x is string => x !== null),
+      exclude: (o.exclude ?? []).map(matcherToString).filter((x): x is string => x !== null),
+      renderedCount: s.seen.size,
+      trackedCount: s.seenTracked.size,
+      overflow: s.seenOverflow,
+    };
+  };
   const info = (): HelloPayload => ({
     count: buffer.length,
     library: VERSION,
@@ -334,6 +355,7 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     commits: getState().commits,
     overhead: { totalMs: getState().overheadMs, maxCommitMs: getState().maxCommitMs },
     truncated: getState().truncated,
+    tracking: trackingSummary(),
   });
 
   const bridge: DevtoolsBridge = {
@@ -380,6 +402,10 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     flashAvoidable: (on) => {
       flashOn = !!on;
     },
+    explain: (target) => {
+      const comp = typeof target === 'number' ? fiberById(target) : nearestComponent(fiberForNode(target));
+      return comp ? explainTracking(fiberType(comp), getState().options) : null;
+    },
     inspect: (node) => {
       const comp = nearestComponent(fiberForNode(node));
       if (!comp) return null;
@@ -394,6 +420,7 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
         component: fiberName(comp),
         instanceId: id,
         tracked: shouldTrack(fiberType(comp), getState().options),
+        tracking: explainTracking(fiberType(comp), getState().options),
         path,
         reports: id === null ? [] : buffer.filter((e) => e.instanceId === id).slice(-20).map((e) => e.payload),
       };
@@ -429,6 +456,10 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
         case 'flash':
           bridge.flashAvoidable(!!data.arg);
           reply.result = true;
+          break;
+        case 'explain':
+          // Over a channel there is no DOM node to pass, only an instance id from a report.
+          reply.result = bridge.explain(data.arg);
           break;
         default:
           reply.error = `unknown command ${String((data as { cmd?: unknown }).cmd)}`;
@@ -471,7 +502,11 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
   const relayUrl = options.relay ?? (typeof window !== 'undefined' ? window.__RERENDER_LENS_RELAY__ : undefined);
   const ES = options.eventSource ?? (typeof EventSource === 'function' ? (EventSource as unknown as EventSourceCtor) : null);
   if (relayUrl && ES && typeof fetch === 'function') {
-    const base = relayUrl.replace(/\/$/, '');
+    // The relay prints its URL with `?token=` when it is not on loopback; keep it out of the base.
+    const [rawBase, relayQuery = ''] = relayUrl.split('?');
+    const base = (rawBase ?? '').replace(/\/$/, '');
+    const relayToken = new URLSearchParams(relayQuery).get('token');
+    const auth = relayToken ? `token=${encodeURIComponent(relayToken)}` : '';
     let queue: unknown[] = [];
     let scheduled = false;
     // The relay hands out an id when the stream opens and stamps it on what this app posts, so a panel
@@ -481,7 +516,8 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
       scheduled = false;
       const batch = queue;
       queue = [];
-      const to = `${base}/message${appId ? `?app=${encodeURIComponent(appId)}` : ''}`;
+      const params = [appId ? `app=${encodeURIComponent(appId)}` : '', auth].filter(Boolean).join('&');
+      const to = `${base}/message${params ? `?${params}` : ''}`;
       fetch(to, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(batch), keepalive: true }).catch(() => {});
     };
     const relaySend = (message: unknown): void => {
@@ -494,7 +530,7 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     try {
       // The label is what the panel's app chooser shows; the page's own address is the useful default.
       const label = typeof location !== 'undefined' ? `${location.host}${location.pathname}`.slice(0, 120) : '';
-      const stream = new ES(`${base}/events?role=app${label ? `&label=${encodeURIComponent(label)}` : ''}`);
+      const stream = new ES(`${base}/events?role=app${label ? `&label=${encodeURIComponent(label)}` : ''}${auth ? `&${auth}` : ''}`);
       stream.onmessage = (event) => {
         let parsed: unknown;
         try {

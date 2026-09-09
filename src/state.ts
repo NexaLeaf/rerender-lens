@@ -19,7 +19,15 @@ export interface LensState {
   maxCommitMs: number;
   /** Reports skipped by the per-commit cap / time budget (see `onCommit`). */
   truncated: number;
+  /** Distinct component names seen rendering since `init` (capped), and the subset of those that were tracked. */
+  seen: Set<string>;
+  seenTracked: Set<string>;
+  /** True once a name was dropped because `seen` hit the cap: the counts are then a floor. */
+  seenOverflow: boolean;
 }
+
+/** Distinct component names `noteRendered` remembers; enough to describe a page, bounded for a huge one. */
+export const MAX_SEEN_COMPONENTS = 500;
 
 const KEY = Symbol.for('rerender-lens.state');
 
@@ -28,10 +36,26 @@ export function getState(): LensState {
   const g = globalThis as unknown as Record<symbol, LensState | undefined>;
   let s = g[KEY];
   if (!s) {
-    s = { options: {}, enabled: false, printed: new Map(), detach: null, nextInstanceId: 1, nextCommitId: 1, warnedOnce: new Set(), scheduled: 0, commits: 0, overheadMs: 0, maxCommitMs: 0, truncated: 0 };
+    s = { options: {}, enabled: false, printed: new Map(), detach: null, nextInstanceId: 1, nextCommitId: 1, warnedOnce: new Set(), scheduled: 0, commits: 0, overheadMs: 0, maxCommitMs: 0, truncated: 0, seen: new Set(), seenTracked: new Set(), seenOverflow: false };
     g[KEY] = s;
   }
   return s;
+}
+
+/**
+ * Remember that a component with this display name rendered, and whether it was tracked. Two set
+ * operations per rendered component per commit; the answer feeds `info().tracking`, which tells a
+ * user whose panel is empty how much of their app the current options actually cover.
+ */
+export function noteRendered(s: LensState, name: string, tracked: boolean): void {
+  if (!s.seen.has(name)) {
+    if (s.seen.size >= MAX_SEEN_COMPONENTS) {
+      s.seenOverflow = true;
+      return;
+    }
+    s.seen.add(name);
+  }
+  if (tracked) s.seenTracked.add(name);
 }
 
 export function warnOnce(key: string, message: string): void {

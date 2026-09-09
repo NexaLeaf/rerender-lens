@@ -13,9 +13,11 @@ export type {
   RenderReport,
   RenderTrigger,
   SourceLocation,
+  TrackingVerdict,
+  TrackingSummary,
 } from './types';
 export { MARKER } from './types';
-export { init, configure, disable, isEnabled, track, getDisplayName, shouldTrack } from './tracker';
+export { init, configure, disable, isEnabled, track, getDisplayName, shouldTrack, explainTracking } from './tracker';
 export { ensureDevtoolsHook, getRenderers, isProductionReact } from './fiber';
 export { deepEqual, diffRecords, classify } from './diff';
 export { buildReport, summarize, printReport } from './report';

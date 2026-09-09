@@ -392,6 +392,51 @@ describe('bridge v2', () => {
     hn.unmount();
   });
 
+  it('info().tracking says what is covered; inspect() and explain() carry the verdict', () => {
+    init({ silent: true, trackAllMemoized: true, exclude: ['Ignored'], notifier: createDevtoolsNotifier({ target: { postMessage() {} } as unknown as Window }) });
+    const bridge = window.__RERENDER_LENS_DEVTOOLS__!;
+    const Plain = (p: { n: number }) => h('span', { className: 'plain' }, p.n);
+    Object.defineProperty(Plain, 'name', { value: 'Plain' });
+    const Memoed = React.memo((p: { n: number }) => h('i', { className: 'memoed' }, p.n));
+    (Memoed as { displayName?: string }).displayName = 'Memoed';
+    const { Parent, rerender } = makeParent((n) => h('div', null, h(Plain, { n: 1 }), h(Memoed, { n })));
+    const hn = mount(h(Parent));
+    rerender();
+
+    const t = bridge.info().tracking;
+    expect(t.mode).toBe('memoized');
+    expect(t.exclude).toEqual(['Ignored']);
+    expect(t.include).toEqual([]);
+    expect(t.overflow).toBe(false);
+    // Parent, Plain and Memoed rendered; only the memo one is tracked.
+    expect(t.renderedCount).toBe(3);
+    expect(t.trackedCount).toBe(1);
+
+    const span = hn.container.querySelector('.plain')!;
+    const inspected = bridge.inspect(span)!;
+    expect(inspected.tracked).toBe(false);
+    expect(inspected.tracking.tracked).toBe(false);
+    expect(inspected.tracking.name).toBe('Plain');
+    expect(inspected.tracking.reason).toContain('only covers React.memo');
+    expect(inspected.tracking.fix).toContain('Add "Plain" to include');
+    // explain() takes a DOM node, or an instance id (all a relay/channel panel can send)
+    expect(bridge.explain(span)!.name).toBe('Plain');
+    const id = (bridge.pull().reports[0] as { instanceId: number }).instanceId;
+    expect(bridge.explain(id)).toMatchObject({ tracked: true, name: 'Memoed', memoized: true });
+    expect(bridge.explain(document.body)).toBeNull();
+    expect(bridge.explain(999999)).toBeNull();
+
+    // the panel's one-click fixes, through the same configure() path
+    bridge.configure({ include: ['Plain'] });
+    expect(bridge.info().tracking.include).toEqual(['Plain']);
+    expect(bridge.explain(span)).toMatchObject({ tracked: true, reason: '<Plain> matches "include".' });
+    bridge.configure({ trackAllComponents: true });
+    expect(bridge.info().tracking.mode).toBe('all');
+    rerender();
+    expect(bridge.info().tracking.trackedCount).toBe(3);
+    hn.unmount();
+  });
+
   it('highlight() outlines the DOM of an instance and inspect() resolves a DOM node', () => {
     init({ silent: true, notifier: createDevtoolsNotifier({ target: { postMessage() {} } as unknown as Window }) });
     const bridge = window.__RERENDER_LENS_DEVTOOLS__!;

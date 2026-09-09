@@ -6,9 +6,11 @@
   const evalIn = (code) =>
     new Promise((resolve) => chrome.devtools.inspectedWindow.eval(code, (result, err) => resolve(err ? { error: err } : result)));
 
+  // `inspect` carries the tracking verdict; `getOptions` gives the include list to append to.
   const INSPECT =
     '(function(){var b=window.__RERENDER_LENS_DEVTOOLS__;if(!b)return {missing:true};' +
-    'if(typeof $0==="undefined"||!$0)return {none:true};try{return b.inspect($0)}catch(e){return {error:String(e)}}})()';
+    'if(typeof $0==="undefined"||!$0)return {none:true};try{var r=b.inspect($0);' +
+    'if(r)r.options=b.getOptions?b.getOptions():{};return r}catch(e){return {error:String(e)}}})()';
 
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -53,17 +55,49 @@
         r.path && r.path.length ? el('span', { class: 'meta', text: '  in ' + r.path.join(' › ') }) : null,
       ]),
     );
+    // A tracked component with no reports is the good case (it has not re-rendered); an untracked one
+    // is the "why does the panel show nothing?" case, and gets the reason and a one-click fix.
     root.append(
       el('div', { class: 'sb-row' }, [
         el('span', { class: 'verdict ' + (r.tracked ? 'ok' : ''), text: r.tracked ? 'tracked' : 'not tracked' }),
-        el('span', { class: 'meta', text: r.reports.length ? `${r.reports.length} recent report${r.reports.length === 1 ? '' : 's'}` : 'no re-renders reported' }),
+        el('span', {
+          class: 'meta',
+          text: r.reports.length
+            ? `${r.reports.length} recent report${r.reports.length === 1 ? '' : 's'}`
+            : r.tracked
+              ? 'no re-renders yet'
+              : 'no re-renders reported',
+        }),
       ]),
     );
+    const verdict = r.tracking;
+    if (verdict) {
+      root.append(el('div', { class: 'sb-reason', text: verdict.reason }));
+      if (verdict.fix) root.append(el('div', { class: 'sb-fix', text: verdict.fix }));
+    }
     const actions = el('div', { class: 'sb-actions' });
     if (r.instanceId != null) {
       actions.append(
         el('button', { onclick: () => evalIn(`window.__RERENDER_LENS_DEVTOOLS__.highlight(${r.instanceId})`) }, 'Highlight'),
         el('button', { onclick: () => evalIn('window.__RERENDER_LENS_DEVTOOLS__.highlight(null)') }, 'Clear'),
+      );
+    }
+    const name = verdict && verdict.name;
+    if (verdict && !verdict.tracked && name && name !== 'Anonymous' && name === r.component) {
+      actions.append(
+        el(
+          'button',
+          {
+            title: "Adds this display name to the library's include list",
+            onclick: async () => {
+              const include = ((r.options && r.options.include) || []).slice();
+              if (include.indexOf(name) < 0) include.push(name);
+              await evalIn('window.__RERENDER_LENS_DEVTOOLS__.configure(' + JSON.stringify({ include: include }) + ')');
+              refresh();
+            },
+          },
+          'Track this component',
+        ),
       );
     }
     root.append(actions);

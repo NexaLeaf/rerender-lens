@@ -6,7 +6,7 @@
 import type { Change, CommitCause, CommitPriority, HookChange, HookSnapshot, ParentInfo, RenderTrigger, SourceLocation } from './types';
 import { classify, diffRecords, beginDiffScope } from './diff';
 import { buildReport } from './report';
-import { dispatch, getState, warnOnce } from './state';
+import { dispatch, getState, noteRendered, warnOnce } from './state';
 import { getDisplayName, shouldTrack } from './tracker';
 import { resolveHookNames, type DispatcherRef } from './hookNames';
 
@@ -709,8 +709,11 @@ export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void
     const alt = fiber.alternate;
     if (alt && isComponentTag(fiber.tag) && didRender(fiber)) {
       if (isHotSwapped(fiber, alt)) hot = true;
-      renderedNames.add(fiberName(fiber));
-      if (shouldTrack(fiberType(fiber), o)) rendered.push(fiber);
+      const name = fiberName(fiber);
+      renderedNames.add(name);
+      const tracked = shouldTrack(fiberType(fiber), o);
+      noteRendered(s, name, tracked);
+      if (tracked) rendered.push(fiber);
     }
     // A Suspense boundary whose memoizedState went from "showing fallback" (non-null) to content.
     if (fiber.tag === SuspenseComponent && alt && alt.memoizedState !== null && fiber.memoizedState === null) (resolvedBoundaries ??= []).push(fiber);

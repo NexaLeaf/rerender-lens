@@ -43,12 +43,19 @@ describe('elements sidebar', () => {
   });
 
   it('renders the component, tracking state, last report and highlight buttons', async () => {
-    chrome = makeChrome({ evalResult: { component: 'Row', instanceId: 9, tracked: true, path: ['App', 'List'], reports: [report] } });
+    chrome = makeChrome({
+      evalResult: {
+        component: 'Row', instanceId: 9, tracked: true, path: ['App', 'List'], reports: [report],
+        tracking: { tracked: true, name: 'Row', memoized: true, reason: '<Row> is a React.memo component, and "Track every React.memo and PureComponent" is on.' },
+      },
+    });
     load(chrome);
     await settle();
     expect(document.querySelector('.sb-title .name')!.textContent).toBe('Row');
     expect(document.body.textContent).toContain('in App › List');
     expect(document.body.textContent).toContain('tracked');
+    expect(document.querySelector('.sb-reason')!.textContent).toContain('is a React.memo component');
+    expect(document.querySelector('.sb-fix')).toBeNull();
     expect(document.body.textContent).toContain('1 recent report');
     expect(document.body.textContent).toContain('identical props');
     expect(document.body.textContent).toContain('Not memoized');
@@ -63,12 +70,44 @@ describe('elements sidebar', () => {
     expect(chrome.devtools.inspectedWindow.eval.mock.calls[1]![0]).toBe('window.__RERENDER_LENS_DEVTOOLS__.highlight(null)');
   });
 
-  it('an untracked component with no instance id has no highlight button', async () => {
-    chrome = makeChrome({ evalResult: { component: 'Plain', instanceId: null, tracked: false, path: [], reports: [] } });
+  it('an untracked component shows the verdict, the fix and a Track this component button', async () => {
+    chrome = makeChrome({
+      evalResult: {
+        component: 'Plain', instanceId: null, tracked: false, path: [], reports: [], options: { include: ['Row'] },
+        tracking: {
+          tracked: false, name: 'Plain', memoized: false,
+          reason: '"Track every React.memo and PureComponent" only covers React.memo components and PureComponent classes, and <Plain> is neither.',
+          fix: 'Add "Plain" to include, wrap it in React.memo, or turn on "Track every component".',
+        },
+      },
+    });
     load(chrome);
     await settle();
     expect(document.body.textContent).toContain('not tracked');
     expect(document.body.textContent).toContain('no re-renders reported');
-    expect(document.querySelectorAll('.sb-actions button')).toHaveLength(0);
+    expect(document.querySelector('.sb-reason')!.textContent).toContain('only covers React.memo components');
+    expect(document.querySelector('.sb-fix')!.textContent).toContain('Add "Plain" to include');
+    // no instance id, so no highlight buttons: only the one-click fix
+    const buttons = [...document.querySelectorAll('.sb-actions button')] as HTMLButtonElement[];
+    expect(buttons.map((b) => b.textContent)).toEqual(['Track this component']);
+    chrome.devtools.inspectedWindow.eval.mockClear();
+    buttons[0]!.click();
+    await settle();
+    expect(chrome.devtools.inspectedWindow.eval.mock.calls[0]![0]).toBe('window.__RERENDER_LENS_DEVTOOLS__.configure({"include":["Row","Plain"]})');
+  });
+
+  it('a tracked component that has not re-rendered is not the untracked case', async () => {
+    chrome = makeChrome({
+      evalResult: {
+        component: 'Quiet', instanceId: 3, tracked: true, path: [], reports: [],
+        tracking: { tracked: true, name: 'Quiet', memoized: false, reason: '<Quiet> matches "include".' },
+      },
+    });
+    load(chrome);
+    await settle();
+    expect(document.body.textContent).toContain('no re-renders yet');
+    expect(document.body.textContent).not.toContain('no re-renders reported');
+    const buttons = [...document.querySelectorAll('.sb-actions button')] as HTMLButtonElement[];
+    expect(buttons.map((b) => b.textContent)).toEqual(['Highlight', 'Clear']);
   });
 });

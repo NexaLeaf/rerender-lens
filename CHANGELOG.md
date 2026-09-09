@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **The relay authenticates when it is not on loopback.** `npx rerender-lens panel --host 0.0.0.0`
+  now generates a token, prints it inside the URL and refuses `/events`, `/message` and `/status`
+  without it, because reports carry your app's prop, state and context values. Pass the printed URL
+  to the app and the panel and both pick the token up; `--token` sets your own, `--no-token` opts
+  out with a warning. Loopback is unchanged and needs no secret.
+- A nightly job records what the library costs per commit on a large tree (`npm run e2e:perf`,
+  3,000 and 10,000 memoized rows) and fails when a commit blows its budget. On a laptop the worst
+  commit is about 32 ms at both sizes: the cost is flat in tree size because the per-commit cap
+  stops the walk. The extension README now documents that the package ships no remote code and no
+  `eval` beyond `chrome.devtools.inspectedWindow.eval`, under MV3's default content security
+  policy.
+- **"Why is this component not tracked?"** New `explainTracking(type, options)` returns the same
+  decision as `shouldTrack` plus the rule that made it and what to change, and the bridge carries
+  it: `info().tracking` (mode, include/exclude, and how many distinct components rendered since
+  `init` versus how many were tracked), `inspect(node).tracking`, and a new `explain(node | instanceId)`
+  command that also works over the BroadcastChannel and the relay. The panel's empty state now says
+  "tracking every React.memo and PureComponent; 42 components rendered, 3 of them tracked" and
+  offers *Track every component* and *Track components matching…*; the Elements sidebar shows the
+  verdict, the reason and a *Track this component* button for the selected element. Additive:
+  the protocol stays at 2.
 - **The docs site is a product page.** A landing page that answers "how do I start with my
   bundler" (Vite, Next.js, Webpack, any app through the relay, the extension, tests) with the
   snippets lifted straight out of the README so they cannot drift, the README as the guide, the

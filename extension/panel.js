@@ -1840,10 +1840,73 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     }
     const rowEls = /* @__PURE__ */ new Map();
     const treeList = virtualList(tree, ROW_H, ({ node, depth }) => rowFor(node, depth));
-    const emptyEl = el("div", { class: "empty" }, [
-      el("div", { text: "No re-renders reported yet." }),
-      el("div", null, ["Call ", el("code", { text: "init({ notifier: createDevtoolsNotifier() })" }), " in the page, or enable injection in Settings, then interact with it."])
-    ]);
+    const emptyEl = el("div", { class: "empty" });
+    function trackingSentence(t) {
+      const what = t.mode === "all" ? "Tracking every component" : t.mode === "memoized" ? "Tracking every React.memo and PureComponent" : "Tracking only components marked with track()";
+      const parts = [what];
+      if (t.include.length) parts.push(`${t.mode === "marked" ? "and" : "plus"} names matching ${t.include.join(", ")}`);
+      if (t.exclude.length) parts.push(`except ${t.exclude.join(", ")}`);
+      const rendered = `${t.renderedCount}${t.overflow ? "+" : ""} component${t.renderedCount === 1 ? "" : "s"} rendered`;
+      return `${parts.join(", ")}; ${rendered}, ${t.trackedCount} of them tracked.`;
+    }
+    function renderEmpty() {
+      emptyEl.textContent = "";
+      emptyEl.append(el("div", { class: "empty-head", text: "No re-renders reported yet." }));
+      const t = state.library?.tracking;
+      if (!t) {
+        emptyEl.append(
+          el("div", null, ["Call ", el("code", { text: "init({ notifier: createDevtoolsNotifier() })" }), " in the page, or enable injection in Settings, then interact with it."])
+        );
+        return;
+      }
+      emptyEl.append(el("div", { class: "empty-tracking", text: trackingSentence(t) }));
+      if (t.mode === "all") {
+        emptyEl.append(el("div", { text: "Every component is tracked, so this is waiting for a re-render: interact with the page. The first render of a component is never reported." }));
+        return;
+      }
+      const untracked = t.renderedCount - t.trackedCount;
+      emptyEl.append(
+        el("div", {
+          text: untracked > 0 ? `${untracked} component${untracked === 1 ? "" : "s"} rendered without being tracked. Widen what is tracked, or interact with the page if the tracked ones simply have not re-rendered yet.` : "Interact with the page: the first render of a component is never reported, only re-renders."
+        })
+      );
+      if (!transport.configure) return;
+      const trackAll = el("button", { class: "primary", onclick: () => void applyTracking({ trackAllComponents: true }) }, "Track every component");
+      const match = el("input", { class: "empty-match", type: "text", placeholder: "Name or /regex/", "aria-label": "Track components matching" });
+      const addMatch = () => {
+        const value = match.value.trim();
+        if (!value) return;
+        const include = (state.library?.tracking?.include || []).slice();
+        if (!include.includes(value)) include.push(value);
+        match.value = "";
+        void applyTracking({ include });
+      };
+      match.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") addMatch();
+      });
+      emptyEl.append(
+        el("div", { class: "empty-actions" }, [trackAll, match, el("button", { onclick: addMatch }, "Track components matching\u2026")])
+      );
+    }
+    async function applyTracking(patch) {
+      if (!transport.configure) return;
+      try {
+        const applied = await transport.configure(patch);
+        if (state.library) {
+          if (applied) state.library.options = applied;
+          const t = state.library.tracking;
+          if (t) {
+            if (patch.trackAllComponents) t.mode = "all";
+            if (patch.include) t.include = patch.include;
+          }
+          transport.storage?.set("settings", Object.assign({}, state.library.options));
+        }
+        toast("Applied");
+        renderTree();
+      } catch (e) {
+        toast(`Failed: ${e.message}`);
+      }
+    }
     function renderTree() {
       const flat = [];
       const walk = (node, depth) => {
@@ -1855,6 +1918,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       };
       walk(state.tree, 0);
       if (flat.length === 0) {
+        renderEmpty();
         if (!emptyEl.parentNode) tree.append(emptyEl);
       } else emptyEl.remove();
       if (rowEls.size > flat.length * 2 + 64) {
@@ -2686,6 +2750,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     function setLibrary(info) {
       state.library = info;
       renderStatus();
+      if (emptyEl.parentNode) renderEmpty();
       if (state.settingsOpen) void renderSettings();
       if (state.flashOn) transport.flashAvoidable?.(true);
     }
@@ -3566,7 +3631,10 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     return transport;
   }
   function createRelayClientTransport(relayUrl, ES = EventSource) {
-    const base = relayUrl.replace(/\/$/, "");
+    const [rawBase, relayQuery = ""] = relayUrl.split("?");
+    const base = (rawBase ?? "").replace(/\/$/, "");
+    const relayToken = new URLSearchParams(relayQuery).get("token");
+    const auth = relayToken ? `token=${encodeURIComponent(relayToken)}` : "";
     let listener = null;
     let stream = null;
     let appsOnline = null;
@@ -3577,7 +3645,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     };
     const post = (message) => {
       const body = selected && isRecord(message) && message.__rerenderLensCmd === true ? { ...message, app: selected } : message;
-      return fetch(`${base}/message`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(() => void 0);
+      return fetch(`${base}/message${auth ? `?${auth}` : ""}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(() => void 0);
     };
     const { bridge, reply } = commandBridge(post, 2e3);
     const handleData = (data) => {
@@ -3631,7 +3699,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       subscribe(fn) {
         listener = fn;
         const open = () => {
-          stream = new ES(`${base}/events?role=panel`);
+          stream = new ES(`${base}/events?role=panel${auth ? `&${auth}` : ""}`);
           stream.onmessage = (e) => handleData(e.data);
           stream.onerror = () => {
             emit({ type: "disconnected" });
