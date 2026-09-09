@@ -1,6 +1,6 @@
 import type { ComponentMatcher, Notifier, Options, RenderReport, TrackingSummary, TrackingVerdict } from './types';
 import { isReactElement } from './diff';
-import { configure, explainTracking, getDisplayName, isEnabled, shouldTrack } from './tracker';
+import { configure, explainTracking, getDisplayName, isEnabled, shouldTrack, unwrapComponent } from './tracker';
 import { getState } from './state';
 import { fiberById, fiberForNode, fiberName, fiberType, getRenderers, hostNodesOf, instanceIdOf, isProductionReact, nearestComponent } from './fiber';
 import type { Fiber, RendererInfo } from './fiber';
@@ -43,13 +43,18 @@ export interface HelloPayload {
   truncated: number;
   /** What the current options select, and how much of the page they cover: the panel's answer to "why is it empty?". */
   tracking: TrackingSummary;
+  /**
+   * Same-origin scripts of the page (`<script src>` and `<link rel=modulepreload>`), so a panel can find
+   * the bundle a component was compiled into and name it through its source map. Capped at `MAX_SCRIPTS`.
+   */
+  scripts: string[];
 }
 
 /** Command sent by a panel over the BroadcastChannel; answered with a `ChannelReply` of the same id. */
 export interface ChannelCommand {
   __rerenderLensCmd: true;
   id: string;
-  cmd: 'info' | 'pull' | 'replay' | 'clear' | 'configure' | 'highlight' | 'flash' | 'explain';
+  cmd: 'info' | 'pull' | 'replay' | 'clear' | 'configure' | 'highlight' | 'flash' | 'explain' | 'functionSource' | 'fetchText';
   arg?: unknown;
 }
 
@@ -167,6 +172,30 @@ export interface DevtoolsBridge {
    * BroadcastChannel or the relay can send) is or is not tracked.
    */
   explain(target: unknown): TrackingVerdict | null;
+  /**
+   * The component function's own source text, exactly as it sits in the loaded script
+   * (`Function.prototype.toString()` returns a slice of it), plus the name it currently has. A panel
+   * looks the text up in the bundle to name a minified build through the bundle's source map.
+   */
+  functionSource(instanceId: number): FunctionSource | null;
+  /**
+   * Read a **same-origin** URL as text in the page (the page can always read its own bundle and `.map`;
+   * a panel often cannot). Cross-origin URLs are refused, no credentials are sent, and anything over
+   * `maxBytes` (default and hard cap `FETCH_TEXT_MAX_BYTES`) is dropped.
+   *
+   * The first call returns a promise and remembers the result; later calls for the same URL answer
+   * synchronously (or throw the recorded failure), which is what lets a caller that cannot await —
+   * `chrome.devtools.inspectedWindow.eval` — poll for it.
+   */
+  fetchText(url: string, maxBytes?: number): string | null | Promise<string | null>;
+}
+
+/** `functionSource()`: the text of the function the bundler compiled, and its current (minified) name. */
+export interface FunctionSource {
+  text: string;
+  name: string;
+  /** True when `text` is only the first `MAX_FUNCTION_SOURCE` characters. */
+  truncated?: boolean;
 }
 
 declare global {
@@ -174,6 +203,15 @@ declare global {
     __RERENDER_LENS_DEVTOOLS__?: DevtoolsBridge;
   }
 }
+
+/** Characters of a component's source text `functionSource()` returns; a minified component is far smaller. */
+export const MAX_FUNCTION_SOURCE = 20_000;
+/** Hard cap for `fetchText()`; a bundle plus its map fits, a video does not. */
+export const FETCH_TEXT_MAX_BYTES = 8_000_000;
+/** Script URLs reported in `info().scripts`. */
+export const MAX_SCRIPTS = 30;
+/** Texts kept by `fetchText()`; they are megabytes, and a panel only needs the current bundle and its map. */
+const TEXT_CACHE_MAX = 3;
 
 /** Entries kept per array / object / Map / Set when serializing; the rest becomes one `…+N more` marker. */
 export const SERIALIZE_MAX_ENTRIES = 100;
@@ -298,6 +336,92 @@ interface Entry {
   payload: unknown;
 }
 
+/** Same-origin scripts the document loads: the candidates for "which bundle was this component compiled into?". */
+function pageScripts(): string[] {
+  if (typeof document === 'undefined' || typeof location === 'undefined') return [];
+  const out: string[] = [];
+  let nodes: ArrayLike<Element>;
+  try {
+    nodes = document.querySelectorAll('script[src], link[rel~="modulepreload"][href]');
+  } catch {
+    return out;
+  }
+  for (let i = 0; i < nodes.length && out.length < MAX_SCRIPTS; i++) {
+    const raw = (nodes[i] as HTMLScriptElement).src || (nodes[i] as unknown as HTMLLinkElement).href;
+    if (!raw) continue;
+    try {
+      const url = new URL(raw, location.href);
+      if (url.origin !== location.origin) continue;
+      if (!out.includes(url.href)) out.push(url.href);
+    } catch {
+      /* not a URL we can use */
+    }
+  }
+  return out;
+}
+
+interface TextEntry {
+  done: boolean;
+  text?: string | null;
+  error?: string;
+  promise?: Promise<string | null>;
+}
+const textCache = new Map<string, TextEntry>();
+
+/** See `DevtoolsBridge.fetchText`. Module-level so the cache survives a second `createDevtoolsNotifier`. */
+function fetchTextImpl(rawUrl: string, maxBytes?: number): string | null | Promise<string | null> {
+  const cap = typeof maxBytes === 'number' && maxBytes > 0 ? Math.min(maxBytes, FETCH_TEXT_MAX_BYTES) : FETCH_TEXT_MAX_BYTES;
+  const here = typeof location !== 'undefined' ? location.href : undefined;
+  let url: URL;
+  try {
+    url = new URL(String(rawUrl), here);
+  } catch {
+    throw new Error(`fetchText: not a URL: ${String(rawUrl)}`);
+  }
+  // Real same-origin check: the page reads its own files, nothing else.
+  if (typeof location !== 'undefined' && url.origin !== location.origin) throw new Error(`fetchText: refused ${url.origin} (not same-origin as ${location.origin})`);
+  const key = url.href;
+  const hit = textCache.get(key);
+  if (hit) {
+    if (hit.error) throw new Error(hit.error);
+    if (hit.done) return hit.text ?? null;
+    return hit.promise ?? null;
+  }
+  if (typeof fetch !== 'function') throw new Error('fetchText: this page has no fetch()');
+  const entry: TextEntry = { done: false };
+  const settle = (text: string | null, error?: string): string | null => {
+    entry.done = true;
+    entry.text = text;
+    if (error) entry.error = error;
+    // Oldest first: Map keeps insertion order.
+    for (const k of textCache.keys()) {
+      if (textCache.size <= TEXT_CACHE_MAX) break;
+      if (k !== key) textCache.delete(k);
+    }
+    return text;
+  };
+  // Failures resolve to null and are remembered: nobody may be awaiting this promise (the eval caller
+  // only polls), so it must never reject. The next call for the same URL throws the reason instead.
+  entry.promise = fetch(key, { credentials: 'omit' })
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const len = Number(res.headers.get('content-length') || 0);
+      if (len > cap) throw new Error(`${len} bytes is over the ${cap} byte cap`);
+      return res.text();
+    })
+    .then(
+      (text) => settle(text.length > cap ? null : text, text.length > cap ? `fetchText ${key}: over the ${cap} byte cap` : undefined),
+      (e: unknown) => settle(null, `fetchText ${key}: ${String((e as Error)?.message || e)}`),
+    );
+  textCache.set(key, entry);
+  return entry.promise;
+}
+
+/** The Fetch standard's cap on a `keepalive` request body; beyond it the request fails outright. */
+const KEEPALIVE_MAX_BYTES = 60_000;
+
+const isThenable = <T,>(v: T | Promise<T>): v is Promise<T> => !!v && typeof (v as Promise<T>).then === 'function';
+
 /**
  * A notifier that posts every report on `window` for a DevTools extension to pick up.
  * Also installs `window.__RERENDER_LENS_DEVTOOLS__` with `replay()` / `clear()` / `pull()` and friends.
@@ -356,6 +480,7 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     overhead: { totalMs: getState().overheadMs, maxCommitMs: getState().maxCommitMs },
     truncated: getState().truncated,
     tracking: trackingSummary(),
+    scripts: pageScripts(),
   });
 
   const bridge: DevtoolsBridge = {
@@ -406,6 +531,25 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
       const comp = typeof target === 'number' ? fiberById(target) : nearestComponent(fiberForNode(target));
       return comp ? explainTracking(fiberType(comp), getState().options) : null;
     },
+    functionSource: (instanceId) => {
+      const fiber = typeof instanceId === 'number' ? fiberById(instanceId) : null;
+      if (!fiber) return null;
+      // The bundler compiled the inner function; `memo(X)` / `forwardRef(X)` are objects created at runtime.
+      const fn = unwrapComponent(fiberType(fiber));
+      if (typeof fn !== 'function') return null;
+      let text: string;
+      try {
+        text = Function.prototype.toString.call(fn);
+      } catch {
+        return null;
+      }
+      if (!text) return null;
+      const truncated = text.length > MAX_FUNCTION_SOURCE;
+      const out: FunctionSource = { text: truncated ? text.slice(0, MAX_FUNCTION_SOURCE) : text, name: (fn as { name?: string }).name || fiberName(fiber) };
+      if (truncated) out.truncated = true;
+      return out;
+    },
+    fetchText: (url, maxBytes) => fetchTextImpl(url, maxBytes),
     inspect: (node) => {
       const comp = nearestComponent(fiberForNode(node));
       if (!comp) return null;
@@ -428,8 +572,11 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
   };
   if (typeof window !== 'undefined') window.__RERENDER_LENS_DEVTOOLS__ = bridge;
 
-  /** Answer a panel command (BroadcastChannel or relay). */
-  const runCommand = (data: ChannelCommand): ChannelReply => {
+  /**
+   * Answer a panel command (BroadcastChannel or relay). Every command but `fetchText` answers
+   * synchronously; that one may return a promise of the reply, so callers post whichever they get.
+   */
+  const runCommand = (data: ChannelCommand): ChannelReply | Promise<ChannelReply> => {
     const reply: ChannelReply = { __rerenderLensReply: true, id: data.id };
     try {
       switch (data.cmd) {
@@ -461,6 +608,18 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
           // Over a channel there is no DOM node to pass, only an instance id from a report.
           reply.result = bridge.explain(data.arg);
           break;
+        case 'functionSource':
+          reply.result = bridge.functionSource(Number(data.arg));
+          break;
+        case 'fetchText': {
+          const arg = data.arg;
+          const url = typeof arg === 'string' ? arg : arg && typeof arg === 'object' ? String((arg as { url?: unknown }).url ?? '') : '';
+          const max = arg && typeof arg === 'object' ? (arg as { maxBytes?: unknown }).maxBytes : undefined;
+          const out = bridge.fetchText(url, typeof max === 'number' ? max : undefined);
+          if (isThenable(out)) return out.then((text) => ({ ...reply, result: text }), (e: unknown) => ({ ...reply, error: String((e as Error)?.message || e) }));
+          reply.result = out;
+          break;
+        }
         default:
           reply.error = `unknown command ${String((data as { cmd?: unknown }).cmd)}`;
       }
@@ -483,8 +642,18 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
     const name = typeof options.channel === 'string' ? options.channel : DEFAULT_CHANNEL;
     try {
       const channel = new BroadcastChannel(name);
+      const answer = (reply: ChannelReply): void => {
+        try {
+          channel.postMessage(reply);
+        } catch {
+          /* not cloneable */
+        }
+      };
       channel.onmessage = (event: MessageEvent) => {
-        if (isCommand(event.data)) channel.postMessage(runCommand(event.data));
+        if (!isCommand(event.data)) return;
+        const reply = runCommand(event.data);
+        if (isThenable(reply)) void reply.then(answer);
+        else answer(reply);
       };
       sinks.push((message) => {
         try {
@@ -518,7 +687,11 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
       queue = [];
       const params = [appId ? `app=${encodeURIComponent(appId)}` : '', auth].filter(Boolean).join('&');
       const to = `${base}/message${params ? `?${params}` : ''}`;
-      fetch(to, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(batch), keepalive: true }).catch(() => {});
+      const body = JSON.stringify(batch);
+      // `keepalive` keeps a last batch alive across an unload, but the Fetch standard caps such a
+      // request body at 64 KB and fails the whole request over it. A big payload (a source map for
+      // `fetchText`, or reports with large props) has to go as an ordinary request instead.
+      fetch(to, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: body.length <= KEEPALIVE_MAX_BYTES }).catch(() => {});
     };
     const relaySend = (message: unknown): void => {
       queue.push(message);
@@ -540,7 +713,11 @@ export function createDevtoolsNotifier(options: DevtoolsNotifierOptions = {}): N
         }
         for (const m of Array.isArray(parsed) ? parsed : [parsed]) {
           if (isRelayGreeting(m)) appId = m.app;
-          else if (isCommand(m)) relaySend(runCommand(m));
+          else if (isCommand(m)) {
+            const reply = runCommand(m);
+            if (isThenable(reply)) void reply.then(relaySend);
+            else relaySend(reply);
+          }
         }
       };
       stream.onerror = () => {};

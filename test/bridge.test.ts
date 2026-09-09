@@ -475,4 +475,72 @@ describe('bridge v2', () => {
     expect(overlay.children.length).toBe(1);
     hn.unmount();
   });
+
+  it('functionSource() returns the compiled function text, unwrapping memo', () => {
+    init({ silent: true, trackAllMemoized: true, notifier: createDevtoolsNotifier({ target: { postMessage() {} } as unknown as Window }) });
+    const bridge = window.__RERENDER_LENS_DEVTOOLS__!;
+    const Inner = (p: { n: number }) => h('span', null, p.n);
+    Object.defineProperty(Inner, 'name', { value: 'Inner' });
+    const Memoed = React.memo(Inner);
+    (Memoed as { displayName?: string }).displayName = 'Memoed';
+    const { Parent, rerender } = makeParent((n) => h(Memoed, { n }));
+    const hn = mount(h(Parent));
+    rerender();
+    const id = (bridge.pull().reports[0] as { instanceId: number }).instanceId;
+    const src = bridge.functionSource(id)!;
+    // `memo(X)` is an object built at runtime; what the bundler compiled is X.
+    expect(src.name).toBe('Inner');
+    expect(src.text).toContain('span');
+    expect(src.text).toBe(String(Inner));
+    expect(bridge.functionSource(999999)).toBeNull();
+    hn.unmount();
+  });
+
+  it('fetchText() reads same-origin text, refuses anything else and answers a repeat call synchronously', async () => {
+    init({ silent: true, notifier: createDevtoolsNotifier({ target: { postMessage() {} } as unknown as Window }) });
+    const bridge = window.__RERENDER_LENS_DEVTOOLS__!;
+    const fetchMock = vi.fn((url: string, _init?: RequestInit) =>
+      Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, text: () => Promise.resolve(`text of ${url}`) } as unknown as Response),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      expect(() => bridge.fetchText('https://evil.test/app.js')).toThrow(/refused/);
+      expect(() => bridge.fetchText('http://[')).toThrow(/not a URL/);
+      const url = `${location.origin}/assets/app-1.js`;
+      const pending = bridge.fetchText('/assets/app-1.js');
+      expect(typeof (pending as Promise<string>).then).toBe('function');
+      expect(await pending).toBe(`text of ${url}`);
+      // The eval-based panel adapter cannot await, so a second call must answer from the cache.
+      expect(bridge.fetchText('/assets/app-1.js')).toBe(`text of ${url}`);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]![1]).toMatchObject({ credentials: 'omit' });
+      // Over the cap: null now, and the reason on the next call.
+      expect(await bridge.fetchText('/assets/app-2.js', 3)).toBeNull();
+      expect(() => bridge.fetchText('/assets/app-2.js', 3)).toThrow(/cap/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('info().scripts lists the same-origin scripts of the page', () => {
+    const script = document.createElement('script');
+    script.src = '/assets/app-3.js';
+    const cross = document.createElement('script');
+    cross.src = 'https://cdn.test/vendor.js';
+    const preload = document.createElement('link');
+    preload.rel = 'modulepreload';
+    preload.href = '/assets/chunk-3.js';
+    document.head.append(script, cross, preload);
+    try {
+      init({ silent: true, notifier: createDevtoolsNotifier({ target: { postMessage() {} } as unknown as Window }) });
+      const scripts = window.__RERENDER_LENS_DEVTOOLS__!.info().scripts;
+      expect(scripts).toContain(`${location.origin}/assets/app-3.js`);
+      expect(scripts).toContain(`${location.origin}/assets/chunk-3.js`);
+      expect(scripts.some((s) => s.includes('cdn.test'))).toBe(false);
+    } finally {
+      script.remove();
+      cross.remove();
+      preload.remove();
+    }
+  });
 });

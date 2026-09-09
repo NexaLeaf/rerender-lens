@@ -21,7 +21,9 @@ import { rankFixes, formatFixes, type RankedFix } from './fixes';
 
 /** The subset of Playwright's `Page` used here (keeps `@playwright/test` an optional peer). */
 export interface PageLike {
-  addInitScript(script: string | { content?: string }): Promise<void>;
+  // Playwright returns `Promise<Disposable>` from `addInitScript` these days and returned
+  // `Promise<void>` before; `unknown` accepts a real `Page` either way.
+  addInitScript(script: string | { content?: string }): Promise<unknown>;
   evaluate<R>(fn: string | ((arg: unknown) => R), arg?: unknown): Promise<R>;
 }
 

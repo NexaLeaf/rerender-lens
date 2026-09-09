@@ -38,7 +38,7 @@ const report = (over: Record<string, unknown> = {}) => ({
 });
 
 interface Panel {
-  state: { reports: unknown[]; commits: Map<number, unknown[]>; commitOrder: number[]; timeWindow: { from: number; to: number } | null; stripCollapsed: boolean; selectedCommit: number | null; selectedKey: string | null; paused: boolean; view: string; tab: string; library: unknown; relay: boolean; flashOn: boolean; recording: unknown; sessions: { name: string }[]; sort: { key: string; dir: number } };
+  state: { names: Map<string, string>; reports: unknown[]; commits: Map<number, unknown[]>; commitOrder: number[]; timeWindow: { from: number; to: number } | null; stripCollapsed: boolean; selectedCommit: number | null; selectedKey: string | null; paused: boolean; view: string; tab: string; library: unknown; relay: boolean; flashOn: boolean; recording: unknown; sessions: { name: string }[]; sort: { key: string; dir: number } };
   handle(m: unknown): void;
   flush(): void;
   select(name: string): void;
@@ -183,6 +183,64 @@ describe('devtools panel', () => {
     expect(banner.hidden).toBe(false);
     expect(banner.textContent).toMatch(/2800 reports skipped: a commit re-rendered more tracked components than the per-commit cap/);
     expect(root.querySelector('.status')!.getAttribute('title')).toContain('2800 reports skipped by the per-commit cap');
+  });
+
+  it('names minified components from the bundle source map, on demand', async () => {
+    // `ed` sits at generated line 1, column 9 of the bundle; the map calls it `Row` in src/Row.tsx.
+    const bundle = 'var a=1;\nfunction ed(e){return e.a}\n//# sourceMappingURL=app.js.map\n';
+    const map = JSON.stringify({ version: 3, sources: ['src/Row.tsx'], names: ['Row'], mappings: ';SAAAA' });
+    const files: Record<string, string> = { 'https://app.test/app.js': bundle, 'https://app.test/app.js.map': map };
+    const calls: [string, unknown][] = [];
+    transport = makeTransport({
+      bridge: (cmd: string, arg: unknown) => {
+        calls.push([cmd, arg]);
+        if (cmd === 'functionSource') return Promise.resolve(arg === 7 ? { text: 'function ed(e){return e.a}', name: 'ed' } : { text: '(e)=>e.a', name: '' });
+        if (cmd === 'fetchText') return Promise.resolve(files[String(arg)] ?? null);
+        return Promise.resolve(null);
+      },
+    });
+    panel = factory.createPanel(root, transport);
+    panel.handle({
+      type: 'hello',
+      version: 2,
+      payload: { library: '0.8.0', protocol: 2, react: [], production: true, enabled: true, options: {}, scripts: ['https://app.test/app.js'] },
+    });
+    for (const [component, instanceId] of [
+      ['ed', 7],
+      ['Zz', 8],
+      ['Qq', 9],
+    ] as [string, number][])
+      send({ type: 'report', payload: report({ component, instanceId, path: ['fd'], owner: 'fd', parent: { name: 'fd', trigger: 'state' } }) });
+    expect(names(root)).toEqual(['fd', 'ed', 'Zz', 'Qq']);
+
+    const banner = root.querySelector('.banner') as HTMLElement;
+    expect(banner.textContent).toMatch(/Production React build/);
+    button(root, '.banner button', 'Resolve names').click();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The tree, the stream and the details all show the original name, with the minified one in a title.
+    expect(names(root)).toEqual(['fd', 'Row', 'Zz', 'Qq']);
+    const label = [...root.querySelectorAll<HTMLElement>('.tree .name')].find((n) => n.textContent === 'Row')!;
+    expect(label.getAttribute('title')).toBe('minified as ed');
+    expect(banner.textContent).toContain('1 of 3 names resolved; 2 have no identifier in the bundle');
+    // The bundle and its map are read once each, whatever the number of components.
+    expect(calls.filter((c) => c[0] === 'fetchText').map((c) => c[1])).toEqual(['https://app.test/app.js', 'https://app.test/app.js.map']);
+    expect(calls.filter((c) => c[0] === 'functionSource').map((c) => c[1])).toEqual([7, 8, 9]);
+
+    // Offenders and the stream are re-labelled too, and later reports arrive named.
+    panel.setView('offenders');
+    const offender = [...root.querySelectorAll<HTMLElement>('.grid .name')].find((n) => n.textContent === 'Row')!;
+    expect(offender.getAttribute('title')).toBe('minified as ed');
+    panel.setView('tree');
+    send({ type: 'report', payload: report({ component: 'ed', instanceId: 7, renderCount: 2, path: ['fd'] }) });
+    expect(names(root)).toEqual(['fd', 'Row', 'Zz', 'Qq']);
+    const item = [...root.querySelectorAll<HTMLElement>('.stream-item .c')].find((n) => n.textContent === 'Row')!;
+    expect(item.getAttribute('title')).toBe('minified as ed');
+
+    // A navigation is another document: the names go with it.
+    panel.handle({ type: 'navigated' });
+    expect(panel.state.names.size).toBe(0);
   });
 
   it('summary strip shows totals, the top offender and the best fix, and links to them', () => {

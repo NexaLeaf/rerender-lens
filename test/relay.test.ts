@@ -189,6 +189,37 @@ describe('relay server', () => {
     await wait(20);
   });
 
+  it('a reply too large for a keepalive request still reaches the panel', async () => {
+    relay = await createRelayServer({ port: 0, keepAliveMs: 50 });
+    const panel = new FetchEventSource(`${relay.url}/events?role=panel`);
+    const toPanel: Record<string, unknown>[] = [];
+    panel.onmessage = (e) => {
+      const parsed = JSON.parse(e.data);
+      for (const m of Array.isArray(parsed) ? parsed : [parsed]) toPanel.push(m);
+    };
+    // The Fetch standard caps a `keepalive` body at 64 KB and fails the request outright, which
+    // silently dropped source maps and any batch of reports with large props.
+    const big = 'x'.repeat(300_000);
+    init({
+      notifier: createDevtoolsNotifier({ target: { postMessage() {} } as unknown as Window, relay: relay.url, eventSource: FetchEventSource as never }),
+      silent: true,
+    });
+    await vi.waitFor(() => expect(relay!.counts().apps).toBe(1));
+    const bridge = (window as unknown as { __RERENDER_LENS_DEVTOOLS__: { replay(): void } }).__RERENDER_LENS_DEVTOOLS__;
+    const Child = track((p: { blob: string }) => h('span', null, p.blob.length), 'Child');
+    const { Parent, rerender } = makeParent(() => h(Child, { blob: big }));
+    const hn = mount(h(Parent));
+    rerender();
+    bridge.replay();
+    await vi.waitFor(
+      () => expect(toPanel.some((m) => m.type === 'report' && JSON.stringify(m.payload).length > 100_000)).toBe(true),
+      { timeout: 3000 },
+    );
+    hn.unmount();
+    panel.close();
+    await wait(20);
+  });
+
   it('CLI: `panel` starts the relay and stops on SIGINT', async () => {
     const out: string[] = [];
     const log = vi.spyOn(console, 'log').mockImplementation((...a) => void out.push(a.join(' ')));

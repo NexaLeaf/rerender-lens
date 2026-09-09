@@ -1,5 +1,10 @@
 # Plan
 
+0.7.0 is cut (package.json, manifest and the changelog); push the tag to publish it. Note that the
+`v0.6.0` tag on origin points at the multi-app relay commit, whose package.json still said 0.5.0,
+so nothing was published under it: 0.6.0 is skipped on purpose. The release workflow now refuses a
+tag whose version does not match package.json instead of half-succeeding.
+
 Everything below 0.5.0 shipped. This file tracks what is done and what is next; the changelog has
 the detail. Each milestone ends green (`npm run check`, `npm run e2e`, `npm run e2e:next`,
 `npm run test:jest`, `npm run test:react18`, `npm run test:react17`) and merges as one fast-forward.
@@ -46,10 +51,17 @@ The first candidate shipped: the panel now explains **why a component is not tra
 the fix, in the empty state and in the Elements sidebar.
 
 - Whatever the store reviews and the first issues ask for. Hold this slot.
-- Still on the list: component names in production builds through source maps (the biggest of
-  these by far, and the one that decides whether the tool is useful on a staging build),
-  `include`/`exclude` presets per framework, and an `onlyAvoidable` streaming mode for very large
-  apps (the library posts nothing until a commit has an avoidable report).
+- **Component names in production builds: the method is confirmed and being built.** A spike on
+  `examples/vite-react` built with `vite build --sourcemap` recovered `Row` and `App` from the
+  minified `ed` and `fd`, with their original files. `Function.prototype.toString()` returns the
+  exact source slice from the loaded script, so the function text can be found in the bundle with
+  `indexOf`, its identifier's offset turned into a line and column, and the original name read out
+  of the source map's `names` table. Two limits: a `memo(function X(){})` usually loses its inner
+  identifier to the minifier, so there is nothing to map (those keep their `displayName`, which is
+  why React already names them), and a function text that occurs twice in the bundle is ambiguous
+  and is left unresolved rather than guessed.
+- Still on the list: `include`/`exclude` presets per framework, and an `onlyAvoidable` streaming
+  mode for very large apps (the library posts nothing until a commit has an avoidable report).
 
 ## Not planned
 

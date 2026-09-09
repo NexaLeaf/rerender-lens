@@ -10,6 +10,7 @@ import { diffLeaves, firstDifferentPath } from '../../src/diff';
 import { AVOIDABLE_KINDS, fixesFor, rankFixes, shortValue, type Fix, type RankedFix as LibRankedFix } from '../../src/fixes';
 import { KIND_LABEL, summarize } from '../../src/report';
 import { compareSessions, summarizeSession, type SessionSummary } from '../../src/sessions';
+import { decodeDataUrl, identifierOffset, lookupPosition, offsetToPosition, parseSourceMap, sourceMappingURL, type ParsedSourceMap } from '../../src/sourcemap';
 import type { ChangeKind } from '../../src/types';
 
 // ---------- types ----------
@@ -39,6 +40,8 @@ export interface SourceLocation {
 
 export interface Report {
   component: string;
+  /** Set by "Resolve names": what `component` was called in the minified bundle. */
+  minified?: string;
   instanceId: number;
   commitId: number;
   renderCount: number;
@@ -123,6 +126,8 @@ export interface HelloPayload {
   truncated?: number;
   /** What the library's options select and how much of the page they cover (protocol 2, 0.5+). */
   tracking?: TrackingSummary;
+  /** Same-origin scripts of the page: where "Resolve names" looks for the component's code (0.8+). */
+  scripts?: string[];
 }
 
 /** `info().tracking`: the library's answer to "why does the panel show nothing?". */
@@ -196,6 +201,8 @@ export interface Transport {
   tabLabel?: string | null;
   /** Text of a page resource (the module that created an element), for source context. */
   readSource?(url: string): Promise<string | null>;
+  /** Raw access to the page bridge, for the commands only one feature uses ("Resolve names"). */
+  bridge?<T = unknown>(cmd: BridgeCommand, arg?: unknown): Promise<T | null>;
   /** Stop timers and connections (the panel keeps its state). */
   dispose?(): void;
   /** Relay transport with several apps connected: watch this one (the panel starts over on it). */
@@ -267,6 +274,18 @@ export interface PanelState {
   /** Brushed range of the timeline strip, or null for "everything". */
   timeWindow: TimeWindow | null;
   stripCollapsed: boolean;
+  /** Minified name -> original identifier, filled by "Resolve names" and applied to every report. */
+  names: Map<string, string>;
+  /** Progress and result of the last "Resolve names" run, shown in the production banner. */
+  nameStatus: NameStatus | null;
+}
+
+export interface NameStatus {
+  running: boolean;
+  done: number;
+  total: number;
+  /** "14 of 17 names resolved; 3 have no identifier in the bundle" (empty while running). */
+  message: string;
 }
 
 export interface Panel {
@@ -316,6 +335,10 @@ const SYNC_RETRY_MIN = 500;
 const SYNC_RETRY_MAX = 5000;
 const SYNC_RETRIES = 20;
 const NAVIGATION_SETTLE = 1200; // ms after a navigation before the first `info` (the old document may still answer)
+// `inspectedWindow.eval` cannot await, so a page `fetchText` is polled until it has an answer.
+const EVAL_FETCH_POLL = 120; // ms between polls
+const EVAL_FETCH_TIMEOUT = 20_000; // ms before giving up on one URL
+const MAX_CACHED_BUNDLES = 2; // bundle texts / parsed maps kept while resolving names (megabytes each)
 const INFO_REFRESH_MS = 3000; // while connected, `info()` is re-read this often (overhead, truncated count, enabled)
 const ROW_H = 22; // tree row height (px), must match panel.css
 const ITEM_H = 20; // stream item height (px), must match panel.css
@@ -815,11 +838,130 @@ function virtualList<T>(container: HTMLElement, rowHeight: number, rowFor: (item
   };
 }
 
+// ---------- minified names ----------
+/**
+ * Naming a component in a minified production build.
+ *
+ * `Function.prototype.toString()` returns the exact source slice of the loaded script, so a component's
+ * function text is verbatim what sits in the bundle: find it with `indexOf`, take the offset of the
+ * function's *identifier*, turn that offset into a generated line/column and look the position up in the
+ * bundle's source map — the mapping carries an index into `names`, which holds the original identifier.
+ *
+ * Two things this cannot do, by construction: a `memo(function X(){})` usually loses its inner identifier
+ * to the minifier (nothing is left to map — React already names those through `displayName`), and a
+ * function text that occurs twice in the bundle is ambiguous, so it is left alone rather than guessed.
+ */
+export interface ResolvedName {
+  /** The name the reports arrived with. */
+  minified: string;
+  /** The original identifier, or null. */
+  name: string | null;
+  /** Original file of the mapping, when the map had one. */
+  source?: string | null;
+  /** Why `name` is null, worded as a plural clause for the result line ("have no identifier in the bundle"). */
+  reason?: string;
+}
+
+export interface NameResolverIO {
+  bridge<T = unknown>(cmd: BridgeCommand, arg?: unknown): Promise<T | null>;
+  /** Same-origin scripts to search. */
+  scripts(): string[];
+  /** A cheaper read tried first (DevTools already has the page's resources); the page's `fetchText` is the fallback. */
+  readSource?(url: string): Promise<string | null>;
+}
+
+/** `functionSource()` on the page bridge. */
+interface FunctionSource {
+  text: string;
+  name: string;
+  truncated?: boolean;
+}
+
+export interface NameResolver {
+  resolve(minified: string, instanceId: number): Promise<ResolvedName>;
+  clear(): void;
+}
+
+export function createNameResolver(io: NameResolverIO): NameResolver {
+  const done = new Map<string, ResolvedName>();
+  const bundles = new Map<string, string | null>();
+  const maps = new Map<string, ParsedSourceMap | null>();
+  // Bundles and parsed maps are megabytes; hold the current one and one more.
+  const cap = <V,>(m: Map<string, V>): void => {
+    for (const k of m.keys()) {
+      if (m.size <= MAX_CACHED_BUNDLES) break;
+      m.delete(k);
+    }
+  };
+  const read = (url: string): Promise<string | null> => io.bridge<string>('fetchText', url).catch(() => null);
+
+  const textOf = async (url: string): Promise<string | null> => {
+    const hit = bundles.get(url);
+    if (hit !== undefined) return hit;
+    let text: string | null = io.readSource ? await io.readSource(url).catch(() => null) : null;
+    if (!text) text = await read(url);
+    bundles.set(url, text);
+    cap(bundles);
+    return text;
+  };
+
+  const mapFor = async (url: string, text: string): Promise<ParsedSourceMap | null> => {
+    const hit = maps.get(url);
+    if (hit !== undefined) return hit;
+    const ref = sourceMappingURL(text, url);
+    const json = !ref ? null : ref.startsWith('data:') ? decodeDataUrl(ref) : await read(ref);
+    const parsed = json ? parseSourceMap(json) : null;
+    maps.set(url, parsed);
+    cap(maps);
+    return parsed;
+  };
+
+  const record = (r: ResolvedName): ResolvedName => {
+    done.set(r.minified, r);
+    return r;
+  };
+
+  return {
+    async resolve(minified, instanceId) {
+      const cached = done.get(minified);
+      if (cached) return cached;
+      const fn = await io.bridge<FunctionSource>('functionSource', instanceId).catch(() => null);
+      if (!fn || typeof fn.text !== 'string' || !fn.text) return record({ minified, name: null, reason: 'are no longer in the page' });
+      const offset = identifierOffset(fn.text);
+      if (offset === null) return record({ minified, name: null, reason: 'have no identifier in the bundle' });
+      const scripts = io.scripts();
+      if (!scripts.length) return record({ minified, name: null, reason: 'could not be looked up (the page reported no scripts)' });
+      for (const url of scripts) {
+        const text = await textOf(url);
+        if (!text) continue;
+        const at = text.indexOf(fn.text);
+        if (at < 0) continue;
+        // Two identical functions: which one this instance is cannot be told apart, so do not guess.
+        if (text.lastIndexOf(fn.text) !== at) return record({ minified, name: null, reason: 'occur more than once in the bundle' });
+        const map = await mapFor(url, text);
+        if (!map) return record({ minified, name: null, reason: 'are in a bundle with no source map' });
+        const pos = offsetToPosition(text, at + offset);
+        const original = lookupPosition(map, pos.line, pos.column);
+        if (!original || !original.name) return record({ minified, name: null, source: original?.source ?? null, reason: 'have no name in the source map' });
+        return record({ minified, name: original.name, source: original.source });
+      }
+      return record({ minified, name: null, reason: 'were not found in the page scripts' });
+    },
+    clear() {
+      done.clear();
+      bundles.clear();
+      maps.clear();
+    },
+  };
+}
+
 // ---------- panel ----------
 function createPanel(root: HTMLElement, transport: Transport, options: PanelOptions = {}): Panel {
   const state: PanelState = {
     tree: { name: '', children: new Map(), reports: [], total: 0, avoidable: 0, wasted: 0, expanded: true, path: [], key: '' },
     nodesByKey: new Map(),
+    names: new Map(),
+    nameStatus: null,
     reports: [],
     commits: new Map(),
     commitOrder: [],
@@ -1422,6 +1564,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   }
 
   function enqueue(report: Report): void {
+    applyNames(report); // resolved names survive new reports
     queue.push(report);
     if (!flushScheduled) {
       flushScheduled = true;
@@ -1889,7 +2032,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         }),
       );
       created.append(
-        el('span', { class: 'tag' }, [el('span', { class: 'bracket', text: '<' }), el('span', { class: 'name', text: node.name }), el('span', { class: 'bracket', text: '>' })]),
+        el('span', { class: 'tag' }, [el('span', { class: 'bracket', text: '<' }), el('span', { class: 'name', text: node.name, title: nameTitle(node.name) }), el('span', { class: 'bracket', text: '>' })]),
       );
       created.append(el('span', { class: 'badges' }));
       rowEls.set(node.key, created);
@@ -2052,7 +2195,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         },
       },
       [
-        el('td', { class: 'c' }, [el('span', { class: 'name', text: o.component }), o.paths.size > 1 ? el('span', { class: 'meta', text: ` ×${o.paths.size} places` }) : null]),
+        el('td', { class: 'c' }, [el('span', { class: 'name', text: o.component, title: nameTitle(o.component) }), o.paths.size > 1 ? el('span', { class: 'meta', text: ` ×${o.paths.size} places` }) : null]),
         el('td', { class: 'num' }, o.avoidable ? el('span', { class: 'badge avoid', text: String(o.avoidable) }) : '0'),
         el('td', { class: 'num', text: String(o.total) }),
         el('td', { class: 'num', text: o.wasted ? fmtMs(o.wasted) : '' }),
@@ -2222,7 +2365,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       return;
     }
     const header = el('div', { class: 'details-header' }, [
-      el('span', { class: 'title' }, [el('span', { class: 'bracket', text: '<' }), el('span', { class: 'name', text: node.name }), el('span', { class: 'bracket', text: '>' })]),
+      el('span', { class: 'title' }, [el('span', { class: 'bracket', text: '<' }), el('span', { class: 'name', text: node.name, title: nameTitle(node.name) }), el('span', { class: 'bracket', text: '>' })]),
       el('span', { class: 'meta', text: `${plural(node.total, 're-render')}, ${node.avoidable} avoidable${node.wasted ? ', ' + fmtMs(node.wasted) + ' wasted' : ''}` }),
       el('span', { class: 'tabs' }, [
         tabButton('latest', 'Report', () => {
@@ -2604,13 +2747,13 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
   }
 
   // ---------- stream (virtualized) ----------
-  const itemEls = new WeakMap<Report, HTMLElement>();
+  let itemEls = new WeakMap<Report, HTMLElement>(); // replaced when "Resolve names" re-labels the buffer
   const streamItems = virtualList<Report>(streamList, ITEM_H, (r) => {
     let li = itemEls.get(r);
     if (!li) {
       li = el('div', { class: 'stream-item', onclick: () => select(nodeOfReport(r), r) }, [
         el('span', { class: 't', text: fmtTime(r.receivedAt) }),
-        el('span', { class: 'c', text: r.component }),
+        el('span', { class: 'c', text: r.component, title: r.minified ? `minified as ${r.minified}` : undefined }),
         el('span', { class: 'v ' + (r.avoidable ? 'avoid' : 'ok'), text: r.avoidable ? 'avoidable' : r.trigger }),
         el('span', { class: 's', text: summarize(r) }),
       ]);
@@ -2688,6 +2831,110 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
     reader.readAsText(file);
   }
 
+  // ---------- minified names ----------
+  const minifiedOf = new Map<string, string>(); // original -> minified, for the `title` on every label
+  let resolver: NameResolver | null = null;
+  let resolving = false;
+
+  /** What the bundle called this component, as a `title` (undefined when the name was never minified). */
+  const nameTitle = (name: string): string | undefined => {
+    const min = minifiedOf.get(name);
+    return min ? `minified as ${min}` : undefined;
+  };
+
+  /** Rewrite one report's component names in place. Idempotent: a re-labelled report carries `minified`. */
+  function applyNames(r: Report): void {
+    if (!state.names.size) return;
+    const map = (n: string): string => state.names.get(n) ?? n;
+    if (!r.minified) {
+      const original = state.names.get(r.component);
+      if (original) {
+        r.minified = r.component;
+        r.component = original;
+      }
+    }
+    if (r.owner) r.owner = map(r.owner);
+    if (r.parent) r.parent = { ...r.parent, name: map(r.parent.name) };
+    if (r.path.length) r.path = r.path.map(map);
+    if (r.updaters) r.updaters = r.updaters.map(map);
+    for (const c of r.propChanges.concat(r.stateChanges, r.hookChanges)) {
+      if (c.provider && c.provider.component) c.provider = { component: map(c.provider.component), path: c.provider.path.map(map) };
+    }
+  }
+
+  /** Re-label the whole buffer and re-render everything that caches a name (tree, stream, analyses). */
+  function relabelAll(): void {
+    for (const r of state.reports) applyNames(r);
+    const per = new Map<string, number>();
+    for (const [k, v] of totals.perComponent) {
+      const name = state.names.get(k) ?? k;
+      per.set(name, (per.get(name) ?? 0) + v);
+    }
+    totals.perComponent.clear();
+    for (const [k, v] of per) totals.perComponent.set(k, v);
+    commitAnalyses.clear();
+    itemEls = new WeakMap();
+    bestFix = undefined;
+    bestFixAt = 0;
+    bestFixGen = -1;
+    dataGen++;
+    rebuildTree(); // left pane + details
+    renderStream();
+  }
+
+  /** Forget everything about this document's bundle (a navigation, or another tab). */
+  function forgetNames(): void {
+    state.names.clear();
+    minifiedOf.clear();
+    resolver?.clear();
+    resolver = null;
+    state.nameStatus = null;
+  }
+
+  /**
+   * Name every distinct minified component in the buffer through the bundle's source map. On demand only:
+   * it downloads the bundle and its `.map` through the page.
+   */
+  async function resolveNames(): Promise<void> {
+    const call = transport.bridge;
+    if (resolving || !call) return;
+    if (!resolver)
+      resolver = createNameResolver({
+        bridge: <T,>(cmd: BridgeCommand, arg?: unknown) => call.call(transport, cmd, arg) as Promise<T | null>,
+        scripts: () => state.library?.scripts ?? [],
+        readSource: transport.readSource ? (url: string) => transport.readSource!(url) : undefined,
+      });
+    // The newest report per name: the likeliest instance to still be mounted.
+    const targets = new Map<string, number>();
+    for (const r of state.reports) targets.set(r.minified ?? r.component, r.instanceId);
+    if (!targets.size) {
+      state.nameStatus = { running: false, done: 0, total: 0, message: 'No reports to name yet.' };
+      renderStatus();
+      return;
+    }
+    resolving = true;
+    state.nameStatus = { running: true, done: 0, total: targets.size, message: '' };
+    renderStatus();
+    const reasons = new Map<string, number>();
+    let resolved = 0;
+    let done = 0;
+    for (const [minified, instanceId] of targets) {
+      const out = await resolver.resolve(minified, instanceId);
+      if (out.name) {
+        resolved++;
+        state.names.set(minified, out.name);
+        minifiedOf.set(out.name, minified);
+      } else if (out.reason) reasons.set(out.reason, (reasons.get(out.reason) ?? 0) + 1);
+      state.nameStatus = { running: true, done: ++done, total: targets.size, message: '' };
+      renderStatus();
+    }
+    resolving = false;
+    const message = [`${resolved} of ${targets.size} names resolved`, ...[...reasons].map(([reason, n]) => `${n} ${reason}`)].join('; ');
+    state.nameStatus = { running: false, done, total: targets.size, message };
+    relabelAll();
+    renderStatus();
+  }
+
   // ---------- status / settings ----------
   function renderStatus(): void {
     const lib = state.library;
@@ -2725,15 +2972,38 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       if (state.appId) appPicker.value = state.appId;
     }
     banner.textContent = '';
-    const warnings: string[] = [];
+    const warnings: (string | HTMLElement)[] = [];
     if (lib && typeof lib.protocol === 'number' && lib.protocol > PROTOCOL) warnings.push(`The page runs a newer rerender-lens (protocol ${lib.protocol}) than this panel (${PROTOCOL}). Update the extension.`);
-    if (lib && lib.production) warnings.push('Production React build detected: component names may be minified and hooks are unlabeled. Use a development build.');
+    if (lib && lib.production) warnings.push(productionWarning());
     if (lib && lib.injected && lib.source === 'page')
       warnings.push(`The page runs its own rerender-lens ${lib.library || ''}; the copy injected by the extension stepped aside. Turn injection off for this origin in Settings to avoid loading the library twice.`);
     if (lib && lib.enabled === false) warnings.push('rerender-lens is present but disabled in this page.');
     if (lib && lib.truncated) warnings.push(`${plural(lib.truncated, 'report')} skipped: a commit re-rendered more tracked components than the per-commit cap (200) or took over its time budget. Narrow "include" in Settings, or fix the top offenders first.`);
     banner.hidden = warnings.length === 0;
-    for (const w of warnings) banner.append(el('div', { text: w }));
+    for (const w of warnings) banner.append(typeof w === 'string' ? el('div', { text: w }) : w);
+  }
+
+  /** The production warning, with the on-demand "Resolve names" action and its progress / result. */
+  function productionWarning(): HTMLElement {
+    const line = el('div', { class: 'prod-warning', text: 'Production React build detected: component names may be minified and hooks are unlabeled. Use a development build.' });
+    if (!transport.bridge) return line;
+    const s = state.nameStatus;
+    if (s && s.running) line.append(el('span', { class: 'resolve-status', text: `Resolving names… ${s.done}/${s.total}` }));
+    else {
+      line.append(
+        el(
+          'button',
+          {
+            class: 'resolve-names',
+            title: 'Read the page’s bundle and its source map, and name the minified components',
+            onclick: () => void resolveNames(),
+          },
+          state.names.size ? 'Resolve names again' : 'Resolve names',
+        ),
+      );
+      if (s && s.message) line.append(el('span', { class: 'resolve-status', text: s.message }));
+    }
+    return line;
   }
 
   function setRelay(on: boolean): void {
@@ -2938,6 +3208,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
         state.tabLabel = typeof message.payload === 'string' ? message.payload : null;
         state.origin = transport.origin || null;
         clearAll();
+        forgetNames();
         state.library = null;
         renderStatus();
         break;
@@ -2955,6 +3226,7 @@ function createPanel(root: HTMLElement, transport: Transport, options: PanelOpti
       case 'navigated':
         clearAll();
         if (message.type === 'navigated') {
+          forgetNames(); // another document, another bundle
           state.library = null;
           renderStatus();
         }
@@ -3069,7 +3341,7 @@ function commandBridge(send: (message: { __rerenderLensCmd: true; id: string; cm
 
 // ---------- boot: extension ----------
 /** Calls into the page bridge, expressed as commands so both adapters (eval / scripting) can run them. */
-export type BridgeCommand = 'info' | 'pull' | 'replay' | 'clear' | 'configure' | 'highlight' | 'flash';
+export type BridgeCommand = 'info' | 'pull' | 'replay' | 'clear' | 'configure' | 'highlight' | 'flash' | 'functionSource' | 'fetchText';
 
 /** What a host (DevTools panel, side panel, window) must provide for the shared relay transport. */
 export interface TransportIO {
@@ -3363,6 +3635,7 @@ function createRelayTransport(io: TransportIO): Transport {
   if (io.openResource) transport.openResource = io.openResource;
   if (io.undock) transport.undock = io.undock;
   if (io.readSource) transport.readSource = io.readSource;
+  transport.bridge = <T,>(cmd: BridgeCommand, arg?: unknown) => io.bridge<T>(cmd, arg);
   return transport;
 }
 
@@ -3391,15 +3664,30 @@ function devtoolsIO(): TransportIO {
     configure: (o) => `b.configure(${JSON.stringify(o ?? {})})`,
     highlight: (id) => `b.highlight(${id === null || id === undefined ? 'null' : Number(id)})`,
     flash: (on) => `b.flashAvoidable(${!!on})`,
+    functionSource: (id) => `b.functionSource?b.functionSource(${Number(id) || 0}):null`,
+    // `eval` cannot await, so the page answers with the promise on the first call and with the text on a
+    // later one (`fetchText` caches per URL); `run` below polls until it stops being pending.
+    fetchText: (url) => `(function(){if(!b.fetchText)return null;var r=b.fetchText(${JSON.stringify(String(url ?? ''))});return (r&&typeof r.then==="function")?{__pending:true}:r})()`,
   };
+  const run = <T,>(cmd: BridgeCommand, arg?: unknown): Promise<T | null> =>
+    evalIn<T | null | { __error: string }>(`(function(){var b=window.__RERENDER_LENS_DEVTOOLS__;if(!b)return null;try{return (${expressions[cmd](arg)});}catch(e){return {__error:String(e)}}})()`).then((r) => {
+      if (isRecord(r) && typeof r.__error === 'string') throw new Error(r.__error);
+      return r as T | null;
+    });
   return {
     tabId: () => tabId,
     origin: () => evalIn<string>('location.origin'),
-    bridge: <T,>(cmd: BridgeCommand, arg?: unknown) =>
-      evalIn<T | null | { __error: string }>(`(function(){var b=window.__RERENDER_LENS_DEVTOOLS__;if(!b)return null;try{return (${expressions[cmd](arg)});}catch(e){return {__error:String(e)}}})()`).then((r) => {
-        if (isRecord(r) && typeof r.__error === 'string') throw new Error(r.__error);
-        return r as T | null;
-      }),
+    bridge: <T,>(cmd: BridgeCommand, arg?: unknown): Promise<T | null> => {
+      if (cmd !== 'fetchText') return run<T>(cmd, arg);
+      const deadline = Date.now() + EVAL_FETCH_TIMEOUT;
+      const poll = (): Promise<T | null> =>
+        run<T>(cmd, arg).then((r) => {
+          if (!isRecord(r) || r.__pending !== true) return r;
+          if (Date.now() > deadline) throw new Error(`fetchText timed out: ${String(arg)}`);
+          return new Promise<T | null>((resolve) => setTimeout(() => resolve(poll()), EVAL_FETCH_POLL));
+        });
+      return poll();
+    },
     onNavigated: (cb) => chrome.devtools.network.onNavigated.addListener(cb),
     openResource(url, line, col) {
       if (chrome.devtools.panels.openResource) chrome.devtools.panels.openResource(url, Math.max(0, (line || 1) - 1), Math.max(0, (col || 1) - 1), () => {});
@@ -3440,6 +3728,11 @@ function pageBridgeCommand(cmd: string, arg: unknown): unknown {
       case 'flash':
         b.flashAvoidable?.(arg);
         return true;
+      case 'functionSource':
+        return b.functionSource ? b.functionSource(arg) : null;
+      case 'fetchText':
+        // `executeScript` resolves a returned promise for us.
+        return b.fetchText ? b.fetchText(arg) : null;
     }
   } catch (e) {
     return { __error: String(e) };
@@ -3681,6 +3974,7 @@ function createBroadcastTransport(name: string): Transport {
     flashAvoidable: (on) => bridge('flash', !!on).catch(() => {}),
     storage: localStorageAdapter(`rerender-lens:${name}`),
     readSource: fetchSource,
+    bridge: <T,>(cmd: BridgeCommand, arg?: unknown) => bridge<T>(cmd, arg),
     copy: (text) => navigator.clipboard.writeText(text).catch(() => {}),
   };
   return transport;
@@ -3786,6 +4080,7 @@ function createRelayClientTransport(relayUrl: string, ES: EventSourceCtor = Even
     flashAvoidable: (on) => bridge('flash', !!on).catch(() => {}),
     storage: localStorageAdapter(`rerender-lens:relay:${base}`),
     readSource: fetchSource,
+    bridge: <T,>(cmd: BridgeCommand, arg?: unknown) => bridge<T>(cmd, arg),
     copy: (text) => navigator.clipboard.writeText(text).catch(() => {}),
   };
   return transport;
@@ -3858,6 +4153,7 @@ const api = {
   createRelayTransport,
   createBroadcastTransport,
   createRelayClientTransport,
+  createNameResolver,
   sourceContext,
   analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit, contextAttribution, cascadeTree, rootCauseSummary, summarizeSession, compareSessions },
 };

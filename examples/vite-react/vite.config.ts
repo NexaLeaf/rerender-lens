@@ -12,5 +12,9 @@ export default defineConfig({
   ],
   // Only needed because this example links the library from the repo root.
   resolve: { dedupe: ['react', 'react-dom'] },
+  // A production build of the demo keeps its source maps on purpose: it is what the panel's
+  // "Resolve names" is tried against (`npm run dev:example:prod`).
+  build: { sourcemap: true },
   server: { port: 5199, strictPort: true },
+  preview: { port: 5200, strictPort: true },
 });

@@ -271,6 +271,15 @@ serialized with bounds (100 entries per container, depth 4, 20k nodes per report
   StrictMode's double render is one commit and reports once.
 - Development only: everything runs inside React's commit callback. Production builds are
   detected and flagged (names may be minified).
+- A minified build can be named through its source map, on demand: the panel's production banner
+  has a *Resolve names* button. `Function.prototype.toString()` returns the component's text
+  exactly as it sits in the bundle, so the panel finds it there, turns the offset of the
+  function's identifier into a line and column, and reads the original name out of the bundle's
+  `.map`. It downloads the bundle and the map through the page, which is why it never runs by
+  itself. Two things it cannot name: a function whose identifier the minifier dropped
+  (`memo(function X(){})` usually keeps only its `displayName`, which React already shows), and
+  one whose text occurs more than once in the bundle — those stay minified rather than be guessed
+  at. Resolved components keep the minified name in a tooltip.
 - Fiber fields have been stable since React 16.9; the walk is wrapped so a change in React logs
   one warning instead of breaking the app.
 

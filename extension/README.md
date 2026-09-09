@@ -84,7 +84,11 @@ Local development hosts (`localhost`, `127.0.0.1`, `*.localhost`, `*.local`) are
 Any other origin needs a one-time host permission, requested when you enable it (optional host
 permissions; nothing is granted until you ask).
 
-Production React builds are detected and flagged: names may be minified and hooks unlabeled.
+Production React builds are detected and flagged: names may be minified and hooks unlabeled. The
+banner's *Resolve names* button names them from the bundle's source map (on demand: it downloads
+the bundle and its `.map` through the page). What has no identifier left in the bundle — usually a
+`memo(function X(){})` — or whose code occurs twice stays minified; everything else is re-labelled
+everywhere, with the minified name kept in a tooltip.
 
 ## Install
 

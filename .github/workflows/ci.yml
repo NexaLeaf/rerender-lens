@@ -59,6 +59,8 @@ jobs:
       - run: npm run build
       - run: npx playwright install --with-deps chromium
       - run: npm run e2e
+      - name: A minified production build, named through its source map
+        run: npm run e2e:prod
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

@@ -558,6 +558,155 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
   var summarizeSession = (session, reports) => summarizeReports(reports, session);
   var compareSessions = compareSummaries;
 
+  // src/sourcemap.ts
+  var B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  var CODE = {};
+  for (let i = 0; i < B64.length; i++) CODE[B64[i]] = i;
+  function decodeVlq(text, start = 0) {
+    let result = 0;
+    let shift = 1;
+    let i = start;
+    for (; ; ) {
+      if (i >= text.length) return null;
+      const digit = CODE[text[i]];
+      i++;
+      if (digit === void 0) return null;
+      result += (digit & 31) * shift;
+      if ((digit & 32) === 0) break;
+      shift *= 32;
+    }
+    const negative = result % 2 === 1;
+    const value = Math.floor(result / 2);
+    return { value: negative ? -value : value, next: i };
+  }
+  function decodeSegment(text) {
+    const out = [];
+    let i = 0;
+    while (i < text.length) {
+      const field = decodeVlq(text, i);
+      if (!field) return null;
+      out.push(field.value);
+      i = field.next;
+    }
+    return out.length ? out : null;
+  }
+  function parseSourceMap(input) {
+    let raw;
+    if (typeof input === "string") {
+      try {
+        raw = JSON.parse(input);
+      } catch {
+        return null;
+      }
+    } else raw = input;
+    if (!raw || typeof raw !== "object" || typeof raw.mappings !== "string") return null;
+    const root = typeof raw.sourceRoot === "string" && raw.sourceRoot ? raw.sourceRoot.replace(/\/?$/, "/") : "";
+    const sources = (Array.isArray(raw.sources) ? raw.sources : []).map((s) => typeof s === "string" ? root + s : "");
+    const names = (Array.isArray(raw.names) ? raw.names : []).map((n) => typeof n === "string" ? n : "");
+    const lines = [];
+    let source = 0;
+    let line = 0;
+    let sourceColumn = 0;
+    let name = 0;
+    for (const text of raw.mappings.split(";")) {
+      const segments = [];
+      let column = 0;
+      for (const part of text.split(",")) {
+        if (!part) continue;
+        const fields = decodeSegment(part);
+        if (!fields) continue;
+        column += fields[0];
+        const seg = { column, source: -1, line: -1, sourceColumn: -1, name: -1 };
+        if (fields.length >= 4) {
+          source += fields[1];
+          line += fields[2];
+          sourceColumn += fields[3];
+          seg.source = source;
+          seg.line = line;
+          seg.sourceColumn = sourceColumn;
+          if (fields.length >= 5) {
+            name += fields[4];
+            seg.name = name;
+          }
+        }
+        segments.push(seg);
+      }
+      segments.sort((a, b) => a.column - b.column);
+      lines.push(segments);
+    }
+    return { sources, names, lines };
+  }
+  function lookupPosition(map, line, column) {
+    const segments = map.lines[line];
+    if (!segments || !segments.length) return null;
+    let lo = 0;
+    let hi = segments.length - 1;
+    let found = -1;
+    while (lo <= hi) {
+      const mid = lo + hi >> 1;
+      if (segments[mid].column <= column) {
+        found = mid;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    if (found < 0) return null;
+    const seg = segments[found];
+    return {
+      source: seg.source >= 0 ? map.sources[seg.source] ?? null : null,
+      line: seg.line,
+      column: seg.sourceColumn,
+      name: seg.name >= 0 ? map.names[seg.name] ?? null : null
+    };
+  }
+  function offsetToPosition(text, offset) {
+    const at = Math.max(0, Math.min(offset, text.length));
+    let line = 0;
+    let start = 0;
+    for (let i = text.indexOf("\n"); i !== -1 && i < at; i = text.indexOf("\n", i + 1)) {
+      line++;
+      start = i + 1;
+    }
+    return { line, column: at - start };
+  }
+  function identifierOffset(functionText) {
+    const m = /^\s*(?:async\s+)?(?:function\s*\*?\s*|class\s+)([A-Za-z_$][\w$]*)/.exec(functionText);
+    if (!m || !m[1]) return null;
+    return m[0].length - m[1].length;
+  }
+  function sourceMappingURL(bundleText, bundleUrl) {
+    const re = /[#@]\s*sourceMappingURL=([^\s'"]+)[ \t]*$/gm;
+    let ref = null;
+    for (let m = re.exec(bundleText); m; m = re.exec(bundleText)) ref = m[1] ?? null;
+    if (!ref) return null;
+    if (ref.startsWith("data:")) return ref;
+    if (!bundleUrl) return ref;
+    try {
+      return new URL(ref, bundleUrl).href;
+    } catch {
+      return ref;
+    }
+  }
+  function decodeDataUrl(url) {
+    if (!url.startsWith("data:")) return null;
+    const comma = url.indexOf(",");
+    if (comma < 0) return null;
+    const meta = url.slice(5, comma);
+    const body = url.slice(comma + 1);
+    try {
+      if (/;base64$/i.test(meta)) {
+        const decode = globalThis.atob;
+        if (!decode) return null;
+        const binary = decode(body);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return typeof TextDecoder === "function" ? new TextDecoder().decode(bytes) : binary;
+      }
+      return decodeURIComponent(body);
+    } catch {
+      return null;
+    }
+  }
+
   // extension/src/panel.ts
   var PROTOCOL = 2;
   var FN_PREFIX = "\u0192 ";
@@ -572,6 +721,9 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
   var SYNC_RETRY_MAX = 5e3;
   var SYNC_RETRIES = 20;
   var NAVIGATION_SETTLE = 1200;
+  var EVAL_FETCH_POLL = 120;
+  var EVAL_FETCH_TIMEOUT = 2e4;
+  var MAX_CACHED_BUNDLES = 2;
   var INFO_REFRESH_MS = 3e3;
   var ROW_H = 22;
   var ITEM_H = 20;
@@ -996,10 +1148,78 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       }
     };
   }
+  function createNameResolver(io) {
+    const done = /* @__PURE__ */ new Map();
+    const bundles = /* @__PURE__ */ new Map();
+    const maps = /* @__PURE__ */ new Map();
+    const cap = (m) => {
+      for (const k of m.keys()) {
+        if (m.size <= MAX_CACHED_BUNDLES) break;
+        m.delete(k);
+      }
+    };
+    const read = (url) => io.bridge("fetchText", url).catch(() => null);
+    const textOf = async (url) => {
+      const hit = bundles.get(url);
+      if (hit !== void 0) return hit;
+      let text = io.readSource ? await io.readSource(url).catch(() => null) : null;
+      if (!text) text = await read(url);
+      bundles.set(url, text);
+      cap(bundles);
+      return text;
+    };
+    const mapFor = async (url, text) => {
+      const hit = maps.get(url);
+      if (hit !== void 0) return hit;
+      const ref = sourceMappingURL(text, url);
+      const json = !ref ? null : ref.startsWith("data:") ? decodeDataUrl(ref) : await read(ref);
+      const parsed = json ? parseSourceMap(json) : null;
+      maps.set(url, parsed);
+      cap(maps);
+      return parsed;
+    };
+    const record = (r) => {
+      done.set(r.minified, r);
+      return r;
+    };
+    return {
+      async resolve(minified, instanceId) {
+        const cached = done.get(minified);
+        if (cached) return cached;
+        const fn = await io.bridge("functionSource", instanceId).catch(() => null);
+        if (!fn || typeof fn.text !== "string" || !fn.text) return record({ minified, name: null, reason: "are no longer in the page" });
+        const offset = identifierOffset(fn.text);
+        if (offset === null) return record({ minified, name: null, reason: "have no identifier in the bundle" });
+        const scripts = io.scripts();
+        if (!scripts.length) return record({ minified, name: null, reason: "could not be looked up (the page reported no scripts)" });
+        for (const url of scripts) {
+          const text = await textOf(url);
+          if (!text) continue;
+          const at = text.indexOf(fn.text);
+          if (at < 0) continue;
+          if (text.lastIndexOf(fn.text) !== at) return record({ minified, name: null, reason: "occur more than once in the bundle" });
+          const map = await mapFor(url, text);
+          if (!map) return record({ minified, name: null, reason: "are in a bundle with no source map" });
+          const pos = offsetToPosition(text, at + offset);
+          const original = lookupPosition(map, pos.line, pos.column);
+          if (!original || !original.name) return record({ minified, name: null, source: original?.source ?? null, reason: "have no name in the source map" });
+          return record({ minified, name: original.name, source: original.source });
+        }
+        return record({ minified, name: null, reason: "were not found in the page scripts" });
+      },
+      clear() {
+        done.clear();
+        bundles.clear();
+        maps.clear();
+      }
+    };
+  }
   function createPanel(root, transport, options = {}) {
     const state = {
       tree: { name: "", children: /* @__PURE__ */ new Map(), reports: [], total: 0, avoidable: 0, wasted: 0, expanded: true, path: [], key: "" },
       nodesByKey: /* @__PURE__ */ new Map(),
+      names: /* @__PURE__ */ new Map(),
+      nameStatus: null,
       reports: [],
       commits: /* @__PURE__ */ new Map(),
       commitOrder: [],
@@ -1555,6 +1775,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       }
     }
     function enqueue(report) {
+      applyNames(report);
       queue.push(report);
       if (!flushScheduled) {
         flushScheduled = true;
@@ -1955,7 +2176,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           })
         );
         created.append(
-          el("span", { class: "tag" }, [el("span", { class: "bracket", text: "<" }), el("span", { class: "name", text: node.name }), el("span", { class: "bracket", text: ">" })])
+          el("span", { class: "tag" }, [el("span", { class: "bracket", text: "<" }), el("span", { class: "name", text: node.name, title: nameTitle(node.name) }), el("span", { class: "bracket", text: ">" })])
         );
         created.append(el("span", { class: "badges" }));
         rowEls.set(node.key, created);
@@ -2107,7 +2328,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           }
         },
         [
-          el("td", { class: "c" }, [el("span", { class: "name", text: o.component }), o.paths.size > 1 ? el("span", { class: "meta", text: ` \xD7${o.paths.size} places` }) : null]),
+          el("td", { class: "c" }, [el("span", { class: "name", text: o.component, title: nameTitle(o.component) }), o.paths.size > 1 ? el("span", { class: "meta", text: ` \xD7${o.paths.size} places` }) : null]),
           el("td", { class: "num" }, o.avoidable ? el("span", { class: "badge avoid", text: String(o.avoidable) }) : "0"),
           el("td", { class: "num", text: String(o.total) }),
           el("td", { class: "num", text: o.wasted ? fmtMs(o.wasted) : "" }),
@@ -2259,7 +2480,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         return;
       }
       const header = el("div", { class: "details-header" }, [
-        el("span", { class: "title" }, [el("span", { class: "bracket", text: "<" }), el("span", { class: "name", text: node.name }), el("span", { class: "bracket", text: ">" })]),
+        el("span", { class: "title" }, [el("span", { class: "bracket", text: "<" }), el("span", { class: "name", text: node.name, title: nameTitle(node.name) }), el("span", { class: "bracket", text: ">" })]),
         el("span", { class: "meta", text: `${plural(node.total, "re-render")}, ${node.avoidable} avoidable${node.wasted ? ", " + fmtMs(node.wasted) + " wasted" : ""}` }),
         el("span", { class: "tabs" }, [
           tabButton("latest", "Report", () => {
@@ -2620,13 +2841,13 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         body.append(el("div", { class: "section" }, [el("h3", { text: "Fixes suggested" }), el("ol", { class: "fix-list" }, summary2.fixes.slice(0, 10).map((f) => el("li", null, [el("span", { class: "badge avoid", text: String(f.count) }), " ", el("span", { class: "mono", text: f.label })])))]));
       }
     }
-    const itemEls = /* @__PURE__ */ new WeakMap();
+    let itemEls = /* @__PURE__ */ new WeakMap();
     const streamItems = virtualList(streamList, ITEM_H, (r) => {
       let li = itemEls.get(r);
       if (!li) {
         li = el("div", { class: "stream-item", onclick: () => select(nodeOfReport(r), r) }, [
           el("span", { class: "t", text: fmtTime(r.receivedAt) }),
-          el("span", { class: "c", text: r.component }),
+          el("span", { class: "c", text: r.component, title: r.minified ? `minified as ${r.minified}` : void 0 }),
           el("span", { class: "v " + (r.avoidable ? "avoid" : "ok"), text: r.avoidable ? "avoidable" : r.trigger }),
           el("span", { class: "s", text: summarize(r) })
         ]);
@@ -2697,6 +2918,94 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       };
       reader.readAsText(file);
     }
+    const minifiedOf = /* @__PURE__ */ new Map();
+    let resolver = null;
+    let resolving = false;
+    const nameTitle = (name) => {
+      const min = minifiedOf.get(name);
+      return min ? `minified as ${min}` : void 0;
+    };
+    function applyNames(r) {
+      if (!state.names.size) return;
+      const map = (n) => state.names.get(n) ?? n;
+      if (!r.minified) {
+        const original = state.names.get(r.component);
+        if (original) {
+          r.minified = r.component;
+          r.component = original;
+        }
+      }
+      if (r.owner) r.owner = map(r.owner);
+      if (r.parent) r.parent = { ...r.parent, name: map(r.parent.name) };
+      if (r.path.length) r.path = r.path.map(map);
+      if (r.updaters) r.updaters = r.updaters.map(map);
+      for (const c of r.propChanges.concat(r.stateChanges, r.hookChanges)) {
+        if (c.provider && c.provider.component) c.provider = { component: map(c.provider.component), path: c.provider.path.map(map) };
+      }
+    }
+    function relabelAll() {
+      for (const r of state.reports) applyNames(r);
+      const per = /* @__PURE__ */ new Map();
+      for (const [k, v] of totals.perComponent) {
+        const name = state.names.get(k) ?? k;
+        per.set(name, (per.get(name) ?? 0) + v);
+      }
+      totals.perComponent.clear();
+      for (const [k, v] of per) totals.perComponent.set(k, v);
+      commitAnalyses.clear();
+      itemEls = /* @__PURE__ */ new WeakMap();
+      bestFix = void 0;
+      bestFixAt = 0;
+      bestFixGen = -1;
+      dataGen++;
+      rebuildTree();
+      renderStream();
+    }
+    function forgetNames() {
+      state.names.clear();
+      minifiedOf.clear();
+      resolver?.clear();
+      resolver = null;
+      state.nameStatus = null;
+    }
+    async function resolveNames() {
+      const call = transport.bridge;
+      if (resolving || !call) return;
+      if (!resolver)
+        resolver = createNameResolver({
+          bridge: (cmd, arg) => call.call(transport, cmd, arg),
+          scripts: () => state.library?.scripts ?? [],
+          readSource: transport.readSource ? (url) => transport.readSource(url) : void 0
+        });
+      const targets = /* @__PURE__ */ new Map();
+      for (const r of state.reports) targets.set(r.minified ?? r.component, r.instanceId);
+      if (!targets.size) {
+        state.nameStatus = { running: false, done: 0, total: 0, message: "No reports to name yet." };
+        renderStatus();
+        return;
+      }
+      resolving = true;
+      state.nameStatus = { running: true, done: 0, total: targets.size, message: "" };
+      renderStatus();
+      const reasons = /* @__PURE__ */ new Map();
+      let resolved = 0;
+      let done = 0;
+      for (const [minified, instanceId] of targets) {
+        const out = await resolver.resolve(minified, instanceId);
+        if (out.name) {
+          resolved++;
+          state.names.set(minified, out.name);
+          minifiedOf.set(out.name, minified);
+        } else if (out.reason) reasons.set(out.reason, (reasons.get(out.reason) ?? 0) + 1);
+        state.nameStatus = { running: true, done: ++done, total: targets.size, message: "" };
+        renderStatus();
+      }
+      resolving = false;
+      const message = [`${resolved} of ${targets.size} names resolved`, ...[...reasons].map(([reason, n]) => `${n} ${reason}`)].join("; ");
+      state.nameStatus = { running: false, done, total: targets.size, message };
+      relabelAll();
+      renderStatus();
+    }
     function renderStatus() {
       const lib = state.library;
       let text;
@@ -2734,13 +3043,34 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       banner.textContent = "";
       const warnings = [];
       if (lib && typeof lib.protocol === "number" && lib.protocol > PROTOCOL) warnings.push(`The page runs a newer rerender-lens (protocol ${lib.protocol}) than this panel (${PROTOCOL}). Update the extension.`);
-      if (lib && lib.production) warnings.push("Production React build detected: component names may be minified and hooks are unlabeled. Use a development build.");
+      if (lib && lib.production) warnings.push(productionWarning());
       if (lib && lib.injected && lib.source === "page")
         warnings.push(`The page runs its own rerender-lens ${lib.library || ""}; the copy injected by the extension stepped aside. Turn injection off for this origin in Settings to avoid loading the library twice.`);
       if (lib && lib.enabled === false) warnings.push("rerender-lens is present but disabled in this page.");
       if (lib && lib.truncated) warnings.push(`${plural(lib.truncated, "report")} skipped: a commit re-rendered more tracked components than the per-commit cap (200) or took over its time budget. Narrow "include" in Settings, or fix the top offenders first.`);
       banner.hidden = warnings.length === 0;
-      for (const w of warnings) banner.append(el("div", { text: w }));
+      for (const w of warnings) banner.append(typeof w === "string" ? el("div", { text: w }) : w);
+    }
+    function productionWarning() {
+      const line = el("div", { class: "prod-warning", text: "Production React build detected: component names may be minified and hooks are unlabeled. Use a development build." });
+      if (!transport.bridge) return line;
+      const s = state.nameStatus;
+      if (s && s.running) line.append(el("span", { class: "resolve-status", text: `Resolving names\u2026 ${s.done}/${s.total}` }));
+      else {
+        line.append(
+          el(
+            "button",
+            {
+              class: "resolve-names",
+              title: "Read the page\u2019s bundle and its source map, and name the minified components",
+              onclick: () => void resolveNames()
+            },
+            state.names.size ? "Resolve names again" : "Resolve names"
+          )
+        );
+        if (s && s.message) line.append(el("span", { class: "resolve-status", text: s.message }));
+      }
+      return line;
     }
     function setRelay(on) {
       state.relay = on;
@@ -2925,6 +3255,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
           state.tabLabel = typeof message.payload === "string" ? message.payload : null;
           state.origin = transport.origin || null;
           clearAll();
+          forgetNames();
           state.library = null;
           renderStatus();
           break;
@@ -2942,6 +3273,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         case "navigated":
           clearAll();
           if (message.type === "navigated") {
+            forgetNames();
             state.library = null;
             renderStatus();
           }
@@ -3286,6 +3618,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     if (io.openResource) transport.openResource = io.openResource;
     if (io.undock) transport.undock = io.undock;
     if (io.readSource) transport.readSource = io.readSource;
+    transport.bridge = (cmd, arg) => io.bridge(cmd, arg);
     return transport;
   }
   function devtoolsIO() {
@@ -3303,15 +3636,29 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       clear: () => "b.clear()",
       configure: (o) => `b.configure(${JSON.stringify(o ?? {})})`,
       highlight: (id) => `b.highlight(${id === null || id === void 0 ? "null" : Number(id)})`,
-      flash: (on) => `b.flashAvoidable(${!!on})`
+      flash: (on) => `b.flashAvoidable(${!!on})`,
+      functionSource: (id) => `b.functionSource?b.functionSource(${Number(id) || 0}):null`,
+      // `eval` cannot await, so the page answers with the promise on the first call and with the text on a
+      // later one (`fetchText` caches per URL); `run` below polls until it stops being pending.
+      fetchText: (url) => `(function(){if(!b.fetchText)return null;var r=b.fetchText(${JSON.stringify(String(url ?? ""))});return (r&&typeof r.then==="function")?{__pending:true}:r})()`
     };
+    const run = (cmd, arg) => evalIn(`(function(){var b=window.__RERENDER_LENS_DEVTOOLS__;if(!b)return null;try{return (${expressions[cmd](arg)});}catch(e){return {__error:String(e)}}})()`).then((r) => {
+      if (isRecord(r) && typeof r.__error === "string") throw new Error(r.__error);
+      return r;
+    });
     return {
       tabId: () => tabId,
       origin: () => evalIn("location.origin"),
-      bridge: (cmd, arg) => evalIn(`(function(){var b=window.__RERENDER_LENS_DEVTOOLS__;if(!b)return null;try{return (${expressions[cmd](arg)});}catch(e){return {__error:String(e)}}})()`).then((r) => {
-        if (isRecord(r) && typeof r.__error === "string") throw new Error(r.__error);
-        return r;
-      }),
+      bridge: (cmd, arg) => {
+        if (cmd !== "fetchText") return run(cmd, arg);
+        const deadline = Date.now() + EVAL_FETCH_TIMEOUT;
+        const poll = () => run(cmd, arg).then((r) => {
+          if (!isRecord(r) || r.__pending !== true) return r;
+          if (Date.now() > deadline) throw new Error(`fetchText timed out: ${String(arg)}`);
+          return new Promise((resolve) => setTimeout(() => resolve(poll()), EVAL_FETCH_POLL));
+        });
+        return poll();
+      },
       onNavigated: (cb) => chrome.devtools.network.onNavigated.addListener(cb),
       openResource(url, line, col) {
         if (chrome.devtools.panels.openResource) chrome.devtools.panels.openResource(url, Math.max(0, (line || 1) - 1), Math.max(0, (col || 1) - 1), () => {
@@ -3350,6 +3697,10 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
         case "flash":
           b.flashAvoidable?.(arg);
           return true;
+        case "functionSource":
+          return b.functionSource ? b.functionSource(arg) : null;
+        case "fetchText":
+          return b.fetchText ? b.fetchText(arg) : null;
       }
     } catch (e) {
       return { __error: String(e) };
@@ -3625,6 +3976,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       }),
       storage: localStorageAdapter(`rerender-lens:${name}`),
       readSource: fetchSource,
+      bridge: (cmd, arg) => bridge(cmd, arg),
       copy: (text) => navigator.clipboard.writeText(text).catch(() => {
       })
     };
@@ -3716,6 +4068,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       }),
       storage: localStorageAdapter(`rerender-lens:relay:${base}`),
       readSource: fetchSource,
+      bridge: (cmd, arg) => bridge(cmd, arg),
       copy: (text) => navigator.clipboard.writeText(text).catch(() => {
       })
     };
@@ -3789,6 +4142,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     createRelayTransport,
     createBroadcastTransport,
     createRelayClientTransport,
+    createNameResolver,
     sourceContext,
     analysis: { firstDifferentPath, diffLeaves, fixesFor, rankFixes, rootCauseOf, analyzeCommit: analyzeCommit2, contextAttribution, cascadeTree, rootCauseSummary: rootCauseSummary2, summarizeSession, compareSessions }
   };

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- Fix: the relay client posted every batch with `keepalive`, which the Fetch standard caps at 64 KB
+  of body and fails the request over, silently. Anything larger never reached the panel: a source
+  map, or a batch of reports carrying large props. Only small batches use it now, so an unloading
+  page still flushes its last reports.
+- Fix: `installRerenderLens(page, ...)` did not typecheck against a current Playwright `Page`,
+  which returns a disposable from `addInitScript` where it used to return nothing. The documented
+  snippet compiles again.
+- `npm run e2e:prod` drives the whole production path in Chromium: the example built by
+  `vite build` with source maps, served by `vite preview`, the library injected, the relay panel
+  resolving `ed` and `fd` back to `Row` and `App`. It runs in CI. The example's own build script
+  also typechecks again (it was missing the `vite/client` reference for `import.meta.env`).
+- **Minified production builds can be named.** The panel's production banner has a *Resolve names*
+  button: for every component in the buffer it takes the function's own source text from the page
+  (`functionSource`, a new bridge command), finds it in the bundle, and reads the original
+  identifier out of the bundle's source map, then re-labels the tree, Offenders, Fixes, Commits
+  and the stream, keeping the minified name in a tooltip. The bundle and the `.map` are read
+  through the page (`fetchText`, same-origin only, no credentials, 8 MB cap), so it only runs when
+  you ask. A component whose identifier the minifier dropped (`memo(function X(){})`) or whose
+  code occurs twice in the bundle is reported as unresolved rather than guessed at.
+
 ## 0.7.0
 
 Highlights: verdicts pinned for modern React (Compiler output, `use()`, transitions, Suspense),

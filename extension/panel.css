@@ -170,6 +170,8 @@ button.ib.active .glyph { color: var(--accent); }
 .banner div { padding-left: 16px; position: relative; }
 .banner div::before { content: "!"; position: absolute; left: 2px; top: 0; font-weight: 700; color: var(--warn); }
 .banner div + div { margin-top: 3px; }
+.banner button.resolve-names { height: 18px; margin-left: 8px; padding: 0 8px; border: 1px solid var(--border); border-radius: 9px; font-size: 10px; vertical-align: baseline; }
+.banner .resolve-status { margin-left: 8px; color: var(--text-dim); }
 .hidden-file { display: none; }
 .toast {
   position: fixed; right: 12px; bottom: 12px; z-index: 10; pointer-events: none;

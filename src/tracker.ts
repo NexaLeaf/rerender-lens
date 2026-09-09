@@ -26,6 +26,20 @@ const isPureClass = (t: unknown): boolean =>
   isClass(t) && !!((t as { prototype: { isPureReactComponent?: unknown } }).prototype).isPureReactComponent;
 const isComponentLike = (t: unknown): boolean => typeof t === 'function' || isMemo(t) || isForwardRef(t);
 
+/**
+ * The function the bundler actually compiled: `memo(X)` / `forwardRef(X)` (and nestings of the two)
+ * unwrapped to `X`. Anything else is returned untouched.
+ */
+export function unwrapComponent(type: unknown): unknown {
+  let t = type;
+  for (let i = 0; i < 5; i++) {
+    if (isMemo(t)) t = t.type;
+    else if (isForwardRef(t)) t = t.render;
+    else break;
+  }
+  return t;
+}
+
 export function getDisplayName(type: unknown): string {
   if (typeof type === 'string') return type;
   if (isMemo(type)) return type.displayName ?? getDisplayName(type.type);
