@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **The docs site is a product page.** A landing page that answers "how do I start with my
+  bundler" (Vite, Next.js, Webpack, any app through the relay, the extension, tests) with the
+  snippets lifted straight out of the README so they cannot drift, the README as the guide, the
+  extension guide, a generated API reference for every entry point, and a hosted copy of the panel
+  running its demo data so you can click around before installing anything. A published release
+  recaptures the screenshots before building, so they never show an old panel.
 - **Several apps on one relay.** `npx rerender-lens panel` now gives each connected app an id and a
   label (its address), tells the app its id so what it posts is stamped, and sends panels the
   roster. The panel shows a picker when more than one app is connected, watches one at a time and

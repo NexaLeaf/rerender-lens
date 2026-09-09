@@ -2,8 +2,16 @@ name: Docs
 on:
   push:
     branches: [main]
-    paths: ['README.md', 'extension/README.md', 'docs/**', 'scripts/build-docs.mjs', 'package.json', '.github/workflows/pages.yml']
+    paths: ['README.md', 'extension/README.md', 'docs/**', 'scripts/*docs*.mjs', 'extension/src/panel.ts', 'package.json', '.github/workflows/pages.yml']
+  # A release rebuilds the site with freshly captured screenshots, so they never show an old panel.
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      capture:
+        description: Recapture the screenshots before building
+        type: boolean
+        default: false
 permissions:
   contents: read
   pages: write
@@ -23,6 +31,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Fresh screenshots (releases only)
+        if: github.event_name == 'release' || inputs.capture
+        run: |
+          npm run build
+          npx playwright install --with-deps chromium
+          npm run docs:media
       - run: npm run build:docs
       - uses: actions/upload-pages-artifact@v3
         with:
