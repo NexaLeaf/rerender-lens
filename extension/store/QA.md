@@ -42,3 +42,24 @@ injection, deferred injection, the panel page, the side-panel page). What no tes
 - [ ] Edge: `edge://extensions` → load `dist-extension/edge` → same checks as Chrome DevTools.
 - [ ] Firefox 128+: `web-ext run --source-dir dist-extension/firefox` → DevTools tab, sidebar
       (View → Sidebar → rerender-lens), popup enable flow. `npx web-ext lint` must be clean (CI runs it).
+
+## Scale and cost
+
+- [ ] `http://localhost:5199/scale.html?rows=3000` with injection on: click *Re-render everything*
+      three times; the page stays responsive, the readout shows the worst commit well under 100 ms,
+      the panel banner says how many reports the per-commit cap skipped, and the status tooltip's
+      overhead numbers update within a few seconds without reopening the panel.
+- [ ] Injected default: Settings shows *Include state* off; turning it on shows Hooks / State /
+      Contexts on the next reports.
+
+## Relay panel (no extension)
+
+- [ ] `npx rerender-lens panel` prints a URL; `npm --prefix examples/next run dev` (after
+      `npm --prefix examples/next install`), open `http://localhost:3005/`, then the printed URL:
+      status `connected`, tab chip `relay 127.0.0.1:4141`, reports after a click, hover highlights
+      in the app, Settings apply. Reload the app: the panel re-attaches on its own.
+
+## Help
+
+- [ ] Settings → Help → *Report a problem* opens a GitHub issue prefilled with the extension and
+      library versions, React version, options, overhead and buffer counts, and nothing from the page.

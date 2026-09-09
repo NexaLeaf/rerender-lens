@@ -324,6 +324,7 @@ details.obj pre { margin: 4px 0 0 12px; font: 11px/1.4 var(--mono); white-space:
 .opt input[type="text"], .opt input[type="number"] { height: 24px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--bg); color: inherit; font: inherit; }
 .opt input[type="text"]:focus, .opt input[type="number"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-bg); }
 .drawer .meta { color: var(--text-dim); margin-top: 4px; }
+.drawer .report-link { display: inline-block; margin-top: 8px; font-weight: 600; }
 
 /* ---------- sessions, compare, commit priority ---------- */
 button.ib.rec .glyph { color: var(--danger); animation: blink 1.2s ease-in-out infinite; }

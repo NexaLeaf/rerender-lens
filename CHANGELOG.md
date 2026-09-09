@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **Report a problem** in the panel's Settings drawer: opens a GitHub issue prefilled with the
+  extension and library versions, React version, options, overhead, the truncation count and the
+  buffer totals, and nothing from the page. `extension/store/QA.md` gains the scale, relay and
+  help checks.
+- **Verdicts on modern React.** A fixture matrix (`test/modern.test.ts`, and `/modern.html` in the
+  example) pins the verdict for React Compiler output, `use(promise)`, `startTransition`, Suspense
+  fallback → content, `useSyncExternalStore` selectors, render props, `forwardRef` + `memo` refs,
+  classes with `shouldComponentUpdate`, `useDeferredValue` and `useId`; the README gains the table
+  "What counts as avoidable". Fixes that came out of it: components compiled by React Compiler carry
+  `compiled: true` (detected from the `useMemoCache` slots on the fiber) and a parent-triggered render
+  with identical props is no longer avoidable (the output is memoized; nothing to fix); content
+  re-rendered because a Suspense boundary above it resolved is explained instead of flagged; a new
+  `ref` object per render is reported as `deep-equal` on `ref` with `useRef` advice instead of a
+  spurious `ref.current` change; the deferred second render of `useDeferredValue` is a `hooks` render
+  (dev builds) rather than an avoidable parent render, and never counts as an effect → setState loop;
+  class components get PureComponent / `shouldComponentUpdate` advice instead of `React.memo`. The
+  panel shows the compiled flag.
+
 ## 0.5.0
 
 Highlights: root causes in the CLI and test reporters, React 18 in CI, Next.js verified end to

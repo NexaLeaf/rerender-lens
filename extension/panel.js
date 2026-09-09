@@ -633,6 +633,7 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     if (typeof p.selfDuration === "number") r.selfDuration = p.selfDuration;
     if (typeof p.treeDuration === "number") r.treeDuration = p.treeDuration;
     if (typeof p.memoized === "boolean") r.memoized = p.memoized;
+    if (p.compiled === true) r.compiled = true;
     if (typeof p.commitPriority === "string") r.commitPriority = p.commitPriority;
     if (Array.isArray(p.hookState)) r.hookState = p.hookState.filter((h) => isRecord(h) && typeof h.path === "string");
     if (Array.isArray(p.contexts)) r.contexts = p.contexts.filter((c) => isRecord(c) && typeof c.name === "string");
@@ -855,7 +856,8 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
     if (r.parent) by.append(el("div", { text: `Triggered by <${r.parent.name}> (${r.parent.trigger})` }));
     else by.append(el("div", { text: "Update started in this component" }));
     if (r.owner) by.append(el("div", { class: "meta", text: `Created by <${r.owner}>` }));
-    if (r.memoized === false) by.append(el("div", { class: "meta", text: "Not memoized (re-renders whenever its parent does)" }));
+    if (r.compiled) by.append(el("div", { class: "meta", text: "Compiled by React Compiler (output memoized per input; identical inputs make the render cheap)" }));
+    else if (r.memoized === false) by.append(el("div", { class: "meta", text: "Not memoized (re-renders whenever its parent does)" }));
     else if (r.memoized === true) by.append(el("div", { class: "meta", text: "Memoized (React.memo / PureComponent)" }));
     if (r.updaters && r.updaters.length) by.append(el("div", { text: `Update scheduled by ${r.updaters.map((u) => `<${u}>`).join(", ")}` }));
     if (r.commitCause === "effect-after-commit") by.append(el("div", { class: "cause effect", text: `Effect loop: state set right after commit #${r.afterCommit ?? "?"}` }));
@@ -2579,6 +2581,33 @@ setState((prev) => (deepEqual(prev, next) ? prev : next));`
       const max = el("input", { type: "number", min: "0", value: String(current.maxReportsPerComponent || 0) });
       max.addEventListener("change", () => void applyOptions({ maxReportsPerComponent: Math.max(0, Number(max.value) || 0) }));
       sec.append(el("label", { class: "opt col" }, ["Stop printing a component after N reports (0 = never)", max]));
+      const help = el("div", { class: "section" }, [el("h3", { text: "Help" })]);
+      help.append(
+        el("div", { class: "meta", text: "Opens a GitHub issue prefilled with versions, options and counts. No report contents are included; attach an Export if it helps." }),
+        el("a", { class: "report-link", href: issueUrl(), target: "_blank", rel: "noreferrer", text: "Report a problem \u2197" })
+      );
+      body.append(help);
+    }
+    function issueUrl() {
+      const lib = state.library;
+      const ext = typeof chrome !== "undefined" && chrome.runtime && typeof chrome.runtime.getManifest === "function" ? chrome.runtime.getManifest().version : "n/a";
+      const react = lib?.react?.map((r) => `${r.version || "?"}${r.bundleType === 0 ? " (prod)" : ""}`).join(", ") || "not detected";
+      const transportLabel = state.tabLabel || (state.relay ? "content script" : state.polling ? "polling" : "none");
+      const lines = [
+        "### What happened",
+        "",
+        "(what you did, what you expected, what the panel showed)",
+        "",
+        "### Environment",
+        `- extension ${ext}, panel protocol ${PROTOCOL}, transport: ${transportLabel}`,
+        `- library ${lib?.library || "not detected"} (protocol ${lib?.protocol ?? "?"}), React ${react}${lib?.production ? ", production build" : ""}`,
+        `- options: ${JSON.stringify(lib?.options || {})}`,
+        `- overhead: ${lib?.overhead ? `${lib.overhead.totalMs.toFixed(1)} ms over ${lib.commits ?? 0} commits, worst ${lib.overhead.maxCommitMs.toFixed(1)} ms` : "n/a"}; reports skipped by the cap: ${lib?.truncated ?? 0}`,
+        `- buffered: ${state.reports.length} reports, ${totals.avoidable} avoidable; top fix: ${bestFix ? bestFix.label : "none"}`,
+        `- browser: ${typeof navigator !== "undefined" ? navigator.userAgent : "n/a"}`
+      ];
+      const params2 = new URLSearchParams({ title: "Panel: ", body: lines.join("\n"), labels: "bug" });
+      return `https://github.com/NexaLeaf/rerender-lens/issues/new?${params2.toString()}`;
     }
     function handle(message) {
       if (!isRecord(message)) return;

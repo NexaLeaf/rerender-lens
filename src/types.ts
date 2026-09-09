@@ -35,7 +35,7 @@ export type RenderTrigger =
   | 'mixed';
 
 export interface HookChange extends Change {
-  /** `useState`, `useReducer`, `useContext`, `useSyncExternalStore`, or `state` when the exact hook is unknown. */
+  /** `useState`, `useReducer`, `useContext`, `useSyncExternalStore`, `useDeferredValue` (dev builds), or `state` when the exact hook is unknown. */
   hook: string;
   /** Position of the hook in call order (0-based). */
   index: number;
@@ -124,6 +124,12 @@ export interface RenderReport {
   path: string[];
   /** True for `React.memo` components and `PureComponent` classes: props alone decide whether they re-render. */
   memoized: boolean;
+  /**
+   * True when React Compiler compiled the component (its fiber carries a `useMemoCache` cache). React still
+   * calls it when the parent renders, but its output is memoized per input, so a `parent` render with
+   * identical props is cheap and not reported as avoidable.
+   */
+  compiled?: boolean;
   /** Time spent in this component's own render (children excluded), in ms, when React exposes it (dev/profiling builds). */
   selfDuration?: number;
   /** Time spent rendering this component and everything below it that rendered in the same commit, in ms. */
@@ -159,6 +165,7 @@ export interface ReportLike {
   avoidable: boolean;
   trigger: string;
   memoized?: boolean;
+  compiled?: boolean;
   propChanges: ChangeLike[];
   stateChanges: ChangeLike[];
   hookChanges: ChangeLike[];

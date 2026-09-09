@@ -164,6 +164,28 @@ Every re-render of a tracked component is a `RenderReport`. The fields you will 
 A `parent` trigger with no changes means identical props and an ancestor re-rendered: wrap the
 component in `React.memo`.
 
+## What counts as avoidable
+
+`avoidable` is true when the render produced no genuine change in props, state or hooks *and*
+nothing about the situation explains the render away. The rules, on the shapes modern apps produce
+(each row is a test in `test/modern.test.ts` and a card on the example's `/modern.html`):
+
+| Situation | Verdict | Why / fix |
+| --- | --- | --- |
+| Parent re-rendered, identical props, plain function or class component | avoidable, `parent` | wrap in `React.memo`; classes: extend `PureComponent` or implement `shouldComponentUpdate` |
+| Same, but the component is compiled by React Compiler (`compiled: true`) | **not avoidable** | React still calls it, but its output comes from the memo cache and the render is cheap; a compiled app re-renders every component on a parent update and flagging them all would be noise. A new-but-equal prop (`deep-equal`, `function`, `element`) still misses the cache and stays avoidable, with the upstream fix and no `React.memo` advice |
+| `memo` / `PureComponent` / `shouldComponentUpdate → false` with equal props | no report | React bailed out; the component never rendered |
+| Inline object, array or element prop (`deep-equal`, `element`) | avoidable | `useMemo`, hoist constants, pass static elements as `children` from a stable parent |
+| Inline callback or render prop (`function`), e.g. `renderItem={(x) => …}` on a memo list | avoidable | `useCallback` or hoist it. **Limitation:** functions are compared by name and source, so a new closure with the same text that captures a *changed* value is still `function` and counted as avoidable, even though its output differs |
+| `ref` is a new `{ current }` object on every render (React 19 keeps `ref` in props; forwardRef and memo see it) | avoidable, `deep-equal` on `ref` | `useRef` (or `createRef` outside the render); `.current` is ignored because React mutates it when it re-attaches the ref. An inline callback ref is `function`: `useCallback` |
+| `useSyncExternalStore` / store selector returning a new object with equal contents | avoidable, hook `deep-equal` | store-specific advice: return a stored slice, `shallowEqual` / `createSelector` (Redux), `useShallow` (Zustand), or cache the snapshot. A selector returning a primitive does not render at all |
+| `useState`/`setState` with a value deep-equal to the current one | avoidable | reuse the existing object or bail out before calling the setter |
+| A genuine prop, state, context or store change | not avoidable (`props` / `state` / `hooks` / `mixed`) | the change is listed with its path |
+| `startTransition(() => setState(…))` | parent: `state` at `commitPriority: 'normal'`, not avoidable; memo children with equal props: no report | nothing to fix |
+| Content revealed by a Suspense boundary (`use(promise)` resolved, `React.lazy` loaded) | **not avoidable**, `commitCause: 'suspense-resolved'` | React re-renders the content it kept hidden while the fallback was shown; the component that suspended has a genuinely new promise (`props`). Components outside the boundary in the same commit keep the usual verdict |
+| The deferred second render of `useDeferredValue` (dev builds) | not avoidable, `hooks` with a `useDeferredValue` change | React's catch-up render; it is also never mistaken for an effect → setState loop. `useId` and a stable deferred input add no hook changes |
+| Mount, StrictMode's double render, a Fast Refresh commit | no report | never reported (StrictMode is one commit) |
+
 ## Options
 
 | Option | Default | |

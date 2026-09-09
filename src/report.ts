@@ -20,6 +20,12 @@ export interface BuildInput {
   path?: string[];
   /** Default true: `useWhyRerender` and the console output assume the component decides on props alone. */
   memoized?: boolean;
+  /** The component was compiled by React Compiler (its output is memoized per input). */
+  compiled?: boolean;
+  /** A class component: the memoization advice names PureComponent / shouldComponentUpdate instead of React.memo. */
+  classComponent?: boolean;
+  /** The component sits under a Suspense boundary that switched from its fallback to content in this commit. */
+  revealed?: boolean;
   selfDuration?: number;
   treeDuration?: number;
   commitId?: number;
@@ -51,11 +57,14 @@ const isGenuine = (c: Change): boolean => c.kind === 'different' || c.kind === '
 
 /** `children` re-created in the parent's render: the classic memo-defeater, with its own advice. */
 const isChildren = (change: Change): boolean => change.path === 'children';
+/** A ref object (`{ current }`) created anew on every render of the parent (React 19 passes `ref` as a prop). */
+const isRefObject = (change: Change): boolean => change.path === 'ref' && change.kind === 'deep-equal';
 
 export function fixFor(change: Change): string {
   if (isChildren(change) && (change.kind === 'element' || change.kind === 'deep-equal')) {
     return `lift the children out of the parent's render: memoize them with useMemo, hoist static elements to module scope, or render them from a component that does not re-render`;
   }
+  if (isRefObject(change)) return `create the ref once with useRef (or createRef outside the render) and pass the same object every time`;
   switch (change.kind) {
     case 'function':
       return `wrap it in useCallback (or hoist it out of the parent's render)`;
@@ -74,6 +83,7 @@ function describe(change: Change): string {
   if (isChildren(change) && (change.kind === 'element' || change.kind === 'deep-equal')) {
     return `children are new React elements with the same types and props on every render of the parent`;
   }
+  if (isRefObject(change)) return `prop "ref" is a new ref object on every render (React re-attaches it each time)`;
   switch (change.kind) {
     case 'deep-equal':
       return `prop "${change.path}" is a new reference but deep-equal to the previous value`;
@@ -104,12 +114,25 @@ export function buildReport(input: BuildInput): RenderReport {
   else if (causes.length === 1) trigger = causes[0]!;
   else trigger = 'mixed';
 
-  const avoidable = trigger === 'parent';
+  const nothingChanged = input.propChanges.length === 0 && stateChanges.length === 0 && hookChanges.length === 0;
+  // A compiled component whose inputs are all identical hits its memo cache: React calls it, but it does no work.
+  const cacheHit = input.compiled === true && trigger === 'parent' && input.propChanges.length === 0;
+  const revealed = input.revealed === true && trigger === 'parent';
+  const avoidable = trigger === 'parent' && !cacheHit && !revealed;
   const reasons: string[] = [];
+  const memoFix = input.classComponent
+    ? `Make "${input.component}" extend PureComponent (or implement shouldComponentUpdate)`
+    : `Wrap "${input.component}" in React.memo (or extend PureComponent)`;
 
-  if (avoidable && input.propChanges.length === 0 && stateChanges.length === 0 && hookChanges.length === 0) {
+  if (cacheHit) {
+    reasons.push(`compiled by React Compiler: its output is memoized and the inputs did not change, so this render is cheap; nothing to fix.`);
+  } else if (revealed) {
+    reasons.push(
+      `re-rendered because the Suspense boundary above it switched from its fallback to content: React re-renders the content it kept hidden while the fallback was shown. A one-off; nothing to fix.`,
+    );
+  } else if (avoidable && nothingChanged) {
     const who = input.parent ? `<${input.parent.name}> re-rendered (${describeTrigger(input.parent.trigger)})` : 'its parent re-rendered';
-    reasons.push(`re-rendered with identical props because ${who}. Wrap "${input.component}" in React.memo (or extend PureComponent).`);
+    reasons.push(`re-rendered with identical props because ${who}. ${memoFix}.`);
   } else if (avoidable && input.parent) {
     reasons.push(`caused by <${input.parent.name}> re-rendering (${describeTrigger(input.parent.trigger)}).`);
   }
@@ -118,9 +141,9 @@ export function buildReport(input: BuildInput): RenderReport {
     reasons.push(fix ? `${describe(c)}: ${fix}.` : `${describe(c)}.`);
   }
   const memoized = input.memoized !== false;
-  if (avoidable && !memoized && input.propChanges.length > 0) {
+  if (avoidable && !memoized && !input.compiled && input.propChanges.length > 0) {
     reasons.push(
-      `"${input.component}" is not memoized, so fixing the props alone will not stop this re-render: also wrap it in React.memo (or extend PureComponent).`,
+      `"${input.component}" is not memoized, so fixing the props alone will not stop this re-render: also ${input.classComponent ? 'extend PureComponent (or implement shouldComponentUpdate)' : 'wrap it in React.memo (or extend PureComponent)'}.`,
     );
   }
   for (const c of stateChanges) {
@@ -135,6 +158,8 @@ export function buildReport(input: BuildInput): RenderReport {
           ? `: only ${c.changedKeys.map((k) => `"${k}"`).join(', ')} of ${c.totalKeys} keys changed, yet every consumer re-renders. Split the context or memoize the slices consumers read`
           : '';
       reasons.push(`${c.path} changed${where}${keys}.`);
+    } else if (c.hook === 'useDeferredValue' && isGenuine(c)) {
+      reasons.push(`${hookLabel(c)} caught up with its latest value: this is the deferred second render React schedules after the urgent one; nothing to fix.`);
     } else if (isGenuine(c)) reasons.push(`${hookLabel(c)} changed.`);
     else if (isStateHook(c))
       reasons.push(`${hookLabel(c)} was set to a value deep-equal to the current one (new reference, same contents): reuse the existing object or bail out before calling the setter.`);
@@ -166,6 +191,7 @@ export function buildReport(input: BuildInput): RenderReport {
     reasons,
     time: now(),
   };
+  if (input.compiled) report.compiled = true;
   if (input.selfDuration !== undefined) report.selfDuration = input.selfDuration;
   if (input.treeDuration !== undefined) report.treeDuration = input.treeDuration;
   if (input.commitPriority) report.commitPriority = input.commitPriority;

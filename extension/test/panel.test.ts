@@ -410,6 +410,16 @@ describe('devtools panel', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(configured).toEqual([{ trackAllComponents: true }]);
     expect(store.settings).toEqual({ trackAllMemoized: true, trackAllComponents: true });
+    // Help: a prefilled GitHub issue with versions and counts, nothing from the page
+    const link = drawer.querySelector('a.report-link') as HTMLAnchorElement;
+    expect(link.target).toBe('_blank');
+    const url = new URL(link.href);
+    expect(url.origin + url.pathname).toBe('https://github.com/NexaLeaf/rerender-lens/issues/new');
+    const issueBody = url.searchParams.get('body')!;
+    expect(issueBody).toContain('library 0.2.0 (protocol 2)');
+    expect(issueBody).toContain('options: {"trackAllMemoized":true}');
+    expect(issueBody).toMatch(/buffered: \d+ reports, \d+ avoidable/);
+    expect(url.searchParams.get('labels')).toBe('bug');
     const inject = opt('Inject the library');
     inject.checked = true;
     inject.dispatchEvent(new Event('change'));

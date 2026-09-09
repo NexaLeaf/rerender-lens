@@ -50,6 +50,8 @@ export interface Fiber {
   /** React 16 name for `flags`. */
   effectTag?: number;
   dependencies?: { firstContext: ContextDependency | null } | null;
+  /** Function components: effects, stores and (React 19, compiled components) the React Compiler memo cache. */
+  updateQueue?: { memoCache?: { data?: unknown[] } | null } | null;
   _debugOwner?: { type?: unknown; name?: string } | null;
   _debugHookTypes?: string[] | null;
   /** React <= 18 with the JSX dev transform. */
@@ -248,6 +250,16 @@ export function isMemoizedFiber(fiber: Fiber): boolean {
     return !!(inst && inst.isPureReactComponent);
   }
   return false;
+}
+
+/**
+ * True when React Compiler compiled the component: `useMemoCache` keeps its slots in
+ * `fiber.updateQueue.memoCache` (React 19), not in the hook list, so it never shows up in hook diffs.
+ */
+export function isCompiledFiber(fiber: Fiber): boolean {
+  if (fiber.tag === ClassComponent) return false;
+  const cache = fiber.updateQueue?.memoCache;
+  return !!cache && Array.isArray(cache.data);
 }
 
 /**
@@ -479,7 +491,9 @@ function diffHooks(fiber: Fiber, alt: Fiber): HookChange[] {
 
   let i = 0;
   while (a && b) {
-    if ((isStateNode(b) || isStoreNode(b)) && !Object.is(a.memoizedState, b.memoizedState)) {
+    // `useDeferredValue` nodes carry the plain value and no queue: only the dev labels tell them apart from useRef/useMemo.
+    const deferred = labels?.[i] === 'useDeferredValue';
+    if ((deferred || isStateNode(b) || isStoreNode(b)) && !Object.is(a.memoizedState, b.memoizedState)) {
       const hook = labels?.[i] ?? hookLabel(b);
       out.push({
         path: `${hook}#${i}`,
@@ -559,10 +573,36 @@ interface Analysis {
   trigger: RenderTrigger;
 }
 
+/** A `{ current }` ref object (`createRef`/`useRef`): React mutates `current` in the commit, so its contents say nothing about the prop. */
+const isRefObject = (v: unknown): v is { current: unknown } => {
+  if (typeof v !== 'object' || v === null) return false;
+  const keys = Object.keys(v);
+  return keys.length === 1 && keys[0] === 'current';
+};
+
+/**
+ * Shallow prop diff. `ref` (a prop in React 19, and in `memoizedProps` of forwardRef fibers) gets its own
+ * rule: two distinct ref objects count as `deep-equal` on `ref` whatever their `current` holds, because
+ * React re-attaches a new object on every render and the fix is a stable ref, not a memoized `.current`.
+ */
+function diffProps(prev: Record<string, unknown>, next: Record<string, unknown>): Change[] {
+  if (prev === next) return [];
+  const pr = prev.ref;
+  const nr = next.ref;
+  if (pr !== nr && isRefObject(pr) && isRefObject(nr)) {
+    const { ref: _p, ...restPrev } = prev;
+    const { ref: _n, ...restNext } = next;
+    void _p;
+    void _n;
+    return [{ path: 'ref', kind: 'deep-equal', prev: pr, next: nr }, ...diffRecords(restPrev, restNext)];
+  }
+  return diffRecords(prev, next);
+}
+
 function analyze(fiber: Fiber, alt: Fiber, trackHooks: boolean): Analysis {
   const prevProps = alt.memoizedProps ?? {};
   const nextProps = fiber.memoizedProps ?? {};
-  const propChanges = prevProps === nextProps ? [] : diffRecords(prevProps, nextProps);
+  const propChanges = diffProps(prevProps, nextProps);
   let stateChanges: Change[] = [];
   let hookChanges: HookChange[] = [];
   if (fiber.tag === ClassComponent) {
@@ -575,7 +615,7 @@ function analyze(fiber: Fiber, alt: Fiber, trackHooks: boolean): Analysis {
   } else if (trackHooks) {
     hookChanges = [...diffHooks(fiber, alt), ...diffContexts(fiber, alt)];
   }
-  const isStateHook = (h: HookChange): boolean => h.hook !== 'useContext' && h.hook !== 'useSyncExternalStore';
+  const isStateHook = (h: HookChange): boolean => h.hook !== 'useContext' && h.hook !== 'useSyncExternalStore' && h.hook !== 'useDeferredValue';
   const causes: RenderTrigger[] = [];
   if (propChanges.some(isGenuine)) causes.push('props');
   if (stateChanges.some(isGenuine) || hookChanges.some((h) => isStateHook(h) && isGenuine(h))) causes.push('state');
@@ -622,6 +662,28 @@ const EFFECT_LOOP_WINDOW_MS = 50;
 export const MAX_REPORTS_PER_COMMIT = 200;
 export const COMMIT_TIME_BUDGET_MS = 25;
 
+/** A fiber whose `useDeferredValue` (dev labels) holds a different value than in its previous render: React's catch-up render. */
+function isDeferredCatchUp(fiber: Fiber): boolean {
+  const types = fiber._debugHookTypes;
+  if (!types || !types.includes('useDeferredValue') || !fiber.alternate) return false;
+  const first = fiber.memoizedState;
+  if (!isHookList(first)) return false;
+  const labels = hookLabelsFor(fiber, first);
+  if (!labels) return false;
+  let a = fiber.alternate.memoizedState as HookNode | null;
+  let b: HookNode | null = first;
+  for (let i = 0; a && b; a = a.next, b = b.next, i++) {
+    if (labels[i] === 'useDeferredValue' && !Object.is(a.memoizedState, b.memoizedState)) return true;
+  }
+  return false;
+}
+
+/** True when one of `boundaries` is an ancestor of `fiber`. */
+function isUnder(fiber: Fiber, boundaries: Fiber[]): boolean {
+  for (let f = fiber.return; f && f.tag !== HostRoot; f = f.return) if (f.tag === SuspenseComponent && boundaries.includes(f)) return true;
+  return false;
+}
+
 /** Inspect one committed root. */
 export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void {
   const s = getState();
@@ -633,7 +695,8 @@ export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void
   const rendered: Fiber[] = [];
   const renderedNames = new Set<string>();
   let hot = false;
-  let suspenseResolved = false;
+  /** Suspense boundaries that switched from their fallback to content in this commit. */
+  let resolvedBoundaries: Fiber[] | null = null;
   const stack: Fiber[] = [root.current];
   while (stack.length) {
     const fiber = stack.pop()!;
@@ -644,7 +707,7 @@ export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void
       if (shouldTrack(fiberType(fiber), o)) rendered.push(fiber);
     }
     // A Suspense boundary whose memoizedState went from "showing fallback" (non-null) to content.
-    if (fiber.tag === SuspenseComponent && alt && alt.memoizedState !== null && fiber.memoizedState === null) suspenseResolved = true;
+    if (fiber.tag === SuspenseComponent && alt && alt.memoizedState !== null && fiber.memoizedState === null) (resolvedBoundaries ??= []).push(fiber);
     // A bailed-out subtree keeps the same child fiber objects; nothing below it rendered.
     if (!alt || fiber.child !== alt.child) {
       for (let c = fiber.child; c; c = c.sibling) stack.push(c);
@@ -661,11 +724,12 @@ export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void
   let afterCommit: number | undefined;
   // Discrete input (typing, dragging) also produces back-to-back commits from the same components; only
   // normal/low priority work right after a commit looks like an effect loop.
+  // The deferred second render of `useDeferredValue` also lands right after the urgent commit with the same updaters.
   const inputDriven = commitPriority === 'immediate' || commitPriority === 'user-blocking';
-  if (!inputDriven && lastCommit && at - lastCommit.at < EFFECT_LOOP_WINDOW_MS && updaters.some((u) => lastCommit!.rendered.has(u))) {
+  if (!inputDriven && lastCommit && at - lastCommit.at < EFFECT_LOOP_WINDOW_MS && updaters.some((u) => lastCommit!.rendered.has(u)) && !rendered.some(isDeferredCatchUp)) {
     commitCause = 'effect-after-commit';
     afterCommit = lastCommit.id;
-  } else if (suspenseResolved) commitCause = 'suspense-resolved';
+  } else if (resolvedBoundaries) commitCause = 'suspense-resolved';
   if (rendered.length === 0) {
     lastCommit = { id: s.nextCommitId, at, rendered: renderedNames };
     return;
@@ -720,6 +784,9 @@ export function onCommit(root: FiberRoot, commitPriority?: CommitPriority): void
       owner: ownerName(fiber),
       path: componentPath(fiber),
       memoized: isMemoizedFiber(fiber),
+      compiled: isCompiledFiber(fiber),
+      classComponent: fiber.tag === ClassComponent,
+      revealed: resolvedBoundaries !== null && a.trigger === 'parent' && isUnder(fiber, resolvedBoundaries),
       selfDuration: durations ? durations.self : undefined,
       treeDuration: durations ? durations.tree : undefined,
       commitId,
