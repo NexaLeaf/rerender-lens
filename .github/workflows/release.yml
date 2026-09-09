@@ -25,8 +25,12 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # A tag that does not match the package version produces artifacts named after the wrong
+          # release and skips npm; fail here instead, so the fix is "bump, retag" rather than a
+          # release that lies about what it contains. (v0.6.0 was tagged on a 0.5.0 commit.)
           if [ "${GITHUB_REF_NAME#v}" != "$VERSION" ]; then
-            echo "::warning::tag $GITHUB_REF_NAME does not match package.json version $VERSION (bump package.json before tagging)"
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $VERSION. Run npm version, push, delete this tag, and tag the new commit."
+            exit 1
           fi
           if npm view "rerender-lens@$VERSION" version >/dev/null 2>&1; then
             echo "::notice::rerender-lens@$VERSION is already on npm; skipping publish"

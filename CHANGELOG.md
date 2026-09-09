@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
+
+Highlights: verdicts pinned for modern React (Compiler output, `use()`, transitions, Suspense),
+a Jest integration, React 17 and 18 in CI, several apps on one relay, a commit timeline in the
+panel, a docs site that answers "how do I start", a relay that authenticates off loopback, and a
+panel that tells you why a component is not tracked. Details, newest first:
 
 - **The relay authenticates when it is not on loopback.** `npx rerender-lens panel --host 0.0.0.0`
   now generates a token, prints it inside the URL and refuses `/events`, `/message` and `/status`
