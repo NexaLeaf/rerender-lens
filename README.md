@@ -22,7 +22,7 @@ components and any bundler.
 | Any React app, no code changes | Install the [DevTools extension](#devtools-extension) | A **Re-renders** panel in DevTools |
 | A Vite app | `rerenderLens()` in `vite.config.ts` | Console output, the panel at `/__rerender-lens/`, no extension needed |
 | Next.js, Webpack, anything else | `import 'rerender-lens/setup'` + `npx rerender-lens panel` | The same panel in any browser tab |
-| Tests | `rerender-lens/vitest` or `rerender-lens/playwright` | Failing tests and CI budgets for avoidable re-renders |
+| Tests | `rerender-lens/vitest`, `rerender-lens/jest` or `rerender-lens/playwright` | Failing tests and CI budgets for avoidable re-renders |
 
 ## DevTools extension
 
@@ -110,6 +110,19 @@ test: {
 
 The reporter prints the run's ranked fixes and root causes, fails on budget violations, and can
 write a panel-compatible export. Custom options: `setupRerenderLens(options, { afterAll })`.
+
+**Jest**, the same two lines (`setupFilesAfterEnv`, not `setupFiles`: the hook needs `afterAll`):
+
+```js
+// jest.config.js
+module.exports = {
+  testEnvironment: 'jsdom',
+  setupFilesAfterEnv: ['rerender-lens/jest/setup'],
+  reporters: ['default', ['rerender-lens/jest', { budget: 'rerender-budget.json' }]],
+};
+```
+
+Same options and same output as the Vitest reporter; a budget violation fails the run.
 
 **Playwright**, real browser:
 
@@ -240,7 +253,17 @@ serialized with bounds (100 entries per container, depth 4, 20k nodes per report
 - Development only: everything runs inside React's commit callback. Production builds are
   detected and flagged (names may be minified).
 - Fiber fields have been stable since React 16.9; the walk is wrapped so a change in React logs
-  one warning instead of breaking the app. The suite runs on React 18 and 19 in CI.
+  one warning instead of breaking the app.
+
+The suite runs on React 19, 18 and 17 in CI. What each version gives you:
+
+| | React 19 | React 18 | React 17 |
+| --- | --- | --- | --- |
+| Props, state, parent attribution, avoidable verdicts, `memo` / `forwardRef` / classes | yes | yes | yes |
+| Context changes (`useContext`, provider attribution) | yes | yes | no: React only records the value a component read from a context from 18 on, so a context change looks like a plain parent re-render (the library says so once) |
+| `updaters` (who scheduled the commit) and effect-loop detection | yes | yes | no: React's updater tracking starts at 18 |
+| `useSyncExternalStore`, `useTransition`, `useDeferredValue`, `useId` | yes | yes | not in React 17 |
+| `use()`, `ref` as a prop, React Compiler output | yes | no | no |
 
 ## Examples
 

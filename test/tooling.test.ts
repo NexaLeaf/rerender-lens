@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { analyzeCommit, checkBudget, compareSummaries, createCollector, disable, formatComparison, formatFixes, formatRootCauses, groupByCommit, init, parseExport, rankFixes, rankRootCauses, rootCauseOf, rootCauseSummary, summarizeReports, toBudget, track } from '../src/index';
 import { main } from '../src/cli';
 import { h, mount } from './helpers';
+import { act } from './react-act';
 
 afterEach(() => disable());
 
@@ -16,7 +17,7 @@ function makeParent(child: (n: number) => React.ReactElement) {
     bump = () => setN((x) => x + 1);
     return child(n);
   }
-  return { Parent, rerender: () => React.act(bump) };
+  return { Parent, rerender: () => act(bump) };
 }
 
 /** Two rounds of the example app's bugs: an inline style object and an inline callback. */

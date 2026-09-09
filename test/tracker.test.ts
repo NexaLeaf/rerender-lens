@@ -3,6 +3,8 @@ import React from 'react';
 import { configure, disable, init, isEnabled, shouldTrack, track } from '../src/index';
 import { ensureDevtoolsHook, onCommit, type Fiber } from '../src/fiber';
 import { h, mount, setup } from './helpers';
+import { act } from './react-act';
+import { HAS_CONTEXT_VALUES, HAS_REACT18_HOOKS } from './react-version';
 
 afterEach(() => disable());
 
@@ -14,7 +16,7 @@ function makeParent(child: (n: number) => React.ReactElement) {
     bump = () => setN((x) => x + 1);
     return child(n);
   }
-  return { Parent, rerender: () => React.act(bump) };
+  return { Parent, rerender: () => act(bump) };
 }
 
 describe('init / disable', () => {
@@ -124,19 +126,19 @@ describe('function components', () => {
       return h('span', null, v.a);
     }, 'Child');
     const hn = mount(h(Child));
-    React.act(() => set({ a: 2 }));
+    act(() => set({ a: 2 }));
     expect(collector.reports).toHaveLength(1);
     expect(collector.reports[0]!.trigger).toBe('state');
     expect(collector.reports[0]!.avoidable).toBe(false);
     expect(collector.reports[0]!.hookChanges[0]).toMatchObject({ hook: 'useState', index: 0, kind: 'different' });
-    React.act(() => set({ a: 2 })); // new reference, same contents
+    act(() => set({ a: 2 })); // new reference, same contents
     expect(collector.reports).toHaveLength(2);
     expect(collector.reports[1]!.avoidable).toBe(true);
     expect(collector.reports[1]!.reasons[0]).toMatch(/deep-equal/);
     hn.unmount();
   });
 
-  it('labels useReducer and falls back to node inspection when hook types are ambiguous', () => {
+  it.skipIf(!HAS_REACT18_HOOKS)('labels useReducer and falls back to node inspection when hook types are ambiguous', () => {
     const { collector } = setup();
     let dispatch: (a: number) => void = () => {};
     const Child = track(() => {
@@ -146,14 +148,14 @@ describe('function components', () => {
       return h('span', null, v, String(pending));
     }, 'Child');
     const hn = mount(h(Child));
-    React.act(() => dispatch(1));
+    act(() => dispatch(1));
     const r = collector.reports[0]!;
     expect(r.trigger).toBe('state');
     expect(r.hookChanges[0]!.hook).toBe('useReducer');
     hn.unmount();
   });
 
-  it('reports useContext changes as "hooks"', () => {
+  it.skipIf(!HAS_CONTEXT_VALUES)('reports useContext changes as "hooks"', () => {
     const { collector } = setup();
     const Ctx = React.createContext(0);
     Ctx.displayName = 'Counter';
@@ -167,7 +169,7 @@ describe('function components', () => {
     hn.unmount();
   });
 
-  it('reports a memoized context consumer when only the context changes', () => {
+  it.skipIf(!HAS_CONTEXT_VALUES)('reports a memoized context consumer when only the context changes', () => {
     const { collector } = setup({ trackAllMemoized: true });
     const Ctx = React.createContext(0);
     const Child = React.memo(function Child() {
@@ -295,10 +297,10 @@ describe('class components', () => {
     }
     track(Child);
     const hn = mount(h(Child));
-    React.act(() => inst!.setState({ list: [1] }));
+    act(() => inst!.setState({ list: [1] }));
     expect(collector.reports[0]!.avoidable).toBe(true);
     expect(collector.reports[0]!.stateChanges[0]).toMatchObject({ path: 'list', kind: 'deep-equal' });
-    React.act(() => inst!.setState({ open: true }));
+    act(() => inst!.setState({ open: true }));
     expect(collector.reports[1]!.trigger).toBe('state');
     expect(collector.reports[1]!.avoidable).toBe(false);
     hn.unmount();

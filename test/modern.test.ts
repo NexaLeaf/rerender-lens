@@ -9,6 +9,8 @@ import * as compilerRuntime from 'react/compiler-runtime';
 import { createRoot } from 'react-dom/client';
 import { disable, init, createCollector, track } from '../src/index';
 import { h, mount, setup } from './helpers';
+import { act } from './react-act';
+import { HAS_REACT18_HOOKS, HAS_REACT19 } from './react-version';
 
 afterEach(() => disable());
 
@@ -22,16 +24,13 @@ function makeParent(child: (n: number) => React.ReactElement) {
     bump = () => setN((x) => x + 1);
     return child(n);
   }
-  return { Parent, rerender: () => React.act(bump) };
+  return { Parent, rerender: () => act(bump) };
 }
 
 /** React throttles revealing resolved Suspense content (FALLBACK_THROTTLE_MS = 300); wait it out. */
 const settleSuspense = () => new Promise((r) => setTimeout(r, 350));
 
-// React Compiler output, use() and ref-in-props exist from React 19 on; the React 18 CI run skips them.
-const REACT19 = Number(React.version.split('.')[0]) >= 19;
-
-describe.skipIf(!REACT19)('React Compiler output (useMemoCache)', () => {
+describe.skipIf(!HAS_REACT19)('React Compiler output (useMemoCache)', () => {
   /** Hand-written equivalent of what babel-plugin-react-compiler emits for `<div>{props.label}</div>`. */
   let bodyRuns = 0;
   let outputBuilt = 0;
@@ -105,7 +104,7 @@ describe.skipIf(!REACT19)('React Compiler output (useMemoCache)', () => {
   });
 });
 
-describe.skipIf(!REACT19)('use(promise) under Suspense', () => {
+describe.skipIf(!HAS_REACT19)('use(promise) under Suspense', () => {
   it('the resumed render and the boundary siblings are never avoidable', async () => {
     const collector = createCollector();
     init({ notifier: collector.notifier, silent: true, trackAllComponents: true });
@@ -134,9 +133,9 @@ describe.skipIf(!REACT19)('use(promise) under Suspense', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    await React.act(async () => root.render(h(Shell)));
+    await act(async () => root.render(h(Shell)));
     expect(container.innerHTML).toBe('<div><u>1</u><i>loading</i></div>');
-    await React.act(async () => {
+    await act(async () => {
       resolveFirst('first');
       await settleSuspense();
     });
@@ -144,7 +143,7 @@ describe.skipIf(!REACT19)('use(promise) under Suspense', () => {
     expect(collector.reports).toEqual([]);
 
     // Phase 2: a new promise suspends the boundary again: the fallback shows, the old content is hidden.
-    await React.act(async () => setPromise(second));
+    await act(async () => setPromise(second));
     expect(container.innerHTML).toContain('<i>loading</i>');
     const suspended = collector.reports;
     expect(suspended.map((r) => r.component)).toEqual(['Outside', 'Shell']);
@@ -153,7 +152,7 @@ describe.skipIf(!REACT19)('use(promise) under Suspense', () => {
     collector.clear();
 
     // Phase 3: the promise resolves and the boundary reveals its content again.
-    await React.act(async () => {
+    await act(async () => {
       resolveSecond('second');
       await settleSuspense();
     });
@@ -169,12 +168,12 @@ describe.skipIf(!REACT19)('use(promise) under Suspense', () => {
     const sib = resolved.find((r) => r.component === 'Sib')!;
     expect(sib).toMatchObject({ trigger: 'parent', avoidable: false, parent: null });
     expect(sib.reasons[0]).toMatch(/Suspense boundary above it switched from its fallback to content/);
-    React.act(() => root.unmount());
+    act(() => root.unmount());
     container.remove();
   });
 });
 
-describe('startTransition', () => {
+describe.skipIf(!HAS_REACT18_HOOKS)('startTransition', () => {
   it('the memo child with equal props does not render; the parent is a normal-priority state render', async () => {
     const collector = createCollector();
     init({ notifier: collector.notifier, silent: true, trackAllComponents: true });
@@ -190,7 +189,7 @@ describe('startTransition', () => {
       return h('div', null, n, h(Child, { n: 1 }));
     }
     const hn = mount(h(Parent));
-    await React.act(async () => bump());
+    await act(async () => bump());
     expect(childRenders).toBe(1);
     expect(collector.reports.map((r) => r.component)).toEqual(['Parent']);
     const r = collector.reports[0]!;
@@ -200,7 +199,7 @@ describe('startTransition', () => {
   });
 });
 
-describe('Suspense fallback → content (React.lazy)', () => {
+describe.skipIf(!HAS_REACT18_HOOKS)('Suspense fallback → content (React.lazy)', () => {
   it('siblings inside the boundary are re-rendered by the reveal, not flagged; siblings outside keep the usual verdict', async () => {
     const collector = createCollector();
     init({ notifier: collector.notifier, silent: true, trackAllComponents: true });
@@ -219,10 +218,10 @@ describe('Suspense fallback → content (React.lazy)', () => {
       return h('div', null, h(Outside, { n: 1 }), h(React.Suspense, { fallback: h('i', null, 'loading') }, on ? h(Lazy) : null, h(Inside, { n: 1 })));
     }
     const hn = mount(h(Shell));
-    await React.act(async () => show(true));
+    await act(async () => show(true));
     expect(hn.container.innerHTML).toContain('<i>loading</i>');
     collector.clear();
-    await React.act(async () => {
+    await act(async () => {
       resolve({ default: () => h('em', null, 'done') });
       await settleSuspense();
     });
@@ -237,7 +236,7 @@ describe('Suspense fallback → content (React.lazy)', () => {
   });
 });
 
-describe('useSyncExternalStore with a selector', () => {
+describe.skipIf(!HAS_REACT18_HOOKS)('useSyncExternalStore with a selector', () => {
   function makeStore() {
     let state = { a: 1, b: 1 };
     const listeners = new Set<() => void>();
@@ -272,7 +271,7 @@ describe('useSyncExternalStore with a selector', () => {
       return h('b', null, v.a);
     }
     const hn = mount(h(Obj));
-    React.act(() => store.set({ a: 1, b: 2 })); // an unrelated slice changed
+    act(() => store.set({ a: 1, b: 2 })); // an unrelated slice changed
     expect(collector.reports).toHaveLength(1);
     const r = collector.reports[0]!;
     expect(r).toMatchObject({ component: 'Obj', trigger: 'parent', avoidable: true, parent: null });
@@ -291,7 +290,7 @@ describe('useSyncExternalStore with a selector', () => {
       return h('b', null, v.a);
     }
     const hn = mount(h(Obj));
-    React.act(() => store.set({ a: 1, b: 2 }));
+    act(() => store.set({ a: 1, b: 2 }));
     const r = collector.reports.find((x) => x.component === 'Obj')!;
     expect(r.avoidable).toBe(true);
     expect(r.hookChanges[0]!.custom).toEqual(['useAppSelector']);
@@ -309,10 +308,10 @@ describe('useSyncExternalStore with a selector', () => {
       return h('i', null, useAppSelector(store, (s) => s.a));
     }
     const hn = mount(h(Prim));
-    React.act(() => store.set({ a: 1, b: 2 }));
+    act(() => store.set({ a: 1, b: 2 }));
     expect(renders).toBe(1);
     expect(collector.reports).toHaveLength(0);
-    React.act(() => store.set({ a: 2, b: 2 }));
+    act(() => store.set({ a: 2, b: 2 }));
     expect(collector.reports).toHaveLength(1);
     expect(collector.reports[0]).toMatchObject({ trigger: 'hooks', avoidable: false });
     expect(collector.reports[0]!.hookChanges[0]).toMatchObject({ hook: 'useSyncExternalStore', kind: 'different', prev: 1, next: 2 });
@@ -363,7 +362,7 @@ describe('render props on a memo component', () => {
   });
 });
 
-describe.skipIf(!REACT19)('forwardRef + memo and the ref prop (React 19 keeps ref in props)', () => {
+describe.skipIf(!HAS_REACT19)('forwardRef + memo and the ref prop (React 19 keeps ref in props)', () => {
   const Inner = React.forwardRef<HTMLSpanElement, { n: number }>((p, ref) => h('span', { ref }, p.n));
   Inner.displayName = 'Inner';
   const Field = React.memo(Inner);
@@ -466,7 +465,7 @@ describe('class components', () => {
   });
 });
 
-describe('useDeferredValue and useId', () => {
+describe.skipIf(!HAS_REACT18_HOOKS)('useDeferredValue and useId', () => {
   function Child(p: { q: string }) {
     const deferred = React.useDeferredValue(p.q);
     const id = React.useId();
@@ -489,7 +488,7 @@ describe('useDeferredValue and useId', () => {
     const { collector } = setup({ trackAllComponents: true, exclude: ['Search'] });
     const { Search, tick } = makeSearch();
     const hn = mount(h(Search));
-    React.act(tick);
+    act(tick);
     expect(collector.reports).toHaveLength(1);
     expect(collector.reports[0]).toMatchObject({ component: 'Child', trigger: 'parent', avoidable: true, hookChanges: [], hookState: [] });
     hn.unmount();
@@ -499,7 +498,7 @@ describe('useDeferredValue and useId', () => {
     const { collector } = setup({ trackAllComponents: true, exclude: ['Search'] });
     const { Search, setQuery } = makeSearch();
     const hn = mount(h(Search));
-    await React.act(async () => setQuery('b'));
+    await act(async () => setQuery('b'));
     expect(hn.container.textContent).toBe('b');
     expect(collector.reports).toHaveLength(2);
     const [urgent, deferred] = collector.reports;

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import React from 'react';
 import { createCollector, disable, useWhyRerender } from '../src/index';
 import { h, mount, silentConsole } from './helpers';
+import { act } from './react-act';
 
 afterEach(() => disable());
 
@@ -22,12 +23,12 @@ describe('useWhyRerender', () => {
     }
     const hn = mount(h(Parent));
     expect(collector.reports).toHaveLength(0);
-    React.act(bump);
+    act(bump);
     expect(collector.reports).toHaveLength(1);
     expect(collector.reports[0]!.avoidable).toBe(true);
     expect(collector.reports[0]!.propChanges[0]).toMatchObject({ path: 'style', kind: 'deep-equal' });
     expect(con.calls[0]).toMatch(/<Row> avoidable/);
-    React.act(bump);
+    act(bump);
     expect(collector.reports[1]!.trigger).toBe('props');
     hn.unmount();
   });
@@ -46,8 +47,8 @@ describe('useWhyRerender', () => {
       return h(Row, { n: 1 });
     }
     const hn = mount(h(React.StrictMode, null, h(Parent)));
-    React.act(bump);
-    React.act(bump);
+    act(bump);
+    act(bump);
     expect(collector.reports).toHaveLength(2);
     expect(collector.reports.map((r) => r.renderCount)).toEqual([1, 2]);
     hn.unmount();

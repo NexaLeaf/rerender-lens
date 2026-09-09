@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Jest.** `rerender-lens/jest` and `rerender-lens/jest/setup`: the same deal as the Vitest
+  integration — one `setupFilesAfterEnv` line collects every avoidable re-render, and the reporter
+  (`reporters: [['rerender-lens/jest', { budget }]]`) prints the run's ranked fixes and root causes,
+  writes a panel-compatible export and fails the run on a budget violation. The runner-agnostic half
+  (the JSONL hand-off between workers and the reporter, the per-file setup, the finish logic) moved
+  to `src/runner-report.ts`, so Vitest and Jest share one implementation. A real Jest run in
+  `test/jest/` (jsdom, babel-jest, the package resolved by name) is its own CI job: it asserts the
+  reporter exits non-zero with a budget of zero and exits 0 with a budget that fits.
+
+- **React 17 in CI, and the peer range is now honest.** `npm run test:react17` runs the unit suite
+  against React 17 alongside `test:react18`, so `react >= 16.8` is a tested claim rather than an
+  assumption. The harness became version-agnostic (`act` from `react` or `react-dom/test-utils`, a
+  shim for the root API React 17 does not have). What React 17 cannot give you is now documented in
+  the README's compatibility table and said once at runtime: React only records the value a
+  component read from a context from 18 on, so on 17 a context change is reported as a plain parent
+  re-render; updaters and effect-loop detection need React 18's updater tracking.
 - **Report a problem** in the panel's Settings drawer: opens a GitHub issue prefilled with the
   extension and library versions, React version, options, overhead, the truncation count and the
   buffer totals, and nothing from the page. `extension/store/QA.md` gains the scale, relay and

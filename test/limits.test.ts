@@ -6,6 +6,7 @@ import { MAX_REPORTS_PER_COMMIT } from '../src/fiber';
 import { createCollector, disable, init, track } from '../src/index';
 import { getState } from '../src/state';
 import { h, mount } from './helpers';
+import { act } from './react-act';
 
 afterEach(() => {
   disable();
@@ -78,7 +79,7 @@ describe('bounded work per commit', () => {
       return h('div', null, ...Array.from({ length: MAX_REPORTS_PER_COMMIT + 50 }, (_, i) => h(Row, { key: i, i })));
     }
     const hn = mount(h(List));
-    React.act(bump);
+    act(bump);
     hn.unmount();
     const rows = collector.reports.filter((r) => r.component === 'Row');
     expect(rows.length).toBeLessThanOrEqual(MAX_REPORTS_PER_COMMIT);
@@ -102,13 +103,13 @@ describe('bounded work per commit', () => {
       return h(Child, { n: 1 });
     }
     const hn = mount(h(Parent));
-    React.act(bump);
+    act(bump);
     await vi.waitFor(() => expect(posted.some((m) => m.type === 'hello')).toBe(true));
     expect(posted.filter((m) => m.type === 'report')).toHaveLength(0); // nobody listens yet
     window.postMessage({ __rerenderLensReady: true }, '*');
     await vi.waitFor(() => expect(posted.some((m) => (m as { __rerenderLensReady?: boolean }).__rerenderLensReady || m.type === 'hello')).toBe(true));
     await new Promise((r) => setTimeout(r, 10));
-    React.act(bump);
+    act(bump);
     await vi.waitFor(() => expect(posted.filter((m) => m.type === 'report')).toHaveLength(1));
     hn.unmount();
     window.removeEventListener('message', onMessage);

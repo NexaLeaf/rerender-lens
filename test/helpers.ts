@@ -1,7 +1,9 @@
 import React from 'react';
-import { act } from 'react';
-import { createRoot, type Root } from 'react-dom/client';
+import { createRoot } from 'react-dom/client';
+import { act } from './react-act';
 import { createCollector, disable, init, type Options } from '../src/index';
+
+type Root = ReturnType<typeof createRoot>;
 
 export interface Harness {
   root: Root;

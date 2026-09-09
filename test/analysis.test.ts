@@ -3,6 +3,8 @@ import React from 'react';
 import { createCollector, customHooksFromStack, disable, init, storeAdvice, track } from '../src/index';
 import { getDispatcherRef } from '../src/fiber';
 import { h, mount } from './helpers';
+import { act } from './react-act';
+import { HAS_UPDATERS } from './react-version';
 
 afterEach(() => disable());
 
@@ -13,7 +15,7 @@ function makeParent(child: (n: number) => React.ReactElement) {
     bump = () => setN((x) => x + 1);
     return child(n);
   }
-  return { Parent, rerender: () => React.act(bump) };
+  return { Parent, rerender: () => act(bump) };
 }
 
 describe('custom hook names (resolveHookNames)', () => {
@@ -48,7 +50,7 @@ describe('custom hook names (resolveHookNames)', () => {
     }, 'Cart');
     const hn = mount(h(Cart, { label: 'x' }));
     const before = renders;
-    React.act(() => inc());
+    act(() => inc());
     expect(getDispatcherRef()).not.toBeNull();
     const r = collector.reports.find((x) => x.component === 'Cart')!;
     const change = r.hookChanges.find((c) => c.hook === 'useState')!;
@@ -62,7 +64,7 @@ describe('custom hook names (resolveHookNames)', () => {
     ]);
     // the replay is cached per component type: exactly one extra render for the first report
     expect(renders).toBe(before + 1 + 1);
-    React.act(() => inc());
+    act(() => inc());
     expect(renders).toBe(before + 2 + 1);
     hn.unmount();
 
@@ -78,7 +80,7 @@ describe('custom hook names (resolveHookNames)', () => {
     }, 'Plain');
     const hn2 = mount(h(Plain));
     const b2 = renders;
-    React.act(() => inc());
+    act(() => inc());
     expect(renders).toBe(b2 + 1);
     expect(c2.reports[0]!.hookChanges[0]!.custom).toBeUndefined();
     hn2.unmount();
@@ -99,14 +101,14 @@ describe('custom hook names (resolveHookNames)', () => {
     }, 'Odd');
     const hn = mount(h(Odd));
     first = false;
-    expect(() => React.act(() => set(1))).toThrow();
+    expect(() => act(() => set(1))).toThrow();
     hn.unmount();
     expect(collector.reports.length).toBeGreaterThanOrEqual(0);
   });
 });
 
 describe('updaters, effect loops, suspense and keys', () => {
-  it('names the component that scheduled the commit and reports element keys', () => {
+  it.skipIf(!HAS_UPDATERS)('names the component that scheduled the commit and reports element keys', () => {
     const collector = createCollector();
     init({ notifier: collector.notifier, silent: true });
     const Row = track((p: { n: number }) => h('span', null, p.n), 'Row');
@@ -119,7 +121,7 @@ describe('updaters, effect loops, suspense and keys', () => {
     hn.unmount();
   });
 
-  it('flags a commit scheduled by an effect right after the previous commit as an effect loop', () => {
+  it.skipIf(!HAS_UPDATERS)('flags a commit scheduled by an effect right after the previous commit as an effect loop', () => {
     const collector = createCollector();
     init({ notifier: collector.notifier, silent: true });
     const Child = track((p: { n: number; m: number }) => h('span', null, p.n + p.m), 'Child');
@@ -134,7 +136,7 @@ describe('updaters, effect loops, suspense and keys', () => {
       return h(Child, { n, m });
     }
     const hn = mount(h(Loop));
-    React.act(() => setN(1));
+    act(() => setN(1));
     const reports = collector.reports.filter((r) => r.component === 'Child');
     expect(reports.length).toBe(2);
     expect(reports[0]!.commitCause).toBeUndefined();
@@ -154,11 +156,11 @@ describe('updaters, effect loops, suspense and keys', () => {
       return h(React.Suspense, { fallback: h('i', null, 'loading') }, h(Lazy), h('b', null, 'x'));
     }
     const hn = mount(h(Shell));
-    await React.act(async () => {
+    await act(async () => {
       resolve({ default: () => h('em', null, 'done') });
       await Promise.resolve();
     });
-    await React.act(async () => {});
+    await act(async () => {});
     const resolved = collector.reports.find((r) => r.commitCause === 'suspense-resolved');
     // React may commit the resolution without re-rendering a tracked component; when it does, it is labelled.
     if (resolved) expect(resolved.reasons.some((x) => /Suspense boundary resolved/.test(x))).toBe(true);

@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RenderReport } from '../src/types';
 import { h, mount } from './helpers';
+import { act } from './react-act';
 
 const vendor = join(__dirname, '..', 'extension', 'vendor');
 const PARTS = ['rerender-lens.core.js', 'rerender-lens.engine.js', 'rerender-lens.js'];
@@ -52,7 +53,7 @@ describe.skipIf(!built)('vendor scripts (extension/vendor, built by scripts/buil
       return h(Child, { style: { n } });
     }
     const hn = mount(h(Parent));
-    React.act(bump);
+    act(bump);
     hn.unmount();
     expect(seen.map((r) => r.component)).toEqual(['Child']);
     expect(seen[0]!.propChanges[0]!.path).toMatch(/^style/);

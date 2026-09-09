@@ -5,6 +5,7 @@ import { createRelayServer, findPanelDir, type RelayServer } from '../src/relay'
 import { main } from '../src/cli';
 import { FetchEventSource } from './sse';
 import { h, mount } from './helpers';
+import { act } from './react-act';
 
 let relay: RelayServer | null = null;
 afterEach(async () => {
@@ -20,7 +21,7 @@ function makeParent(child: (n: number) => React.ReactElement) {
     bump = () => setN((x) => x + 1);
     return child(n);
   }
-  return { Parent, rerender: () => React.act(bump) };
+  return { Parent, rerender: () => act(bump) };
 }
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));

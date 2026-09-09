@@ -19,6 +19,8 @@ import {
 } from '../src/index';
 import { durationsOf, ensureDevtoolsHook, parseStackLocation, priorityLabel, sourceOf, type Fiber } from '../src/fiber';
 import { h, mount } from './helpers';
+import { act } from './react-act';
+import { HAS_CONTEXT_VALUES } from './react-version';
 
 afterEach(() => {
   disable();
@@ -32,7 +34,7 @@ function makeParent(child: (n: number) => React.ReactElement) {
     bump = () => setN((x) => x + 1);
     return child(n);
   }
-  return { Parent, rerender: () => React.act(bump) };
+  return { Parent, rerender: () => act(bump) };
 }
 
 describe('commit ids and source', () => {
@@ -151,7 +153,7 @@ describe('memoized flag and timing', () => {
 });
 
 describe('state snapshots', () => {
-  it('puts every state hook, context and class state on the report, and includeState:false turns it off', () => {
+  it.skipIf(!HAS_CONTEXT_VALUES)('puts every state hook, context and class state on the report, and includeState:false turns it off', () => {
     const collector = createCollector();
     init({ notifier: collector.notifier, silent: true });
     const Theme = React.createContext('light');
@@ -196,7 +198,7 @@ describe('state snapshots', () => {
 });
 
 describe('context providers, children and commit priority', () => {
-  it('attributes a context change to the component rendering its Provider and lists the changed keys', () => {
+  it.skipIf(!HAS_CONTEXT_VALUES)('attributes a context change to the component rendering its Provider and lists the changed keys', () => {
     const collector = createCollector();
     init({ notifier: collector.notifier, silent: true });
     const Theme = React.createContext<{ mode: string; user: string }>({ mode: 'light', user: 'a' });
@@ -216,7 +218,7 @@ describe('context providers, children and commit priority', () => {
       return h(Theme.Provider, { value: { mode, user: 'a' } }, h(Shell, null, h(Consumer)));
     }
     const hn = mount(h(Root));
-    React.act(() => setMode('dark'));
+    act(() => setMode('dark'));
     const r = collector.reports.find((x) => x.component === 'Consumer')!;
     const ctx = r.hookChanges.find((c) => c.hook === 'useContext')!;
     expect(ctx.provider).toEqual({ component: 'Root', path: ['Root'] });

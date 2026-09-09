@@ -34,8 +34,8 @@ jobs:
         with:
           name: extension
           path: dist-extension/*.zip
-  react18:
-    # The README says "tested with React 18 and 19"; the default suite runs on 19.
+  react-compat:
+    # The default suite runs on React 19; the peer range claims 16.8+, so 18 and 17 run too.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +45,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:react18
+      - run: npm run test:react17
   e2e:
     runs-on: ubuntu-latest
     steps:
@@ -82,3 +83,16 @@ jobs:
         with:
           name: playwright-report-next
           path: playwright-report
+  jest:
+    # `rerender-lens/jest` against a real Jest run (test/jest/), so the integration cannot rot.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Jest app + `rerender-lens/jest/setup` + the reporter's budget (exit 1, then exit 0)
+        run: npm run test:jest

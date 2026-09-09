@@ -532,6 +532,12 @@ function diffContexts(fiber: Fiber, alt: Fiber): HookChange[] {
   let a = alt.dependencies?.firstContext ?? null;
   let b = fiber.dependencies?.firstContext ?? null;
   let i = 0;
+  // React records the value a component read from a context on the dependency only from 18 on.
+  // Before that there is nothing to compare with, and a context change looks like a parent render.
+  if (b && !('memoizedValue' in b)) {
+    warnOnce('contextValues', 'this React does not record context values on the fiber (React < 18): context changes are reported as plain parent re-renders.');
+    return out;
+  }
   while (a && b) {
     if (a.context === b.context && !Object.is(a.memoizedValue, b.memoizedValue)) {
       const name = b.context.displayName ?? 'Context';

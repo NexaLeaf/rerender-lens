@@ -14,11 +14,13 @@ import { resolve } from 'node:path';
 const dir = resolve(process.env.REACT_COMPAT_DIR || '.react18/node_modules');
 if (!existsSync(resolve(dir, 'react/package.json'))) throw new Error(`REACT_COMPAT_DIR: no react in ${dir} (npm i --prefix .react18 react@18 react-dom@18)`);
 const r = (p: string): string => resolve(dir, p);
+// React 17 has no root API; the harness gets a shim with createRoot on top of ReactDOM.render.
+const client = existsSync(r('react-dom/client.js')) ? r('react-dom/client.js') : resolve('test/react17-client-shim.ts');
 
 export default defineConfig({
   resolve: {
     alias: [
-      { find: /^react-dom\/client$/, replacement: r('react-dom/client.js') },
+      { find: /^react-dom\/client$/, replacement: client },
       { find: /^react-dom\/test-utils$/, replacement: r('react-dom/test-utils.js') },
       { find: /^react-dom$/, replacement: r('react-dom/index.js') },
       { find: /^react\/jsx-runtime$/, replacement: r('react/jsx-runtime.js') },

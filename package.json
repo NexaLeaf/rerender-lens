@@ -19,7 +19,9 @@
     "./dist/setup.js",
     "./dist/setup.cjs",
     "./dist/vitest-setup.js",
-    "./dist/vitest-setup.cjs"
+    "./dist/vitest-setup.cjs",
+    "./dist/jest-setup.js",
+    "./dist/jest-setup.cjs"
   ],
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -85,6 +87,26 @@
         "default": "./dist/vitest-setup.cjs"
       }
     },
+    "./jest": {
+      "import": {
+        "types": "./dist/jest.d.ts",
+        "default": "./dist/jest.js"
+      },
+      "require": {
+        "types": "./dist/jest.d.cts",
+        "default": "./dist/jest.cjs"
+      }
+    },
+    "./jest/setup": {
+      "import": {
+        "types": "./dist/jest-setup.d.ts",
+        "default": "./dist/jest-setup.js"
+      },
+      "require": {
+        "types": "./dist/jest-setup.d.cts",
+        "default": "./dist/jest-setup.cjs"
+      }
+    },
     "./setup": {
       "import": {
         "types": "./dist/setup.d.ts",
@@ -124,8 +146,10 @@
     "dev:example": "npm run build && npm --prefix examples/vite-react run dev",
     "test:built": "vitest run test/vendor.test.ts",
     "e2e:next": "playwright test -c e2e/next.config.ts",
+    "test:jest": "node scripts/jest-check.mjs",
     "test:react18": "npm install --prefix .react18 --no-save --no-package-lock --no-audit --no-fund react@18 react-dom@18 && vitest run --config test/react-compat.config.ts",
-    "store:media": "node scripts/store-media.mjs"
+    "store:media": "node scripts/store-media.mjs",
+    "test:react17": "npm install --prefix .react17 --no-save --no-package-lock --no-audit --no-fund react@17 react-dom@17 && REACT_COMPAT_DIR=.react17/node_modules vitest run --config test/react-compat.config.ts"
   },
   "peerDependencies": {
     "react": ">=16.8.0",
@@ -133,11 +157,19 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
+    "@babel/core": "^8.0.1",
+    "@babel/preset-env": "^8.0.2",
+    "@babel/preset-react": "^8.0.1",
+    "@babel/preset-typescript": "^8.0.1",
+    "@jest/globals": "^30.5.1",
     "@playwright/test": "^1.63.0",
     "@types/chrome": "^0.2.9",
     "@types/node": "^26.4.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
+    "babel-jest": "^30.5.1",
+    "jest": "^30.5.1",
+    "jest-environment-jsdom": "^30.5.1",
     "jsdom": "^29.1.1",
     "marked": "^9.1.6",
     "publint": "^0.3.24",

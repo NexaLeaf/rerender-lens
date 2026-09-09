@@ -6,7 +6,7 @@ const define = { __RERENDER_LENS_VERSION__: JSON.stringify(version) };
 
 export default defineConfig([
   {
-    entry: { index: 'src/index.ts', vite: 'src/vite.ts', setup: 'src/setup.ts', cli: 'src/cli.ts', relay: 'src/relay.ts', playwright: 'src/playwright.ts', vitest: 'src/vitest.ts', 'vitest-setup': 'src/vitest-setup.ts' },
+    entry: { index: 'src/index.ts', vite: 'src/vite.ts', setup: 'src/setup.ts', cli: 'src/cli.ts', relay: 'src/relay.ts', playwright: 'src/playwright.ts', vitest: 'src/vitest.ts', 'vitest-setup': 'src/vitest-setup.ts', jest: 'src/jest.ts', 'jest-setup': 'src/jest-setup.ts' },
     format: ['esm', 'cjs'],
     dts: true,
     sourcemap: true,

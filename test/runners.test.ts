@@ -7,6 +7,7 @@ import { disable, track } from '../src/index';
 import { installScript, installRerenderLens, pullReports, clearReports, expectWithinBudget, type PageLike } from '../src/playwright';
 import RerenderLensReporter, { OUT_ENV, readRun, setupRerenderLens } from '../src/vitest';
 import { h, mount } from './helpers';
+import { act } from './react-act';
 
 afterEach(() => {
   disable();
@@ -21,7 +22,7 @@ function makeParent(child: (n: number) => React.ReactElement) {
     bump = () => setN((x) => x + 1);
     return child(n);
   }
-  return { Parent, rerender: () => React.act(bump) };
+  return { Parent, rerender: () => act(bump) };
 }
 
 describe('rerender-lens/playwright', () => {

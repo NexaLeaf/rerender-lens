@@ -13,7 +13,15 @@
     "isolatedModules": true,
     "declaration": true,
     "noEmit": true,
-    "types": ["node", "chrome"]
+    "types": ["node", "chrome"],
+    // `test/jest/` imports the package by name (as a consumer does; Jest resolves it through the
+    // exports map at runtime). Point the types at the sources so `npm run typecheck` works before
+    // `npm run build` has written dist/.
+    "paths": {
+      "rerender-lens": ["./src/index.ts"],
+      "rerender-lens/jest": ["./src/jest.ts"],
+      "rerender-lens/jest/setup": ["./src/jest-setup.ts"]
+    }
   },
   "include": ["src", "test", "extension/src", "extension/test", "e2e", "tsup.config.ts", "vitest.config.ts"]
 }
